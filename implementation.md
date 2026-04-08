@@ -24,13 +24,19 @@ Goal: A working wrapper that gates a simple Rust binary behind a wallet signatur
 
 ### 1.4 — Wallet connection + activation
 - Embed a minimal webview (via `wry` crate — same engine Tauri uses) for WalletConnect
-- On activation: query `ownerOf(tokenId)` via JSON-RPC to Base
+- Activation UI includes an optional "Deliver license to" field (address or ENS name)
+  - Resolved via `alloy` ENS resolution before the transaction is submitted
+  - If blank, recipient defaults to the connected (paying) wallet
+- On purchase: call `purchase(recipient)` with the resolved address
+- On activation: connect the *recipient* wallet (not necessarily the paying wallet), query `ownerOf(tokenId)`, request signature
 - Request wallet signature over `H(app_id || tokenId || machine_id)`
-- Store license proof to `~/.deotp/licenses/<app_id>.json`
+- Store license proof to `~/.deotp/licenses/<app_id>.json` with `paid_by` recorded if it differs from the signing wallet
 - Use `alloy` crate for Ethereum RPC, ABI encoding, and ENS resolution
 
 ### 1.5 — Smart contract
-- Standard ERC-721 with payable `mint()` function
+- Standard ERC-721 with payable `purchase(address recipient)` function
+  - If `recipient == address(0)`, mint to `msg.sender`
+  - Otherwise mint to `recipient` — decouples payment wallet from license wallet
 - Add `bytes32 wrapperHash` for binary verification
 - Use OpenZeppelin contracts, deploy to Base Sepolia (testnet) for development
 - Foundry project for contract development/testing

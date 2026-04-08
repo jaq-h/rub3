@@ -41,11 +41,13 @@ Solana was evaluated and rejected: no ENS equivalent, heavy Rust SDK (~150 deps)
 
 ### 1. Smart Contract (existing infrastructure)
 
-Standard ERC-721 with a payable `purchase()` function. No custom logic needed beyond:
+Standard ERC-721 with a payable `purchase(address recipient)` function. No custom logic needed beyond:
 - Price per license
 - Optional supply cap
-- Mint to `msg.sender`
+- Mint to `recipient` (defaults to `msg.sender` if zero address is passed)
 - `bytes32 wrapperHash` — SHA-256 of the distributed binary, set by the developer. Users can verify their download before running.
+
+The `recipient` parameter decouples payment from delivery: the buyer pays with their funding wallet but the NFT lands in any address they specify — a fresh wallet, a colleague's wallet, or a gift recipient.
 
 OpenZeppelin's ERC-721 template covers this. The contract is deployed once per application on Base.
 
@@ -192,9 +194,17 @@ contract DeotpRegistry {
 │                                            │
 │  Price: 0.01 ETH (one-time)               │
 │                                            │
+│  Deliver license to:                       │
+│  ┌──────────────────────────────────────┐  │
+│  │ 0x... or ENS name  (leave blank for  │  │
+│  │ paying wallet)                       │  │
+│  └──────────────────────────────────────┘  │
+│                                            │
 │  [Connect Wallet]                          │
 └────────────────────────────────────────────┘
 ```
+
+If a recipient address is provided, the wrapper stores it in the license proof and uses it for the `ownerOf()` check at activation. The paying wallet never needs to reconnect after purchase.
 
 ### What ENS prevents
 
@@ -288,6 +298,7 @@ Subsequent Launches (offline):
   "app_id": "com.example.myapp",
   "token_id": 42,
   "wallet_address": "0xabc...123",
+  "paid_by": "0xdef...456",
   "machine_id": "sha256:...",
   "signature": "0x...",
   "activated_at": "2026-04-07T12:00:00Z",
@@ -295,6 +306,8 @@ Subsequent Launches (offline):
   "contract": "0x1234...abcd"
 }
 ```
+
+`wallet_address` is the address that owns the NFT and signed the activation message. `paid_by` records the funding wallet only when it differs from `wallet_address`; omitted otherwise.
 
 ## Machine ID Derivation
 
