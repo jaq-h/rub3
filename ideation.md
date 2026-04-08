@@ -41,9 +41,15 @@ The wrapper is the entire product. Without it, an NFT receipt has no enforcement
 - The wrapper does not interfere with the app's system file access but can pause compute and kill the app
 - Binary encryption is explicitly a non-goal — the wrapper enforces license checks, not cryptographic DRM. This matches how most commercial software works (the effort to crack exceeds the cost to buy).
 
+## Key Decisions
+
+- **Chain: Base (Ethereum L2).** Coinbase on-ramp means users can fund their wallet without bridging. EVM compatibility gives us ENS, ERC-721, and the `alloy` Rust crate. Solana was considered but ENS doesn't exist there, the Rust SDK is heavy (~150 deps vs ~30), and the cost/speed difference is negligible for one-time purchases. Chain config is abstracted so Arbitrum or others can be added later.
+- **ENS trust layer.** Developers register an ENS name (their own or a `deotp.eth` subdomain) pointing to their license contract. The wrapper resolves ENS at activation and verifies it matches the embedded contract address. This prevents payment redirection attacks from compromised wrapper binaries.
+- **Wallet-as-license.** No key service, no MPC, no backend. The user's wallet signature IS the license proof. The wrapper never holds private keys — it communicates with the wallet via WalletConnect. A compromised wrapper cannot steal NFTs because that requires an on-chain transaction the user must approve.
+- **On-chain binary hash.** The license contract stores `bytes32 wrapperHash` (SHA-256 of the distributed binary). Users can verify the download before running. Trust chain: ENS → contract → binary hash → running wrapper.
+
 ## Open Questions
 
-- **Which chain?** Solana (low fees, fast finality) vs L2 like Base/Arbitrum (EVM compatibility, low cost). Ethereum mainnet is too expensive for small purchases.
 - **Machine ID stability** — how to derive a machine fingerprint that's stable across reboots but unique per machine, cross-platform
 - **NFT transfer = license transfer?** If the NFT is sold, the old activation signature is still valid on the old machine. Options: expiring activations that require periodic re-check, or accept that transfers need re-activation.
 - **Wallet connection from native Rust** — no browser available. Options: small webview for wallet flow, WalletConnect QR code, or direct keystore access.

@@ -24,17 +24,24 @@ Goal: A working wrapper that gates a simple Rust binary behind a wallet signatur
 
 ### 1.4 — Wallet connection + activation
 - Embed a minimal webview (via `wry` crate — same engine Tauri uses) for WalletConnect
-- On activation: query `ownerOf(tokenId)` via JSON-RPC to chain
+- On activation: query `ownerOf(tokenId)` via JSON-RPC to Base
 - Request wallet signature over `H(app_id || tokenId || machine_id)`
 - Store license proof to `~/.deotp/licenses/<app_id>.json`
-- Use `alloy` crate for Ethereum RPC and ABI encoding
+- Use `alloy` crate for Ethereum RPC, ABI encoding, and ENS resolution
 
 ### 1.5 — Smart contract
 - Standard ERC-721 with payable `mint()` function
+- Add `bytes32 wrapperHash` for binary verification
 - Use OpenZeppelin contracts, deploy to Base Sepolia (testnet) for development
-- Hardhat or Foundry project for contract development/testing
+- Foundry project for contract development/testing
 
-**Phase 1 deliverable:** A wrapped binary that requires NFT ownership + wallet signature to run, verified offline on subsequent launches.
+### 1.6 — ENS verification
+- At activation, resolve developer's ENS name via `alloy`
+- Compare resolved address to embedded contract address
+- Refuse activation on mismatch, show clear warning
+- Display ENS name prominently in activation UI
+
+**Phase 1 deliverable:** A wrapped binary that requires NFT ownership + wallet signature to run, with ENS-based contract verification, verified offline on subsequent launches.
 
 ## Phase 2: Developer Tooling
 
@@ -52,11 +59,18 @@ Goal: A working wrapper that gates a simple Rust binary behind a wallet signatur
 
 ### 2.3 — Contract templates
 - Provide a ready-to-deploy Solidity contract template
-- Configurable: price, max supply, royalty (ERC-2981), metadata URI
+- Configurable: price, max supply, royalty (ERC-2981), metadata URI, wrapperHash
 - CLI command: `deotp deploy --chain base --price 0.01`
 - Requires user to have Foundry/cast installed, or use a bundled deployer
 
-**Phase 2 deliverable:** A developer can package, deploy, and distribute a licensed application with a few CLI commands.
+### 2.4 — ENS + deotp registry
+- Deploy `DeotpRegistry` contract on Base
+- Permissionless `register()` — developer proves contract ownership on-chain
+- Sets `appName.deotp.eth` subdomain pointing to their license contract
+- CLI command: `deotp register --name myapp --contract 0x1234...abcd`
+- Wrapper shows "verified on deotp.eth" badge when registry entry exists
+
+**Phase 2 deliverable:** A developer can package, deploy, register, and distribute a licensed application with a few CLI commands.
 
 ## Phase 3: Tauri Integration
 
@@ -103,7 +117,7 @@ Goal: A working wrapper that gates a simple Rust binary behind a wallet signatur
 | Webview (wallet connection) | `wry` crate |
 | IPC (wrapper ↔ app) | Unix domain sockets / named pipes |
 | Smart contracts | Solidity, OpenZeppelin, Foundry |
-| Target chains | Base (primary), Arbitrum, Solana (future) |
+| Target chain | Base (primary). Chain abstracted behind config for future EVM L2 support |
 | CLI | `clap` crate |
 | Packaging | Custom binary bundler or `goblin` crate for ELF/Mach-O manipulation |
 
@@ -118,7 +132,8 @@ deotp/
 │   └── tauri-plugin-deotp/  # Tauri integration
 ├── contracts/
 │   ├── src/
-│   │   └── DeotpLicense.sol # ERC-721 license contract
+│   │   ├── DeotpLicense.sol  # ERC-721 license contract
+│   │   └── DeotpRegistry.sol # ENS subdomain registry
 │   ├── test/
 │   └── foundry.toml
 ├── examples/
