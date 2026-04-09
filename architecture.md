@@ -57,28 +57,55 @@ The core product. A Rust binary that:
 
 ```
 deotp-wrapper
-├── Activation Module
+├── Activation Module             [planned — Phase 1.4]
 │   ├── Wallet connection interface (WalletConnect or embedded webview)
 │   ├── Chain RPC query: ownerOf() on the license contract
 │   ├── Signature request: wallet signs H(app_id || tokenId || machine_id)
 │   └── License store: writes proof to ~/.deotp/licenses/<app_id>.json
 │
-├── Verification Module (runs every launch, offline)
+├── Verification Module           [planned — Phase 1.3]
 │   ├── Read stored license proof
 │   ├── Re-derive machine_id from hardware fingerprint
 │   ├── Verify ECDSA signature against stored wallet address
 │   └── Result: pass → launch app, fail → show activation prompt
 │
-├── Process Supervisor
+├── Process Supervisor            [implemented — Phase 1.1]
 │   ├── Launch embedded binary as child process
-│   ├── Heartbeat IPC channel (Unix domain socket)
-│   ├── Monitor child health, restart on crash (optional)
-│   └── Kill child if wrapper is terminated (SIGTERM handler)
+│   ├── Poll child exit status (50ms interval)
+│   ├── Propagate child exit code to the parent
+│   └── Forward SIGTERM to child and exit (Unix signal handler)
+│
+├── Machine ID                    [implemented — Phase 1.2]
+│   ├── Derive stable hardware fingerprint via machine-uid crate
+│   └── SHA-256(platform_uuid || app_id) — salted per app
 │
 └── App Host
     ├── Rust binary mode: exec the embedded binary
-    └── Tauri mode: launch the Tauri app entry point
+    └── Tauri mode: launch the Tauri app entry point  [planned — Phase 3]
 ```
+
+#### Source layout
+
+```
+crates/deotp-wrapper/
+├── src/
+│   ├── main.rs          — CLI entry point (clap: --binary, trailing args)
+│   ├── supervisor.rs    — child process lifecycle and SIGTERM forwarding
+│   └── machine_id.rs    — hardware fingerprint derivation
+└── tests/
+    └── integration.rs   — black-box tests against the compiled binary
+```
+
+#### Dependencies (current)
+
+| Crate | Purpose |
+|---|---|
+| `clap` | CLI argument parsing (`--binary`, passthrough args) |
+| `machine-uid` | Cross-platform hardware UUID (macOS, Linux, Windows) |
+| `sha2` | SHA-256 hashing for machine ID derivation |
+| `hex` | Hex encoding of SHA-256 digest |
+| `nix` | Unix signal handling (SIGTERM forwarding) |
+| `libc` | Low-level signal trampoline |
 
 ### 3. deotp SDK (Rust Crate)
 
@@ -311,15 +338,19 @@ Subsequent Launches (offline):
 
 ## Machine ID Derivation
 
-Cross-platform hardware fingerprint combining:
-- **Linux**: `/sys/class/dmi/id/product_uuid` + MAC address of first non-virtual NIC
+Cross-platform hardware fingerprint via the `machine-uid` crate:
 - **macOS**: `IOPlatformUUID` from IOKit
-- **Windows**: `MachineGuid` from registry + SMBIOS UUID
+- **Linux**: `/etc/machine-id` or `/sys/class/dmi/id/product_uuid`
+- **Windows**: `MachineGuid` from registry (supported by crate, implementation Phase 4.3)
 
-Hashed with SHA-256 and salted with the app_id to prevent cross-app tracking:
+Hashed with SHA-256 and salted with `app_id` to prevent cross-app tracking:
 ```
-machine_id = SHA256(platform_uuid || primary_mac || app_id)
+machine_id = SHA256(platform_uuid || app_id)
 ```
+
+The salt means two different apps on the same machine produce different machine IDs even though they read the same underlying hardware UUID.
+
+Output format: `sha256:<64 hex chars>` (71 characters total).
 
 ## Security Model
 
