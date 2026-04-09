@@ -1,3 +1,4 @@
+mod machine_id;
 mod supervisor;
 
 use clap::Parser;
