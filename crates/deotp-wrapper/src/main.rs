@@ -1,3 +1,4 @@
+mod license;
 mod machine_id;
 mod supervisor;
 
