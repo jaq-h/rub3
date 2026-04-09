@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Activate License</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f0f0f;
+      color: #e0e0e0;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 12px;
+      padding: 32px;
+      width: 420px;
+    }
+
+    h1 { font-size: 18px; font-weight: 600; margin-bottom: 24px; }
+
+    .meta { margin-bottom: 16px; }
+    .meta label {
+      display: block;
+      font-size: 11px;
+      color: #666;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 3px;
+    }
+    .meta .value { font-size: 13px; }
+    .meta .value.mono { font-family: monospace; }
+
+    hr { border: none; border-top: 1px solid #2a2a2a; margin: 20px 0; }
+
+    .field { margin-bottom: 14px; }
+    .field label {
+      display: block;
+      font-size: 11px;
+      color: #666;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    input {
+      width: 100%;
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #e0e0e0;
+      font-family: monospace;
+      font-size: 13px;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus { border-color: #555; }
+    input::placeholder { color: #444; }
+
+    .error {
+      color: #f87171;
+      font-size: 12px;
+      margin-top: 6px;
+      min-height: 16px;
+    }
+
+    button {
+      width: 100%;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 11px;
+      transition: background 0.15s;
+    }
+    button + button { margin-top: 8px; }
+
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-primary:disabled { background: #1e3a6e; color: #4a6fa5; cursor: default; }
+
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid #2a2a2a;
+      color: #666;
+    }
+    .btn-ghost:hover { border-color: #444; color: #999; }
+
+    .token-box {
+      background: #111;
+      border: 1px solid #2a2a2a;
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin-bottom: 14px;
+    }
+    .token-box .tl { font-size: 11px; color: #555; margin-bottom: 3px; text-transform: uppercase; }
+    .token-box .tv { font-family: monospace; font-size: 13px; }
+
+    .hint { font-size: 11px; color: #444; margin-top: 12px; text-align: center; }
+
+    .spinner {
+      width: 22px; height: 22px;
+      border: 2px solid #2a2a2a;
+      border-top-color: #2563eb;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin: 0 auto 14px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #screen-processing { text-align: center; }
+    #screen-processing p { color: #666; font-size: 14px; }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>Activate License</h1>
+
+  <!-- App metadata — populated by Rust via onAppInfo() -->
+  <div class="meta">
+    <label>Application</label>
+    <div class="value" id="app-id">—</div>
+  </div>
+  <div class="meta hidden" id="ens-row">
+    <label>Developer</label>
+    <div class="value" id="developer-ens">—</div>
+  </div>
+  <div class="meta">
+    <label>Contract</label>
+    <div class="value mono" id="contract-address">—</div>
+  </div>
+
+  <hr />
+
+  <!-- ── Screen: connect ─────────────────────────────────────────── -->
+  <div id="screen-connect">
+    <div class="field">
+      <label>Wallet Address</label>
+      <input id="wallet-input" type="text" placeholder="0x… or ENS name" autocomplete="off" />
+      <div class="error" id="connect-error"></div>
+    </div>
+    <button class="btn-primary" id="btn-connect">Connect Wallet</button>
+    <button class="btn-ghost"   id="btn-cancel-connect">Cancel</button>
+    <p class="hint">WalletConnect coming in a future update — enter address manually for now</p>
+  </div>
+
+  <!-- ── Screen: activate ───────────────────────────────────────── -->
+  <div id="screen-activate" class="hidden">
+    <div class="token-box">
+      <div class="tl">License Token</div>
+      <div class="tv" id="token-id-display">—</div>
+    </div>
+    <div class="token-box">
+      <div class="tl">Owner</div>
+      <div class="tv" id="owner-display">—</div>
+    </div>
+    <div class="field">
+      <label>Signature <span style="color:#444;font-size:10px;text-transform:none">(sign the message in your wallet and paste here)</span></label>
+      <input id="sig-input" type="text" placeholder="0x…" autocomplete="off" />
+      <div class="error" id="sig-error"></div>
+    </div>
+    <button class="btn-primary" id="btn-activate">Activate on this machine</button>
+    <button class="btn-ghost"   id="btn-cancel-activate">Cancel</button>
+  </div>
+
+  <!-- ── Screen: processing ─────────────────────────────────────── -->
+  <div id="screen-processing" class="hidden">
+    <div class="spinner"></div>
+    <p id="processing-msg">Please wait…</p>
+  </div>
+</div>
+
+<script>
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  const SCREENS = ['connect', 'activate', 'processing'];
+
+  function show(name) {
+    SCREENS.forEach(s => {
+      document.getElementById('screen-' + s).classList.toggle('hidden', s !== name);
+    });
+  }
+
+  function setError(id, msg) {
+    const el = document.getElementById(id);
+    el.textContent = msg;
+  }
+
+  function clearError(id) {
+    document.getElementById(id).textContent = '';
+  }
+
+  function post(msg) {
+    window.ipc.postMessage(JSON.stringify(msg));
+  }
+
+  function truncate(addr) {
+    if (addr && addr.length > 20) {
+      return addr.slice(0, 10) + '…' + addr.slice(-8);
+    }
+    return addr;
+  }
+
+  // ── Rust → JS API ─────────────────────────────────────────────────────────
+
+  let pendingTokenId  = null;
+  let pendingOwner    = null;
+
+  window.deotp = {
+    // Called once after 'ready' is acknowledged.
+    // info: { appId, contractAddress, chainId, developerEns }
+    onAppInfo(info) {
+      document.getElementById('app-id').textContent = info.appId;
+      document.getElementById('contract-address').textContent =
+        truncate(info.contractAddress) + '  (chain ' + info.chainId + ')';
+
+      if (info.developerEns) {
+        document.getElementById('developer-ens').textContent = info.developerEns;
+        document.getElementById('ens-row').classList.remove('hidden');
+      }
+    },
+
+    // Wallet owns a token — show the signature prompt.
+    // data: { tokenId, ownerAddress }
+    onShowActivate(data) {
+      pendingTokenId = data.tokenId;
+      pendingOwner   = data.ownerAddress;
+
+      document.getElementById('token-id-display').textContent = '#' + data.tokenId;
+      document.getElementById('owner-display').textContent    = data.ownerAddress;
+      document.getElementById('sig-input').value = '';
+      clearError('sig-error');
+
+      show('activate');
+    },
+
+    // Something went wrong — surface the error on the connect screen.
+    onError(data) {
+      show('connect');
+      setError('connect-error', data.message);
+    },
+  };
+
+  // ── Connect screen ────────────────────────────────────────────────────────
+
+  document.getElementById('btn-connect').addEventListener('click', () => {
+    clearError('connect-error');
+    const address = document.getElementById('wallet-input').value.trim();
+
+    if (!address) {
+      setError('connect-error', 'Enter a wallet address to continue.');
+      return;
+    }
+
+    show('processing');
+    document.getElementById('processing-msg').textContent = 'Checking ownership…';
+    post({ type: 'connect', address });
+  });
+
+  document.getElementById('btn-cancel-connect').addEventListener('click', () => {
+    post({ type: 'cancel' });
+  });
+
+  // ── Activate screen ───────────────────────────────────────────────────────
+
+  document.getElementById('btn-activate').addEventListener('click', () => {
+    clearError('sig-error');
+    const sig = document.getElementById('sig-input').value.trim();
+
+    if (!sig) {
+      setError('sig-error', 'Paste the signature from your wallet.');
+      return;
+    }
+
+    if (!sig.startsWith('0x')) {
+      setError('sig-error', 'Signature must start with 0x.');
+      return;
+    }
+
+    show('processing');
+    document.getElementById('processing-msg').textContent = 'Storing license…';
+    post({ type: 'signed', token_id: pendingTokenId, owner_address: pendingOwner, signature: sig });
+  });
+
+  document.getElementById('btn-cancel-activate').addEventListener('click', () => {
+    post({ type: 'cancel' });
+  });
+
+  // ── Boot ──────────────────────────────────────────────────────────────────
+
+  // Tell Rust the page is ready to receive app info.
+  post({ type: 'ready' });
+</script>
+</body>
+</html>
