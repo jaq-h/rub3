@@ -1,5 +1,6 @@
 mod license;
 mod machine_id;
+mod store;
 mod supervisor;
 
 use clap::Parser;
