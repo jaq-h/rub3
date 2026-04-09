@@ -145,14 +145,9 @@
 
   <!-- ── Screen: connect ─────────────────────────────────────────── -->
   <div id="screen-connect">
-    <div class="field">
-      <label>Wallet Address</label>
-      <input id="wallet-input" type="text" placeholder="0x… or ENS name" autocomplete="off" />
-      <div class="error" id="connect-error"></div>
-    </div>
     <button class="btn-primary" id="btn-connect">Connect Wallet</button>
-    <button class="btn-ghost"   id="btn-cancel-connect">Cancel</button>
-    <p class="hint">WalletConnect coming in a future update — enter address manually for now</p>
+    <div class="error" id="connect-error"></div>
+    <button class="btn-ghost" style="margin-top:8px" id="btn-cancel-connect">Cancel</button>
   </div>
 
   <!-- ── Screen: activate ───────────────────────────────────────── -->
@@ -254,18 +249,10 @@
 
   // ── Connect screen ────────────────────────────────────────────────────────
 
+  // TODO: open WalletConnect modal; on approval post({ type: 'connect', address })
   document.getElementById('btn-connect').addEventListener('click', () => {
     clearError('connect-error');
-    const address = document.getElementById('wallet-input').value.trim();
-
-    if (!address) {
-      setError('connect-error', 'Enter a wallet address to continue.');
-      return;
-    }
-
-    show('processing');
-    document.getElementById('processing-msg').textContent = 'Checking ownership…';
-    post({ type: 'connect', address });
+    setError('connect-error', 'WalletConnect not yet implemented.');
   });
 
   document.getElementById('btn-cancel-connect').addEventListener('click', () => {
