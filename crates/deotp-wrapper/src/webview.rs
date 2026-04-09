@@ -64,7 +64,7 @@ enum Cmd {
 ///
 /// Must be called on the main thread (macOS WKWebView requirement).
 pub fn run_activation_window(ctx: ActivationContext) -> ActivationResult {
-    let event_loop = EventLoop::new();
+    let mut event_loop = EventLoop::new();
 
     let window = WindowBuilder::new()
         .with_title("Activate License")
@@ -89,13 +89,13 @@ pub fn run_activation_window(ctx: ActivationContext) -> ActivationResult {
         result_tx: result_tx.clone(),
     };
 
-    let webview = WebViewBuilder::new()
+    let webview = WebViewBuilder::new(&window)
         .with_html(ACTIVATION_HTML)
         .with_ipc_handler(move |request| {
             let body = request.body().clone();
             ipc_state.handle(body);
         })
-        .build(&window)
+        .build()
         .expect("failed to create webview");
 
     // run_return exits when ControlFlow::Exit is set, giving control back to caller.
