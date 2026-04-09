@@ -17,7 +17,8 @@ sha3 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
-alloy = { version = "0.12", features = ["providers", "transports-http", "contract"] }
+alloy = { version = "1", features = ["providers", "transport-http", "contract"] }
+url = "2"
 tokio = { version = "1", features = ["rt"] }
 wry = "0.43"
 tao = "0.30"
