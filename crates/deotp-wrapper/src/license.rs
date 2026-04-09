@@ -91,7 +91,22 @@ pub fn verify(proof: &LicenseProof, current_machine_id: &str) -> Result<(), Veri
     Ok(())
 }
 
+/// Applies the Ethereum `personal_sign` prefix and returns the final hash.
+///
+/// Wallets sign: keccak256("\x19Ethereum Signed Message:\n32" || message)
+/// where `message` is the 32-byte raw preimage from `activation_message()`.
+fn personal_sign_hash(message: &[u8; 32]) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    let mut hasher = Keccak256::new();
+    hasher.update(b"\x19Ethereum Signed Message:\n32");
+    hasher.update(message);
+    hasher.finalize().into()
+}
+
 /// Recovers the Ethereum address that produced `sig_hex` over `message`.
+///
+/// `message` is the raw preimage from `activation_message()`. This function
+/// applies the `personal_sign` prefix before recovery to match what wallets sign.
 ///
 /// Ethereum signatures are 65 bytes: [r (32)] [s (32)] [v (1)].
 /// v is either 27/28 (legacy) or 0/1 (modern). We normalise to 0/1.
@@ -126,7 +141,8 @@ fn recover_address(message: &[u8; 32], sig_hex: &str) -> Result<String, VerifyEr
     let rec_id = RecoveryId::try_from(recovery_id)
         .map_err(|e| VerifyError::InvalidSignature(e.to_string()))?;
 
-    let verifying_key = VerifyingKey::recover_from_prehash(message, &sig, rec_id)
+    let prefixed = personal_sign_hash(message);
+    let verifying_key = VerifyingKey::recover_from_prehash(&prefixed, &sig, rec_id)
         .map_err(|e| VerifyError::InvalidSignature(e.to_string()))?;
 
     Ok(public_key_to_address(&verifying_key))
@@ -165,16 +181,12 @@ mod tests {
     ///       ])
     ///     )
     ///   );
-    ///   const sig = await wallet.signMessage(msg);  // adds Ethereum prefix
+    ///   const sig = await wallet.signMessage(msg);  // wallet applies personal_sign prefix
     ///
-    /// NOTE: standard eth_sign prepends "\x19Ethereum Signed Message:\n32"
-    /// before hashing. The activation_message() function produces the raw
-    /// pre-image; the wallet adds the prefix during signing. When verifying
-    /// we must apply the same prefix before recovery.
-    ///
-    /// For now the test vector uses a raw (non-prefixed) sign to keep the
-    /// verify path simple. Ethereum prefix support will be added in Phase 1.4
-    /// when the real wallet integration is wired up.
+    /// `activation_message()` produces the raw 32-byte preimage. The wallet
+    /// prepends "\x19Ethereum Signed Message:\n32" and keccak256-hashes before
+    /// signing. `recover_address()` applies the same prefix via
+    /// `personal_sign_hash()` before recovery.
 
     const TEST_APP_ID: &str = "com.deotp.test";
     const TEST_TOKEN_ID: u64 = 42;
@@ -199,6 +211,26 @@ mod tests {
         let a = activation_message(TEST_APP_ID, TEST_TOKEN_ID, "sha256:machine-a");
         let b = activation_message(TEST_APP_ID, TEST_TOKEN_ID, "sha256:machine-b");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn personal_sign_hash_matches_known_vector() {
+        // Vector computed with ethers.js:
+        //   ethers.utils.hashMessage(ethers.utils.arrayify("0x" + "00".repeat(32)))
+        // which is keccak256("\x19Ethereum Signed Message:\n32" || [0u8; 32])
+        let message = [0u8; 32];
+        let hash = personal_sign_hash(&message);
+        assert_eq!(
+            hex::encode(hash),
+            "47173285a8d7341e5e972fc677286384f802f8ef42a5ec5f03bbfa254cb01fad"
+        );
+    }
+
+    #[test]
+    fn personal_sign_hash_differs_from_raw_message() {
+        let message = [0u8; 32];
+        let prefixed = personal_sign_hash(&message);
+        assert_ne!(prefixed, message);
     }
 
     #[test]
