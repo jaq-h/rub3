@@ -8,6 +8,7 @@ use alloy::sol;
 //   ownerOf(tokenId)  — ERC-721 standard
 //   price()           — deotp license contract
 sol! {
+    #[sol(rpc)]
     interface IDeotpLicense {
         function ownerOf(uint256 tokenId) external view returns (address owner);
         function price() external view returns (uint256 amount);
@@ -53,7 +54,7 @@ pub fn owner_of(rpc_url: &str, contract: Address, token_id: u64) -> Result<Addre
             .call()
             .await
             .map_err(|e| RpcError::Contract(e.to_string()))?;
-        Ok(result.owner)
+        Ok(result)
     })
 }
 
@@ -67,7 +68,7 @@ pub fn token_price(rpc_url: &str, contract: Address) -> Result<U256, RpcError> {
             .call()
             .await
             .map_err(|e| RpcError::Contract(e.to_string()))?;
-        Ok(result.amount)
+        Ok(result)
     })
 }
 
@@ -83,10 +84,10 @@ pub fn resolve_ens(_rpc_url: &str, _name: &str) -> Result<Address, RpcError> {
 fn build_provider(
     rpc_url: &str,
 ) -> Result<impl alloy::providers::Provider, RpcError> {
-    let url = rpc_url
+    let url: url::Url = rpc_url
         .parse()
         .map_err(|e: url::ParseError| RpcError::Transport(e.to_string()))?;
-    Ok(ProviderBuilder::new().on_http(url))
+    Ok(ProviderBuilder::new().connect_http(url))
 }
 
 /// Runs a future to completion on a single-threaded tokio runtime.
