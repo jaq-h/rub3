@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "crates/deotp-wrapper",
+]
+resolver = "2"
