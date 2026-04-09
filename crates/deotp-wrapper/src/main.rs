@@ -1,7 +1,9 @@
 mod license;
 mod machine_id;
+mod rpc;
 mod store;
 mod supervisor;
+mod webview;
 
 use clap::Parser;
 use std::path::PathBuf;
