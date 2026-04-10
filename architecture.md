@@ -6,82 +6,155 @@
 
 | Why Base | Detail |
 |---|---|
-| User onboarding | Coinbase on-ramp — users buy ETH and pay without bridging |
+| User onboarding | Coinbase on-ramp — users buy ETH without bridging |
 | ENS support | Resolves L1 ENS natively, critical for trust layer |
-| Cost | $0.01-0.05 per mint transaction |
+| Cost | $0.01–0.05 per mint/renewal transaction |
 | Finality | ~2 sec soft confirmation |
-| Rust crates | `alloy` is lean (~30 deps) and handles RPC, ABI, ENS resolution |
-| Wallet support | Native in Coinbase Wallet (100M+ users), MetaMask, Rainbow, etc. |
+| Rust crates | `alloy` is lean (~30 deps), handles RPC, ABI, ENS resolution |
+| Wallet support | Native in Coinbase Wallet, MetaMask, Rainbow, and WalletConnect-compatible wallets |
 
-The chain is abstracted behind configuration — switching to Arbitrum or another EVM L2 is a config change, not a code change:
+Chain is abstracted behind config — switching to Arbitrum or another EVM L2 is a config change:
 
 ```toml
 [chain]
 name = "base"
-rpc = "https://mainnet.base.org"
+rpc  = "https://mainnet.base.org"
 chain_id = 8453
 ```
-
-Solana was evaluated and rejected: no ENS equivalent, heavy Rust SDK (~150 deps), and the cost/speed advantages are negligible for one-time license purchases.
 
 ## System Overview
 
 ```
-┌──────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│   Developer   │     │   Base (L2)       │     │      User        │
-│              │     │                  │     │                  │
-│  App binary   │     │  ERC-721 License  │     │  Wallet          │
-│  deotp CLI    │────▶│  Contract         │◀────│  deotp Wrapper   │
-│  ENS name     │     │  ENS Registry     │     │  Embedded App    │
-│              │     │  deotp Registry   │     │                  │
-└──────────────┘     └──────────────────┘     └──────────────────┘
+┌──────────────┐     ┌──────────────────┐     ┌──────────────────────┐
+│   Developer   │     │   Base (L2)       │     │        User          │
+│              │     │                  │     │                      │
+│  App binary   │     │  DeotpAccess      │     │  Wallet              │
+│  deotp CLI    │────▶│  DeotpSubscription│◀────│  deotp Wrapper       │
+│  ENS name     │     │  DeotpRegistry    │     │  Session Cache       │
+│              │     │                  │     │  Embedded App        │
+└──────────────┘     └──────────────────┘     └──────────────────────┘
 ```
+
+## Core Concepts
+
+### Wallet as Identity
+
+There is no machine ID in the security model. The user's wallet is their identity. Proving ownership of an NFT in that wallet proves the right to run the application. This maps directly to how every other web3 context works — the desktop wrapper simply extends this model to native binaries.
+
+### Session Model
+
+Rather than verifying on-chain at every launch (slow, requires wallet UI), the wrapper uses a short-lived session:
+
+```
+session = {
+  app_id:      "com.example.myapp",
+  token_id:    42,
+  wallet:      "0xabc...123",
+  nonce:       "<random 32 bytes, wrapper-generated>",
+  issued_at:   "2026-04-10T09:00:00Z",
+  expires_at:  "2026-04-17T09:00:00Z",
+  signature:   "0x<wallet ECDSA sig over keccak256(app_id || token_id || nonce || expires_at)>",
+  chain:       "base",
+  contract:    "0x1234...abcd"
+}
+```
+
+On each launch the wrapper verifies the signature locally (fast, offline). When the session expires, it re-verifies on-chain and issues a new session. The session TTL is set by the developer in the wrapper config.
+
+**Multi-device**: Each device holds its own session. Same wallet, different nonces, independent TTLs. No coordination needed.
+
+**Transfer semantics**: When an NFT is sold, the new owner activates a fresh session. The old owner's sessions expire at their next TTL. No active revocation required.
+
+### Session TTL as Developer Knob
+
+```toml
+[license]
+session_ttl_days = 7   # default — wallet prompt once per week
+```
+
+| TTL | Behavior | Use case |
+|---|---|---|
+| 1 day | Daily re-auth | High-value tools, strict ownership enforcement |
+| 7 days | Weekly (default) | Standard desktop software |
+| 30 days | Monthly | Matches subscription billing cycle |
+
+---
 
 ## Components
 
-### 1. Smart Contract (existing infrastructure)
+### 1. Smart Contracts
 
-Standard ERC-721 with a payable `purchase(address recipient)` function. No custom logic needed beyond:
-- Price per license
-- Optional supply cap
-- Mint to `recipient` (defaults to `msg.sender` if zero address is passed)
-- `bytes32 wrapperHash` — SHA-256 of the distributed binary, set by the developer. Users can verify their download before running.
+Two contract templates, enforced identically at the wrapper level.
 
-The `recipient` parameter decouples payment from delivery: the buyer pays with their funding wallet but the NFT lands in any address they specify — a fresh wallet, a colleague's wallet, or a gift recipient.
+#### DeotpAccess (one-time purchase)
 
-OpenZeppelin's ERC-721 template covers this. The contract is deployed once per application on Base.
+Standard ERC-721 with payable `purchase(address recipient)`:
+- Price per token, optional supply cap
+- `recipient == address(0)` defaults to `msg.sender`
+- `bytes32 wrapperHash` — SHA-256 of distributed binary
+- Transferrable — selling the NFT transfers access
+
+On-chain check: `ownerOf(tokenId) == walletAddress`
+
+#### DeotpSubscription (recurring)
+
+ERC-721 extended with time-based validity:
+- `mapping(uint256 => uint256) public expiresAt`
+- `purchase()` sets `expiresAt[tokenId] = block.timestamp + period`
+- `renew(uint256 tokenId)` payable, extends by one period
+- Transferrable — new owner can renew
+
+On-chain check: `ownerOf(tokenId) == walletAddress && block.timestamp < expiresAt[tokenId]`
+
+#### DeotpRegistry
+
+Permissionless registry mapping app names to contracts under `deotp.eth`:
+
+```solidity
+contract DeotpRegistry {
+    function register(string calldata appName, address licenseContract) external {
+        require(IOwnable(licenseContract).owner() == msg.sender, "not contract owner");
+        // sets appName.deotp.eth → licenseContract
+    }
+}
+```
+
+---
 
 ### 2. deotp Wrapper Runtime
 
-The core product. A Rust binary that:
+The core product. A Rust binary that manages wallet sessions and gates the embedded application.
 
 ```
 deotp-wrapper
-├── Activation Module             [planned — Phase 1.4]
-│   ├── Wallet connection interface (WalletConnect or embedded webview)
-│   ├── Chain RPC query: ownerOf() on the license contract
-│   ├── Signature request: wallet signs H(app_id || tokenId || machine_id)
-│   └── License store: writes proof to ~/.deotp/licenses/<app_id>.json
+├── Session Manager
+│   ├── Read cached session from ~/.deotp/sessions/<app_id>.json
+│   ├── Verify session signature (local, fast)
+│   ├── Check session expiry
+│   ├── On expiry/absence: trigger wallet connection flow
+│   └── Write renewed session to disk
 │
-├── Verification Module           [planned — Phase 1.3]
-│   ├── Read stored license proof
-│   ├── Re-derive machine_id from hardware fingerprint
-│   ├── Verify ECDSA signature against stored wallet address
-│   └── Result: pass → launch app, fail → show activation prompt
+├── Wallet Connection
+│   ├── Open embedded webview (wry) with WalletConnect UI
+│   ├── On connect: query ownerOf() or isValid() via alloy RPC
+│   ├── Generate nonce + expires_at
+│   ├── Request ECDSA signature from wallet
+│   └── Store session, close webview
 │
-├── Process Supervisor            [implemented — Phase 1.1]
+├── ENS Verification
+│   ├── Resolve developer ENS at session creation
+│   ├── Compare resolved address to embedded contract address
+│   └── Refuse session creation on mismatch
+│
+├── Process Supervisor
 │   ├── Launch embedded binary as child process
-│   ├── Poll child exit status (50ms interval)
-│   ├── Propagate child exit code to the parent
-│   └── Forward SIGTERM to child and exit (Unix signal handler)
-│
-├── Machine ID                    [implemented — Phase 1.2]
-│   ├── Derive stable hardware fingerprint via machine-uid crate
-│   └── SHA-256(platform_uuid || app_id) — salted per app
+│   ├── Forward SIGTERM to child on wrapper exit
+│   ├── Exit wrapper if child exits
+│   └── Heartbeat IPC — child cannot run if wrapper dies
 │
 └── App Host
-    ├── Rust binary mode: exec the embedded binary
-    └── Tauri mode: launch the Tauri app entry point  [planned — Phase 3]
+    ├── Rust binary mode: exec embedded binary
+    └── Tauri mode: launch Tauri app entry point
 ```
 
 #### Source layout
@@ -89,58 +162,70 @@ deotp-wrapper
 ```
 crates/deotp-wrapper/
 ├── src/
-│   ├── main.rs          — CLI entry point (clap: --binary, trailing args)
-│   ├── supervisor.rs    — child process lifecycle and SIGTERM forwarding
-│   └── machine_id.rs    — hardware fingerprint derivation
+│   ├── main.rs          — CLI entry point
+│   ├── session.rs       — session cache read/write/verify
+│   ├── wallet.rs        — WalletConnect flow, RPC ownership check
+│   ├── ens.rs           — ENS resolution and contract verification
+│   ├── supervisor.rs    — child process lifecycle
+│   └── webview.rs       — embedded wallet connection UI (wry)
 └── tests/
-    └── integration.rs   — black-box tests against the compiled binary
+    └── integration.rs
 ```
 
-#### Dependencies (current)
+#### Dependencies
 
 | Crate | Purpose |
 |---|---|
-| `clap` | CLI argument parsing (`--binary`, passthrough args) |
-| `machine-uid` | Cross-platform hardware UUID (macOS, Linux, Windows) |
-| `sha2` | SHA-256 hashing for machine ID derivation |
-| `hex` | Hex encoding of SHA-256 digest |
-| `nix` | Unix signal handling (SIGTERM forwarding) |
-| `libc` | Low-level signal trampoline |
+| `clap` | CLI argument parsing |
+| `alloy` | Ethereum RPC, ABI encoding, ENS resolution |
+| `k256` | secp256k1 ECDSA signature verification |
+| `wry` | Embedded webview for wallet connection UI |
+| `serde_json` | Session cache serialization |
+| `sha2` | SHA-256 for binary hash verification |
+| `nix` | Unix signal handling |
+
+---
 
 ### 3. deotp SDK (Rust Crate)
 
-A lightweight crate that apps link against:
+Lightweight crate apps link against:
 
 ```rust
-// In the embedded app's main loop or startup:
-deotp::heartbeat(); // panics if wrapper is not alive
-let info = deotp::license_info(); // returns tokenId, wallet, app_id
+deotp::heartbeat();            // panics if wrapper is not alive
+let info = deotp::session();   // returns token_id, wallet, app_id, expires_at
 ```
 
-The SDK communicates with the wrapper over a Unix domain socket (Linux/macOS) or named pipe (Windows). If the wrapper process dies, `heartbeat()` fails and the app exits.
+Communication via Unix domain socket (path passed as env var by wrapper). If the wrapper process dies, `heartbeat()` fails and the app exits immediately.
+
+---
 
 ### 4. deotp CLI
 
-Packaging tool for developers:
+Developer tooling:
 
 ```
+# Package a binary into a wrapped distributable
 deotp pack \
   --binary ./target/release/myapp \
   --app-id com.example.myapp \
   --contract 0x1234...abcd \
   --chain base \
-  --output ./dist/myapp-wrapped
+  --session-ttl 7 \
+  --output ./dist/myapp
+
+# Deploy a new license contract
+deotp deploy --type access --price 0.05 --chain base
+deotp deploy --type subscription --price 0.01 --period 30 --chain base
+
+# Register in the deotp.eth registry
+deotp register --name myapp --contract 0x1234...abcd
 ```
 
-Produces a single distributable binary containing:
-- The wrapper runtime
-- The embedded app binary
-- Configuration (app_id, contract address, chain RPC endpoints)
+---
 
 ### 5. Tauri Plugin
 
 ```rust
-// In a Tauri app's setup:
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_deotp::init())
@@ -149,255 +234,193 @@ fn main() {
 }
 ```
 
-The plugin handles heartbeat automatically in the Tauri event loop and exposes license info to the frontend via IPC commands.
+Frontend JS API:
+```js
+const session = await invoke('plugin:deotp|session');
+// { token_id, wallet, expires_at }
+```
+
+The activation/renewal flow renders in the Tauri app's own webview. No separate window.
+
+---
 
 ## ENS Trust Layer
 
-Contract addresses are opaque hex strings. Phishing contracts are trivial to deploy. ENS provides human-readable identity verification.
+Contract addresses are opaque hex strings. ENS provides human-readable identity that ties the contract to a developer's verifiable on-chain identity.
 
 ### How it works
-
-Developer registers an ENS name and points it at their license contract. The wrapper resolves the name at activation time and verifies it matches the embedded contract address.
 
 ```
 Wrapper config embeds:
   contract: "0x1234...abcd"
-  ens: "myapp.eth"                    # developer's own ENS
-  deotp_registry: "myapp.deotp.eth"   # optional, verified by deotp
+  ens:      "myapp.eth"              # developer's ENS, OR
+            "myapp.deotp.eth"        # deotp registry subdomain
 
-At activation, wrapper resolves ENS:
-  embedded contract ≠ ENS resolution → REFUSE TO ACTIVATE, warn user
+At session creation, wrapper:
+  1. Resolves ENS name → address
+  2. Compares to embedded contract address
+  3. Mismatch → refuse, warn user
+  4. Match → proceed
 ```
 
 ### Two layers of trust
 
-**Layer 1 — Developer's own ENS** (e.g., `myapp.eth`)
-- Developer registers and controls it
-- Fully decentralized, no approval process
-- Trust comes from the developer's reputation
+**Layer 1 — Developer's own ENS** (`myapp.eth`)
+- Fully decentralized, developer controls it
+- Trust comes from the developer's established identity
 
-**Layer 2 — deotp.eth subdomain** (e.g., `myapp.deotp.eth`)
-- Permissionless registration via a registry contract
-- Developer proves contract ownership on-chain (calls `register()` from the deployer wallet)
-- Adds a "verified" badge in the activation UI
-- No manual approval — trust comes from on-chain proof
-
-### Registry Contract
-
-```solidity
-contract DeotpRegistry {
-    ENS public ens;
-    bytes32 public rootNode;            // deotp.eth
-
-    mapping(bytes32 => address) public licenses;
-    mapping(address => address) public developers;
-
-    function register(string calldata appName, address licenseContract) external {
-        require(IOwnable(licenseContract).owner() == msg.sender, "not contract owner");
-        bytes32 label = keccak256(bytes(appName));
-        require(licenses[label] == address(0), "name taken");
-
-        licenses[label] = licenseContract;
-        developers[licenseContract] = msg.sender;
-
-        // Set ENS subdomain: appName.deotp.eth → licenseContract
-        bytes32 subnode = keccak256(abi.encodePacked(rootNode, label));
-        ens.setSubnodeOwner(rootNode, label, address(this));
-        resolver.setAddr(subnode, licenseContract);
-    }
-}
-```
+**Layer 2 — deotp.eth subdomain** (`myapp.deotp.eth`)
+- Permissionless via `DeotpRegistry.register()` — developer proves contract ownership on-chain
+- Adds "verified on deotp.eth" badge in the activation UI
+- No manual approval — on-chain proof is sufficient
 
 ### Activation UI
 
 ```
 ┌────────────────────────────────────────────┐
-│  Activate License                          │
+│  Connect to My App                         │
 │                                            │
-│  Application: My App                       │
 │  Developer:   myapp.eth                    │
 │  Contract:    0x1234...abcd (Base)         │
 │  Registry:    ✓ verified on deotp.eth      │
+│  Access:      One-time purchase            │
+│  Price:       0.05 ETH                     │
 │                                            │
-│  Price: 0.01 ETH (one-time)               │
-│                                            │
-│  Deliver license to:                       │
-│  ┌──────────────────────────────────────┐  │
-│  │ 0x... or ENS name  (leave blank for  │  │
-│  │ paying wallet)                       │  │
-│  └──────────────────────────────────────┘  │
+│  Session valid for: 7 days                 │
 │                                            │
 │  [Connect Wallet]                          │
 └────────────────────────────────────────────┘
 ```
 
-If a recipient address is provided, the wrapper stores it in the license proof and uses it for the `ownerOf()` check at activation. The paying wallet never needs to reconnect after purchase.
-
-### What ENS prevents
-
-| Attack | Without ENS | With ENS |
-|---|---|---|
-| Scammer deploys copycat contract | User sees raw 0x address, can't distinguish | Wrapper resolves real ENS and warns on mismatch |
-| Compromised wrapper with wrong contract | User has no way to verify | ENS resolution catches the mismatch |
-| Developer domain hijack | N/A | ENS ownership is wallet-based, harder to hijack than DNS |
-
-### What ENS does NOT prevent
-
-- Users who ignore warnings
-- Typosquatting (`myaap.deotp.eth`) — mitigated by minimum name length / dispute process
-- Social engineering outside the wrapper (fake websites, Discord links)
+---
 
 ## Binary Verification (Distribution Trust)
 
 The license contract stores a SHA-256 hash of the distributed wrapper binary:
 
 ```solidity
-contract DeotpLicense is ERC721 {
-    bytes32 public wrapperHash;
+bytes32 public wrapperHash;
 
-    function setWrapperHash(bytes32 hash) external onlyOwner {
-        wrapperHash = hash;
-    }
+function setWrapperHash(bytes32 hash) external onlyOwner {
+    wrapperHash = hash;
 }
 ```
 
 Trust chain: **ENS → contract → binary hash → running wrapper**
 
-User downloads the wrapper, hashes it, checks against the on-chain value at the ENS-resolved contract address. This closes the distribution trust gap without requiring a centralized app store.
+Users can verify their download against the on-chain hash before running. This closes the distribution trust gap without a centralized app store or code signing authority.
 
-## Activation Flow (detailed)
+---
+
+## Launch Flow
 
 ```
-First Launch:
-┌─────────┐         ┌─────────┐         ┌──────────┐
-│ Wrapper  │         │ Wallet  │         │  Chain   │
-└────┬────┘         └────┬────┘         └─────┬────┘
-     │                    │                     │
-     │  Show activation   │                     │
-     │  prompt (webview   │                     │
-     │  or QR code)       │                     │
-     │───────────────────▶│                     │
-     │                    │                     │
-     │  User approves     │                     │
-     │  connection        │                     │
-     │◀───────────────────│                     │
-     │                    │                     │
-     │  Query ownerOf()   │                     │
-     │──────────────────────────────────────────▶
-     │                    │                     │
-     │  Confirm ownership │                     │
-     │◀─────────────────────────────────────────│
-     │                    │                     │
-     │  Sign message:     │                     │
-     │  H(app_id ||       │                     │
-     │    tokenId ||      │                     │
-     │    machine_id)     │                     │
-     │───────────────────▶│                     │
-     │                    │                     │
-     │  Return signature  │                     │
-     │◀───────────────────│                     │
-     │                    │                     │
-     │  Store license     │                     │
-     │  proof locally     │                     │
-     │  Launch app ✓      │                     │
-     ▼                    ▼                     ▼
+App launch:
+┌─────────────────────────────────────────────────────────┐
+│                      Wrapper starts                     │
+└────────────────────────┬────────────────────────────────┘
+                         │
+              Read ~/.deotp/sessions/<app_id>.json
+                         │
+              ┌──────────┴──────────┐
+          Session valid?        No session /
+          Sig OK + not expired   Expired / Invalid
+              │                      │
+         Launch app              Open webview
+              │                      │
+              │               Connect wallet (WalletConnect)
+              │                      │
+              │               Resolve ENS → verify contract
+              │                      │
+              │               ownerOf() / isValid() on-chain
+              │                      │
+              │                ┌─────┴─────┐
+              │            Owns token    No token
+              │                │              │
+              │           Request sig    Show purchase UI
+              │           (SIWE-style)        │
+              │                │         User purchases →
+              │           Cache session   loop back
+              │                │
+              └────────────────┘
+                    Launch app
 ```
 
 ```
-Subsequent Launches (offline):
-┌─────────┐
-│ Wrapper  │
-└────┬────┘
-     │
-     │  Read ~/.deotp/licenses/<app_id>.json
-     │  Re-derive machine_id
-     │  Verify signature against stored address
-     │
-     │  ✓ Valid → launch embedded app
-     │  ✗ Invalid → show activation prompt
-     ▼
+While running:
+  Wrapper ──heartbeat IPC──▶ App (every 5s)
+  App panics/exits if heartbeat stops
+  Wrapper exits if app exits
 ```
 
-## License Proof Format
+---
+
+## Session Format
 
 ```json
 {
-  "app_id": "com.example.myapp",
-  "token_id": 42,
-  "wallet_address": "0xabc...123",
-  "paid_by": "0xdef...456",
-  "machine_id": "sha256:...",
-  "signature": "0x...",
-  "activated_at": "2026-04-07T12:00:00Z",
-  "chain": "base",
-  "contract": "0x1234...abcd"
+  "app_id":     "com.example.myapp",
+  "token_id":   42,
+  "wallet":     "0xabc...123",
+  "nonce":      "a3f8...c921",
+  "issued_at":  "2026-04-10T09:00:00Z",
+  "expires_at": "2026-04-17T09:00:00Z",
+  "signature":  "0x...",
+  "chain":      "base",
+  "contract":   "0x1234...abcd"
 }
 ```
 
-`wallet_address` is the address that owns the NFT and signed the activation message. `paid_by` records the funding wallet only when it differs from `wallet_address`; omitted otherwise.
+The signature is `wallet.sign(keccak256(app_id || token_id || nonce || expires_at))`.
 
-## Machine ID Derivation
+The wrapper verifies this locally on every launch. No RPC call needed until the session expires.
 
-Cross-platform hardware fingerprint via the `machine-uid` crate:
-- **macOS**: `IOPlatformUUID` from IOKit
-- **Linux**: `/etc/machine-id` or `/sys/class/dmi/id/product_uuid`
-- **Windows**: `MachineGuid` from registry (supported by crate, implementation Phase 4.3)
-
-Hashed with SHA-256 and salted with `app_id` to prevent cross-app tracking:
-```
-machine_id = SHA256(platform_uuid || app_id)
-```
-
-The salt means two different apps on the same machine produce different machine IDs even though they read the same underlying hardware UUID.
-
-Output format: `sha256:<64 hex chars>` (71 characters total).
+---
 
 ## Security Model
 
 ### Wallet as trust boundary
 
-The wrapper never holds the user's private key. All wallet interaction happens via WalletConnect or an embedded webview — the wallet is a separate process/device.
+The wrapper never holds a private key. All signing happens in the user's wallet (separate process or device) via WalletConnect. A session signature is free (no on-chain effect) — it cannot move assets.
 
-**License theft requires an on-chain transaction** (e.g., `transferFrom` or `setApprovalForAll`) that the user must explicitly approve in their wallet. Wallets clearly distinguish message signing (free, no on-chain effect) from transactions (costs gas, moves assets). A compromised wrapper cannot silently steal NFTs.
+**Spending the NFT requires a wallet transaction** the user must explicitly approve. A compromised wrapper cannot silently transfer the NFT.
 
-### What a compromised wrapper CAN do
+### Threat model
 
-| Attack | Mechanism | Severity |
-|---|---|---|
-| Redirect payment | Embed a different contract address | High — ENS resolution prevents this |
-| Phish via typed data | Craft EIP-712 permits or gasless approvals | Medium — wallet rendering varies |
-| Exfiltrate local data | Wrapper runs with user privileges | High — true of any compromised software |
-| Steal license proof file | Copy `~/.deotp/licenses/` | Low — machine-bound, useless elsewhere |
-
-### What this protects against
-- Casual piracy (can't just copy the binary and share it — activation is machine-bound)
-- License sharing (each activation is tied to a specific machine)
-- Tampering detection (signature verification fails if any component is modified)
-- Payment redirection (ENS resolution catches contract address mismatches)
-- Distribution tampering (on-chain binary hash allows verification before running)
+| Attack | Mitigation |
+|---|---|
+| Copy session file to another machine | Nonce is single-use; new session requires wallet re-auth. Session is not machine-bound but is wallet-bound — you'd need the wallet too. |
+| Replay expired session | `expires_at` is verified locally on every launch |
+| Redirect payment to wrong contract | ENS resolution at session creation catches address mismatch |
+| NFT transferred, old user still has session | Session expires at TTL; ownership re-verified on renewal |
+| Subscription lapsed, user still has session | `isValid()` checked at renewal — returns false, session not issued |
+| Forged session signature | secp256k1 ECDSA — not forgeable without the wallet's private key |
+| Compromised wrapper binary | ENS + on-chain binary hash allow users to detect tampering |
 
 ### What this does NOT protect against
-- Determined reverse engineering (binary is not encrypted, can be patched)
-- Memory dumping (the running app is in cleartext memory)
-- Virtual machine cloning (VM can snapshot a machine_id)
-- Users who ignore warnings
 
-This is opt-in, honest DRM. The goal is to make paying easier than pirating, not to make pirating impossible.
+- Determined reverse engineering (binary is not encrypted, can be patched)
+- Memory dumping (running app is in cleartext memory)
+- Users who share their wallet (wallet = identity, sharing a wallet is sharing an identity — same as any web3 context)
+
+This is honest access control. The goal is to make paying easier than not paying, and to make the access model as familiar as the rest of web3.
 
 ### Defense layers summary
 
 ```
-Distribution:  on-chain binary hash (verify download)
-Identity:      ENS resolution (verify contract is legitimate)
+Distribution:  on-chain binary hash (verify download before running)
+Identity:      ENS resolution (verify contract belongs to the developer)
 Payment:       wallet transaction approval (user controls their wallet)
-Activation:    wallet message signature (proves NFT ownership)
-Enforcement:   machine-bound license proof (offline verification)
-Runtime:       heartbeat IPC (app can't run without wrapper)
+Session:       SIWE-style signature (proves ownership at session creation)
+Enforcement:   session expiry + TTL (ownership re-verified periodically)
+Runtime:       heartbeat IPC (app cannot run without wrapper alive)
 ```
+
+---
 
 ## Scaling Considerations
 
-- Contract deployment: one per app, costs ~$1-5 on Base
-- Chain RPC: one call per activation (not per launch). Can use public RPCs or Alchemy free tier.
-- No backend servers to scale. The wrapper is fully client-side after activation.
-- License proofs are ~500 bytes. Storage is negligible.
+- Contract deployment: one per app, ~$1–5 on Base
+- RPC calls: one per session renewal (not per launch). Public RPCs or Alchemy free tier sufficient.
+- Session files: ~400 bytes. Negligible storage.
+- No backend. No database. No auth service. Fully client-side after initial deployment.
