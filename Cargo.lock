@@ -1563,29 +1563,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deotp-wrapper"
-version = "0.1.0"
-dependencies = [
- "alloy",
- "chrono",
- "clap",
- "dirs",
- "hex",
- "k256",
- "libc",
- "machine-uid",
- "nix",
- "serde",
- "serde_json",
- "sha2",
- "sha3",
- "tao",
- "tokio",
- "url",
- "wry",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4109,6 +4086,29 @@ checksum = "bb919243f34364b6bd2fc10ef797edbfa75f33c252e7998527479c6d6b47e1ec"
 dependencies = [
  "bytes",
  "rustc-hex",
+]
+
+[[package]]
+name = "rub3-wrapper"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "chrono",
+ "clap",
+ "dirs",
+ "hex",
+ "k256",
+ "libc",
+ "machine-uid",
+ "nix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sha3",
+ "tao",
+ "tokio",
+ "url",
+ "wry",
 ]
 
 [[package]]
