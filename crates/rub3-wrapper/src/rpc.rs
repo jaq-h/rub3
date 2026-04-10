@@ -6,10 +6,10 @@ use alloy::sol;
 
 // Minimal ABI surface needed for activation:
 //   ownerOf(tokenId)  — ERC-721 standard
-//   price()           — deotp license contract
+//   price()           — rub3 license contract
 sol! {
     #[sol(rpc)]
-    interface IDeotpLicense {
+    interface IRub3License {
         function ownerOf(uint256 tokenId) external view returns (address owner);
         function price() external view returns (uint256 amount);
     }
@@ -48,7 +48,7 @@ impl std::fmt::Display for RpcError {
 pub fn owner_of(rpc_url: &str, contract: Address, token_id: u64) -> Result<Address, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
-        let instance = IDeotpLicense::new(contract, provider);
+        let instance = IRub3License::new(contract, provider);
         let result = instance
             .ownerOf(U256::from(token_id))
             .call()
@@ -62,7 +62,7 @@ pub fn owner_of(rpc_url: &str, contract: Address, token_id: u64) -> Result<Addre
 pub fn token_price(rpc_url: &str, contract: Address) -> Result<U256, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
-        let instance = IDeotpLicense::new(contract, provider);
+        let instance = IRub3License::new(contract, provider);
         let result = instance
             .price()
             .call()

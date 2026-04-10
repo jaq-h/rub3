@@ -1,4 +1,4 @@
-# deotp — Architecture
+# rub3 — Architecture
 
 ## Chain
 
@@ -22,61 +22,165 @@ rpc  = "https://mainnet.base.org"
 chain_id = 8453
 ```
 
+---
+
+## Identity Models
+
+The contract issuer chooses one of two identity models when deploying. This is the most fundamental design decision in rub3 — it determines what the NFT means to the application.
+
+### Access Model (`identity = "access"`)
+
+**`wallet_address` is the user identity.**
+
+The NFT is a gate. Owning it proves the right to use the application. The user's wallet is their account. If the NFT is transferred, the new holder gets access but the old holder's session eventually expires — no account history moves.
+
+Use when:
+- The app has no persistent user data, or stores it server-side keyed on wallet address
+- Transfer is expected to be uncommon (resale market, gifting)
+- The developer wants the simplest possible model
+
+Session identity field: `wallet_address`
+
+### Account Model (`identity = "account"`)
+
+**`token_id` is the user identity**, specifically via its ERC-6551 Token Bound Account (TBA).
+
+The NFT is an account. Its TBA address is deterministic and permanent — it never changes regardless of who holds the NFT. The current holder controls the TBA (and therefore the account), but the account's identity is the TBA address, not the wallet address.
+
+Use when:
+- The app stores user data, preferences, or history
+- Wallet rotation should not reset the user's account
+- Transfer should sell the account to the buyer — they inherit the history
+- The developer wants native web3 account composability
+
+Session identity field: `tba_address` (deterministic TBA derived from token)
+
+### TBA Address Derivation (ERC-6551)
+
+The TBA address for any token is deterministic and computed locally — no on-chain call needed:
+
+```
+tba = CREATE2(
+  registry:       0x000000006551c19487814612e58FE06813775758,  // canonical ERC-6551 registry
+  implementation: <developer-chosen TBA implementation>,
+  salt:           0,
+  chainId:        8453,
+  contract:       "0x1234...abcd",
+  tokenId:        42
+)
+```
+
+The wrapper computes this address from the token ID at session creation. The TBA may or may not be deployed — rub3 does not require it to be deployed, it only uses the address as a stable identity key.
+
+If the developer wants the TBA to actually hold assets or execute transactions on behalf of the user, they deploy it separately. That is opt-in and outside rub3's scope.
+
+---
+
 ## System Overview
 
 ```
-┌──────────────┐     ┌──────────────────┐     ┌──────────────────────┐
-│   Developer   │     │   Base (L2)       │     │        User          │
-│              │     │                  │     │                      │
-│  App binary   │     │  DeotpAccess      │     │  Wallet              │
-│  deotp CLI    │────▶│  DeotpSubscription│◀────│  deotp Wrapper       │
-│  ENS name     │     │  DeotpRegistry    │     │  Session Cache       │
-│              │     │                  │     │  Embedded App        │
-└──────────────┘     └──────────────────┘     └──────────────────────┘
+┌──────────────┐     ┌─────────────────────┐     ┌──────────────────────────┐
+│   Developer   │     │   Base (L2)          │     │        User              │
+│              │     │                     │     │                          │
+│  App binary   │     │  Rub3Access or      │     │  Wallet                  │
+│  rub3 CLI    │────▶│  Rub3Subscription   │◀────│  rub3 Wrapper           │
+│  ENS name     │     │  Rub3Registry       │     │  Token selector UI       │
+│  identity=    │     │  ERC-6551 Registry   │     │  Session Cache           │
+│  access|acct  │     │                     │     │  Embedded App            │
+└──────────────┘     └─────────────────────┘     └──────────────────────────┘
 ```
 
-## Core Concepts
+---
 
-### Wallet as Identity
+## Session Model
 
-There is no machine ID in the security model. The user's wallet is their identity. Proving ownership of an NFT in that wallet proves the right to run the application. This maps directly to how every other web3 context works — the desktop wrapper simply extends this model to native binaries.
-
-### Session Model
-
-Rather than verifying on-chain at every launch (slow, requires wallet UI), the wrapper uses a short-lived session:
+Rather than verifying on-chain at every launch, the wrapper issues and caches a short-lived session after each wallet verification.
 
 ```
 session = {
-  app_id:      "com.example.myapp",
-  token_id:    42,
-  wallet:      "0xabc...123",
-  nonce:       "<random 32 bytes, wrapper-generated>",
-  issued_at:   "2026-04-10T09:00:00Z",
-  expires_at:  "2026-04-17T09:00:00Z",
-  signature:   "0x<wallet ECDSA sig over keccak256(app_id || token_id || nonce || expires_at)>",
-  chain:       "base",
-  contract:    "0x1234...abcd"
+  app_id:       "com.example.myapp",
+  token_id:     42,
+  identity:     "access" | "account",
+
+  -- access model --
+  user_id:      "0xabc...wallet",
+
+  -- account model --
+  user_id:      "0xTBA...deterministic",   // TBA address, stable across transfers
+  tba:          "0xTBA...deterministic",
+  wallet:       "0xabc...current holder",  // used for signing only
+
+  nonce:        "<random 32 bytes>",
+  issued_at:    "2026-04-10T09:00:00Z",
+  expires_at:   "2026-04-17T09:00:00Z",
+  signature:    "0x<wallet ECDSA sig over keccak256(app_id || token_id || user_id || nonce || expires_at)>",
+  chain:        "base",
+  contract:     "0x1234...abcd"
 }
 ```
 
-On each launch the wrapper verifies the signature locally (fast, offline). When the session expires, it re-verifies on-chain and issues a new session. The session TTL is set by the developer in the wrapper config.
+`user_id` is what the application uses as a stable identity key. In access model it is the wallet address. In account model it is the TBA address.
 
-**Multi-device**: Each device holds its own session. Same wallet, different nonces, independent TTLs. No coordination needed.
+The signature always comes from the current wallet (NFT holder). The wrapper verifies signature locally on each launch. On expiry, re-verifies on-chain.
 
-**Transfer semantics**: When an NFT is sold, the new owner activates a fresh session. The old owner's sessions expire at their next TTL. No active revocation required.
+**Multi-device**: Each device holds its own session. Same wallet, different nonces, independent TTLs.
 
-### Session TTL as Developer Knob
+**Transfer semantics**:
+- Access model: new holder activates a fresh session with their wallet as `user_id`. Old sessions expire at TTL.
+- Account model: new holder activates a fresh session. `user_id` (TBA) is unchanged. The application sees the same account with a new controller wallet.
+
+### Session TTL
 
 ```toml
 [license]
-session_ttl_days = 7   # default — wallet prompt once per week
+session_ttl_days = 7   # wallet prompt once per week
 ```
 
-| TTL | Behavior | Use case |
-|---|---|---|
-| 1 day | Daily re-auth | High-value tools, strict ownership enforcement |
-| 7 days | Weekly (default) | Standard desktop software |
-| 30 days | Monthly | Matches subscription billing cycle |
+| TTL | Use case |
+|---|---|
+| 1 day | High-value tools, strict ownership enforcement |
+| 7 days | Standard (default) |
+| 30 days | Matches subscription billing cycle |
+
+---
+
+## Token Selection
+
+A wallet may own multiple tokens from the same contract. At session creation (first launch or renewal), the wrapper presents a token selector after wallet connection.
+
+```
+┌────────────────────────────────────────────────┐
+│  Connect to My App                             │
+│                                                │
+│  Developer:  myapp.eth  ✓ verified rub3.eth   │
+│  Identity:   Account (NFT = your account)      │
+│                                                │
+│  Select which token to use:                    │
+│                                                │
+│  ┌──────────────────────────────────────────┐  │
+│  │ ● Token #42   (active session)           │  │
+│  │   Account: 0xTBA...a1b2   [selected]     │  │
+│  ├──────────────────────────────────────────┤  │
+│  │ ○ Token #91                              │  │
+│  │   Account: 0xTBA...c3d4                  │  │
+│  ├──────────────────────────────────────────┤  │
+│  │ ○ Token #107                             │  │
+│  │   Account: 0xTBA...e5f6                  │  │
+│  └──────────────────────────────────────────┘  │
+│                                                │
+│  [Sign in with Token #42]                      │
+└────────────────────────────────────────────────┘
+```
+
+For access model, the display omits the Account field and shows wallet address instead. For subscriptions, each token shows its expiry date.
+
+If only one token is owned, the selector is skipped and that token is auto-selected.
+
+If no tokens are owned, the purchase UI is shown instead.
+
+**Implementation:** The wrapper calls `tokensOfOwner(wallet)` (ERC-721 Enumerable) to retrieve owned token IDs. If the contract does not implement enumerable, the wrapper falls back to scanning `Transfer` events filtered by recipient.
+
+Session files are keyed on both app_id and token_id: `~/.rub3/sessions/<app_id>/<token_id>.json`. This allows each token to maintain its own cached session — switching between tokens at launch resumes the correct cached session without re-authenticating.
 
 ---
 
@@ -84,51 +188,49 @@ session_ttl_days = 7   # default — wallet prompt once per week
 
 ### 1. Smart Contracts
 
-Two contract templates, enforced identically at the wrapper level.
+#### Rub3Access (one-time purchase)
 
-#### DeotpAccess (one-time purchase)
-
-Standard ERC-721 with payable `purchase(address recipient)`:
+ERC-721 + ERC-721Enumerable with payable `purchase(address recipient)`:
 - Price per token, optional supply cap
 - `recipient == address(0)` defaults to `msg.sender`
 - `bytes32 wrapperHash` — SHA-256 of distributed binary
-- Transferrable — selling the NFT transfers access
+- `uint8 identityModel` — `0 = access`, `1 = account` — readable by wrapper
 
 On-chain check: `ownerOf(tokenId) == walletAddress`
 
-#### DeotpSubscription (recurring)
+#### Rub3Subscription (recurring)
 
-ERC-721 extended with time-based validity:
+ERC-721 + ERC-721Enumerable extended with time-based validity:
 - `mapping(uint256 => uint256) public expiresAt`
 - `purchase()` sets `expiresAt[tokenId] = block.timestamp + period`
 - `renew(uint256 tokenId)` payable, extends by one period
-- Transferrable — new owner can renew
+- `uint8 identityModel` — same flag as above
 
 On-chain check: `ownerOf(tokenId) == walletAddress && block.timestamp < expiresAt[tokenId]`
 
-#### DeotpRegistry
+Both contracts implement ERC-721Enumerable so the wrapper can call `tokensOfOwner()` directly.
 
-Permissionless registry mapping app names to contracts under `deotp.eth`:
+#### Rub3Registry
+
+Permissionless registry under `rub3.eth`:
 
 ```solidity
-contract DeotpRegistry {
+contract Rub3Registry {
     function register(string calldata appName, address licenseContract) external {
         require(IOwnable(licenseContract).owner() == msg.sender, "not contract owner");
-        // sets appName.deotp.eth → licenseContract
+        // sets appName.rub3.eth → licenseContract
     }
 }
 ```
 
 ---
 
-### 2. deotp Wrapper Runtime
-
-The core product. A Rust binary that manages wallet sessions and gates the embedded application.
+### 2. rub3 Wrapper Runtime
 
 ```
-deotp-wrapper
+rub3-wrapper
 ├── Session Manager
-│   ├── Read cached session from ~/.deotp/sessions/<app_id>.json
+│   ├── Read cached session ~/.rub3/sessions/<app_id>/<token_id>.json
 │   ├── Verify session signature (local, fast)
 │   ├── Check session expiry
 │   ├── On expiry/absence: trigger wallet connection flow
@@ -136,20 +238,24 @@ deotp-wrapper
 │
 ├── Wallet Connection
 │   ├── Open embedded webview (wry) with WalletConnect UI
-│   ├── On connect: query ownerOf() or isValid() via alloy RPC
+│   ├── On connect: fetch tokensOfOwner(wallet) via alloy RPC
+│   ├── Present token selector UI (skip if single token)
+│   ├── On token selected: run ownerOf() / isValid() confirmation
+│   ├── Read identityModel from contract
+│   ├── Compute TBA address if account model
 │   ├── Generate nonce + expires_at
-│   ├── Request ECDSA signature from wallet
+│   ├── Request ECDSA signature over (app_id || token_id || user_id || nonce || expires_at)
 │   └── Store session, close webview
 │
 ├── ENS Verification
 │   ├── Resolve developer ENS at session creation
-│   ├── Compare resolved address to embedded contract address
-│   └── Refuse session creation on mismatch
+│   ├── Compare to embedded contract address
+│   └── Refuse on mismatch
 │
 ├── Process Supervisor
 │   ├── Launch embedded binary as child process
 │   ├── Forward SIGTERM to child on wrapper exit
-│   ├── Exit wrapper if child exits
+│   ├── Exit if child exits
 │   └── Heartbeat IPC — child cannot run if wrapper dies
 │
 └── App Host
@@ -160,11 +266,13 @@ deotp-wrapper
 #### Source layout
 
 ```
-crates/deotp-wrapper/
+crates/rub3-wrapper/
 ├── src/
 │   ├── main.rs          — CLI entry point
-│   ├── session.rs       — session cache read/write/verify
-│   ├── wallet.rs        — WalletConnect flow, RPC ownership check
+│   ├── session.rs       — session cache read/write/verify, token_id keyed paths
+│   ├── wallet.rs        — WalletConnect flow, tokensOfOwner, ownerOf/isValid
+│   ├── identity.rs      — access vs account model, TBA address derivation
+│   ├── token_select.rs  — multi-token selector UI state
 │   ├── ens.rs           — ENS resolution and contract verification
 │   ├── supervisor.rs    — child process lifecycle
 │   └── webview.rs       — embedded wallet connection UI (wry)
@@ -177,7 +285,7 @@ crates/deotp-wrapper/
 | Crate | Purpose |
 |---|---|
 | `clap` | CLI argument parsing |
-| `alloy` | Ethereum RPC, ABI encoding, ENS resolution |
+| `alloy` | Ethereum RPC, ABI encoding, ENS resolution, ERC-6551 address derivation |
 | `k256` | secp256k1 ECDSA signature verification |
 | `wry` | Embedded webview for wallet connection UI |
 | `serde_json` | Session cache serialization |
@@ -186,26 +294,32 @@ crates/deotp-wrapper/
 
 ---
 
-### 3. deotp SDK (Rust Crate)
-
-Lightweight crate apps link against:
+### 3. rub3 SDK (Rust Crate)
 
 ```rust
-deotp::heartbeat();            // panics if wrapper is not alive
-let info = deotp::session();   // returns token_id, wallet, app_id, expires_at
+rub3::heartbeat();              // panics if wrapper is not alive
+let info = rub3::session();     // returns SessionInfo
+
+pub struct SessionInfo {
+    pub app_id:    String,
+    pub token_id:  u64,
+    pub user_id:   String,   // wallet (access) or TBA (account) — stable identity key
+    pub wallet:    String,   // current signing wallet, may differ from user_id in account model
+    pub identity:  IdentityModel,
+    pub expires_at: DateTime<Utc>,
+}
+
+pub enum IdentityModel { Access, Account }
 ```
 
-Communication via Unix domain socket (path passed as env var by wrapper). If the wrapper process dies, `heartbeat()` fails and the app exits immediately.
+The `user_id` field is what application code should use for all persistent data keying. It is always stable for the account model and stable-per-holder for the access model.
 
 ---
 
-### 4. deotp CLI
-
-Developer tooling:
+### 4. rub3 CLI
 
 ```
-# Package a binary into a wrapped distributable
-deotp pack \
+rub3 pack \
   --binary ./target/release/myapp \
   --app-id com.example.myapp \
   --contract 0x1234...abcd \
@@ -213,13 +327,13 @@ deotp pack \
   --session-ttl 7 \
   --output ./dist/myapp
 
-# Deploy a new license contract
-deotp deploy --type access --price 0.05 --chain base
-deotp deploy --type subscription --price 0.01 --period 30 --chain base
+rub3 deploy --type access --identity account --price 0.05 --chain base
+rub3 deploy --type subscription --identity access --price 0.01 --period 30 --chain base
 
-# Register in the deotp.eth registry
-deotp register --name myapp --contract 0x1234...abcd
+rub3 register --name myapp --contract 0x1234...abcd
 ```
+
+`--identity` at deploy time sets the `identityModel` flag in the contract. The wrapper reads this flag on-chain at session creation.
 
 ---
 
@@ -228,7 +342,7 @@ deotp register --name myapp --contract 0x1234...abcd
 ```rust
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_deotp::init())
+        .plugin(tauri_plugin_rub3::init())
         .run(tauri::generate_context!())
         .expect("error running app");
 }
@@ -236,67 +350,46 @@ fn main() {
 
 Frontend JS API:
 ```js
-const session = await invoke('plugin:deotp|session');
-// { token_id, wallet, expires_at }
+const session = await invoke('plugin:rub3|session');
+// {
+//   token_id:   42,
+//   user_id:    "0xTBA..." | "0xwallet...",
+//   wallet:     "0xwallet...",
+//   identity:   "account" | "access",
+//   expires_at: "2026-04-17T09:00:00Z"
+// }
 ```
 
-The activation/renewal flow renders in the Tauri app's own webview. No separate window.
+Token selection and renewal flow render in the Tauri app's own webview.
 
 ---
 
 ## ENS Trust Layer
-
-Contract addresses are opaque hex strings. ENS provides human-readable identity that ties the contract to a developer's verifiable on-chain identity.
 
 ### How it works
 
 ```
 Wrapper config embeds:
   contract: "0x1234...abcd"
-  ens:      "myapp.eth"              # developer's ENS, OR
-            "myapp.deotp.eth"        # deotp registry subdomain
+  ens:      "myapp.eth"           # developer's own ENS, OR
+            "myapp.rub3.eth"     # rub3 registry subdomain
 
-At session creation, wrapper:
-  1. Resolves ENS name → address
-  2. Compares to embedded contract address
+At session creation:
+  1. Resolve ENS → address
+  2. Compare to embedded contract address
   3. Mismatch → refuse, warn user
   4. Match → proceed
 ```
 
 ### Two layers of trust
 
-**Layer 1 — Developer's own ENS** (`myapp.eth`)
-- Fully decentralized, developer controls it
-- Trust comes from the developer's established identity
+**Layer 1 — Developer's own ENS** (`myapp.eth`) — decentralized, developer-controlled.
 
-**Layer 2 — deotp.eth subdomain** (`myapp.deotp.eth`)
-- Permissionless via `DeotpRegistry.register()` — developer proves contract ownership on-chain
-- Adds "verified on deotp.eth" badge in the activation UI
-- No manual approval — on-chain proof is sufficient
-
-### Activation UI
-
-```
-┌────────────────────────────────────────────┐
-│  Connect to My App                         │
-│                                            │
-│  Developer:   myapp.eth                    │
-│  Contract:    0x1234...abcd (Base)         │
-│  Registry:    ✓ verified on deotp.eth      │
-│  Access:      One-time purchase            │
-│  Price:       0.05 ETH                     │
-│                                            │
-│  Session valid for: 7 days                 │
-│                                            │
-│  [Connect Wallet]                          │
-└────────────────────────────────────────────┘
-```
+**Layer 2 — rub3.eth subdomain** (`myapp.rub3.eth`) — permissionless, on-chain proof of contract ownership. Adds "verified" badge in UI.
 
 ---
 
 ## Binary Verification (Distribution Trust)
-
-The license contract stores a SHA-256 hash of the distributed wrapper binary:
 
 ```solidity
 bytes32 public wrapperHash;
@@ -308,45 +401,50 @@ function setWrapperHash(bytes32 hash) external onlyOwner {
 
 Trust chain: **ENS → contract → binary hash → running wrapper**
 
-Users can verify their download against the on-chain hash before running. This closes the distribution trust gap without a centralized app store or code signing authority.
-
 ---
 
 ## Launch Flow
 
 ```
-App launch:
-┌─────────────────────────────────────────────────────────┐
-│                      Wrapper starts                     │
-└────────────────────────┬────────────────────────────────┘
-                         │
-              Read ~/.deotp/sessions/<app_id>.json
-                         │
-              ┌──────────┴──────────┐
-          Session valid?        No session /
-          Sig OK + not expired   Expired / Invalid
-              │                      │
-         Launch app              Open webview
-              │                      │
-              │               Connect wallet (WalletConnect)
-              │                      │
-              │               Resolve ENS → verify contract
-              │                      │
-              │               ownerOf() / isValid() on-chain
-              │                      │
-              │                ┌─────┴─────┐
-              │            Owns token    No token
-              │                │              │
-              │           Request sig    Show purchase UI
-              │           (SIWE-style)        │
-              │                │         User purchases →
-              │           Cache session   loop back
-              │                │
-              └────────────────┘
-                    Launch app
-```
+Wrapper starts
+    │
+    Read ~/.rub3/sessions/<app_id>/<token_id>.json
+    │                           (token_id from last session, or none)
+    │
+    ┌───────────────┴───────────────┐
+Session valid?                  No session /
+Sig OK + not expired            Expired / Invalid
+    │                               │
+Launch app                      Open webview
+                                    │
+                            Connect wallet (WalletConnect)
+                                    │
+                            Resolve ENS → verify contract
+                                    │
+                            tokensOfOwner(wallet) → token list
+                                    │
+                         ┌──────────┴──────────┐
+                    0 tokens               ≥1 token
+                         │                     │
+                  Show purchase UI      Show token selector
+                         │              (auto-select if 1 token)
+                  User purchases             │
+                  → loop back          User selects token
+                                            │
+                                    ownerOf() / isValid()
+                                            │
+                                    Read identityModel from contract
+                                            │
+                                    Compute user_id:
+                                    access → wallet_address
+                                    account → TBA address
+                                            │
+                                    Request session signature
+                                            │
+                                    Cache session
+                                            │
+                                       Launch app
 
-```
 While running:
   Wrapper ──heartbeat IPC──▶ App (every 5s)
   App panics/exits if heartbeat stops
@@ -361,6 +459,9 @@ While running:
 {
   "app_id":     "com.example.myapp",
   "token_id":   42,
+  "identity":   "account",
+  "user_id":    "0xTBA...deterministic",
+  "tba":        "0xTBA...deterministic",
   "wallet":     "0xabc...123",
   "nonce":      "a3f8...c921",
   "issued_at":  "2026-04-10T09:00:00Z",
@@ -371,9 +472,11 @@ While running:
 }
 ```
 
-The signature is `wallet.sign(keccak256(app_id || token_id || nonce || expires_at))`.
+Access model omits `tba` and sets `user_id` to the wallet address.
 
-The wrapper verifies this locally on every launch. No RPC call needed until the session expires.
+Signature covers: `keccak256(app_id || token_id || user_id || nonce || expires_at)`.
+
+Session files stored at `~/.rub3/sessions/<app_id>/<token_id>.json` — one per token, not one per app.
 
 ---
 
@@ -381,39 +484,36 @@ The wrapper verifies this locally on every launch. No RPC call needed until the 
 
 ### Wallet as trust boundary
 
-The wrapper never holds a private key. All signing happens in the user's wallet (separate process or device) via WalletConnect. A session signature is free (no on-chain effect) — it cannot move assets.
-
-**Spending the NFT requires a wallet transaction** the user must explicitly approve. A compromised wrapper cannot silently transfer the NFT.
+The wrapper never holds a private key. Signing happens in the wallet via WalletConnect. Session signatures are free — no on-chain effect.
 
 ### Threat model
 
 | Attack | Mitigation |
 |---|---|
-| Copy session file to another machine | Nonce is single-use; new session requires wallet re-auth. Session is not machine-bound but is wallet-bound — you'd need the wallet too. |
-| Replay expired session | `expires_at` is verified locally on every launch |
-| Redirect payment to wrong contract | ENS resolution at session creation catches address mismatch |
+| Copy session file to another machine | Nonce is single-use; new session requires wallet re-auth |
+| Replay expired session | `expires_at` verified locally on every launch |
+| Redirect payment to wrong contract | ENS resolution at session creation |
 | NFT transferred, old user still has session | Session expires at TTL; ownership re-verified on renewal |
-| Subscription lapsed, user still has session | `isValid()` checked at renewal — returns false, session not issued |
-| Forged session signature | secp256k1 ECDSA — not forgeable without the wallet's private key |
-| Compromised wrapper binary | ENS + on-chain binary hash allow users to detect tampering |
+| Subscription lapsed, session still valid | `isValid()` checked at renewal — returns false, session not issued |
+| Account model: attacker has session file | `user_id` is a TBA address — useless without the wallet that controls the NFT |
+| Forged session signature | secp256k1 ECDSA — requires wallet private key |
+| Compromised wrapper | ENS + on-chain binary hash allow detection |
 
-### What this does NOT protect against
+### Account model: what transfer means to security
 
-- Determined reverse engineering (binary is not encrypted, can be patched)
-- Memory dumping (running app is in cleartext memory)
-- Users who share their wallet (wallet = identity, sharing a wallet is sharing an identity — same as any web3 context)
+In account model, the TBA address (`user_id`) is stable across transfers. An attacker who obtains a cached session file gets a `user_id` that is currently controlled by someone else's wallet. The session signature verifies against the wallet that signed it — after transfer, the old wallet no longer controls the NFT, but the session remains valid until TTL.
 
-This is honest access control. The goal is to make paying easier than not paying, and to make the access model as familiar as the rest of web3.
+This is intentional and matches the semantics: **transfer sells the account to the new holder, who takes full control at the next session renewal.** The old holder's session is a time-limited lame duck.
 
 ### Defense layers summary
 
 ```
-Distribution:  on-chain binary hash (verify download before running)
-Identity:      ENS resolution (verify contract belongs to the developer)
-Payment:       wallet transaction approval (user controls their wallet)
-Session:       SIWE-style signature (proves ownership at session creation)
-Enforcement:   session expiry + TTL (ownership re-verified periodically)
-Runtime:       heartbeat IPC (app cannot run without wrapper alive)
+Distribution:  on-chain binary hash (verify download)
+Identity:      ENS resolution (verify developer identity)
+Payment:       wallet transaction approval
+Session:       SIWE-style signature (proves ownership at creation)
+Enforcement:   session TTL (periodic on-chain re-verification)
+Runtime:       heartbeat IPC (app cannot run without wrapper)
 ```
 
 ---
@@ -421,6 +521,6 @@ Runtime:       heartbeat IPC (app cannot run without wrapper alive)
 ## Scaling Considerations
 
 - Contract deployment: one per app, ~$1–5 on Base
-- RPC calls: one per session renewal (not per launch). Public RPCs or Alchemy free tier sufficient.
-- Session files: ~400 bytes. Negligible storage.
-- No backend. No database. No auth service. Fully client-side after initial deployment.
+- RPC calls: one per session renewal (`tokensOfOwner` + `ownerOf`/`isValid`). Public RPC or Alchemy free tier sufficient.
+- Session files: ~500 bytes each, one per token per device. Negligible storage.
+- No backend. No database. No auth service.

@@ -1,10 +1,10 @@
 [package]
-name = "deotp-wrapper"
+name = "rub3-wrapper"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "deotp-wrapper"
+name = "rub3-wrapper"
 path = "src/main.rs"
 
 [dependencies]

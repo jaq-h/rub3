@@ -34,18 +34,18 @@ impl From<serde_json::Error> for StoreError {
 
 /// Returns the path for the license proof file.
 ///
-/// Uses `$DEOTP_LICENSE_DIR` if set, otherwise falls back to the
+/// Uses `$RUB3_LICENSE_DIR` if set, otherwise falls back to the
 /// platform data directory (`~/Library/Application Support` on macOS,
 /// `$XDG_DATA_HOME` / `~/.local/share` on Linux, `%APPDATA%` on Windows).
 ///
-/// Full path: `{data_dir}/deotp/licenses/<app_id>.json`
+/// Full path: `{data_dir}/rub3/licenses/<app_id>.json`
 fn proof_path(app_id: &str) -> Result<PathBuf, StoreError> {
-    let base = if let Some(override_dir) = std::env::var_os("DEOTP_LICENSE_DIR") {
+    let base = if let Some(override_dir) = std::env::var_os("RUB3_LICENSE_DIR") {
         PathBuf::from(override_dir)
     } else {
         dirs::data_dir()
             .ok_or(StoreError::DataDirNotFound)?
-            .join("deotp")
+            .join("rub3")
             .join("licenses")
     };
     Ok(base.join(format!("{app_id}.json")))
@@ -60,7 +60,7 @@ pub fn load_proof(app_id: &str) -> Result<LicenseProof, StoreError> {
     Ok(serde_json::from_str(&data)?)
 }
 
-/// Serialises and writes the license proof to `~/.deotp/licenses/<app_id>.json`,
+/// Serialises and writes the license proof to `~/.rub3/licenses/<app_id>.json`,
 /// creating the directory if it does not exist.
 pub fn save_proof(app_id: &str, proof: &LicenseProof) -> Result<(), StoreError> {
     let path = proof_path(app_id)?;
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let app_id = "com.deotp.store_test_round_trip";
+        let app_id = "com.rub3.store_test_round_trip";
         let original = test_proof(app_id);
 
         save_proof(app_id, &original).expect("save failed");
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn load_missing_returns_not_found() {
-        let err = load_proof("com.deotp.store_test_does_not_exist").unwrap_err();
+        let err = load_proof("com.rub3.store_test_does_not_exist").unwrap_err();
         match err {
             StoreError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
             other => panic!("expected Io(NotFound), got: {other}"),
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn save_creates_missing_directories() {
         // Use a deeply nested app_id to ensure intermediate dirs are created.
-        let app_id = "com.deotp.store_test_mkdir";
+        let app_id = "com.rub3.store_test_mkdir";
         let proof = test_proof(app_id);
 
         save_proof(app_id, &proof).expect("save failed");
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn save_overwrites_existing_proof() {
-        let app_id = "com.deotp.store_test_overwrite";
+        let app_id = "com.rub3.store_test_overwrite";
 
         let mut proof = test_proof(app_id);
         save_proof(app_id, &proof).expect("first save failed");
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn paid_by_round_trips() {
-        let app_id = "com.deotp.store_test_paid_by";
+        let app_id = "com.rub3.store_test_paid_by";
         let mut proof = test_proof(app_id);
         proof.paid_by = Some("0xpayer".into());
 

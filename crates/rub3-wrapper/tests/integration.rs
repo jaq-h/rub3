@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn wrapper_bin() -> std::path::PathBuf {
-    env!("CARGO_BIN_EXE_deotp-wrapper").into()
+    env!("CARGO_BIN_EXE_rub3-wrapper").into()
 }
 
 #[cfg(target_os = "macos")]
@@ -35,10 +35,10 @@ fn propagates_nonzero_exit_code() {
 #[test]
 fn passes_args_to_child() {
     let output = Command::new(wrapper_bin())
-        .args(["--binary", "/bin/echo", "--", "hello", "deotp"])
+        .args(["--binary", "/bin/echo", "--", "hello", "rub3"])
         .output()
         .unwrap();
-    assert_eq!(output.stdout, b"hello deotp\n");
+    assert_eq!(output.stdout, b"hello rub3\n");
 }
 
 #[test]

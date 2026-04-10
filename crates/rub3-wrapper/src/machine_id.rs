@@ -36,7 +36,7 @@ impl std::fmt::Display for MachineIdError {
 mod tests {
     use super::*;
 
-    const TEST_APP_ID: &str = "com.deotp.test";
+    const TEST_APP_ID: &str = "com.rub3.test";
 
     #[test]
     fn machine_id_is_stable_across_calls() {

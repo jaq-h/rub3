@@ -158,7 +158,7 @@ impl IpcState {
                     "chainId":         self.chain_id,
                     "developerEns":    self.developer_ens,
                 });
-                self.eval(format!("window.deotp.onAppInfo({})", payload));
+                self.eval(format!("window.rub3.onAppInfo({})", payload));
             }
 
             IpcMessage::Connect { address } => {
@@ -169,7 +169,7 @@ impl IpcState {
                     "tokenId":      1,
                     "ownerAddress": address,
                 });
-                self.eval(format!("window.deotp.onShowActivate({})", payload));
+                self.eval(format!("window.rub3.onShowActivate({})", payload));
             }
 
             IpcMessage::Signed { token_id, owner_address, signature, paid_by } => {

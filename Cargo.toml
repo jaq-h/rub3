@@ -1,5 +1,5 @@
 [workspace]
 members = [
-    "crates/deotp-wrapper",
+    "crates/rub3-wrapper",
 ]
 resolver = "2"

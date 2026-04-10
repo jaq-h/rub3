@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 // ── License proof schema ──────────────────────────────────────────────────────
 
-/// The license proof stored at ~/.deotp/licenses/<app_id>.json after activation.
+/// The license proof stored at ~/.rub3/licenses/<app_id>.json after activation.
 ///
 /// `wallet_address` owns the NFT and produced the activation signature.
 /// `paid_by` is only set when the purchasing wallet differs from `wallet_address`.
@@ -175,7 +175,7 @@ mod tests {
     ///   const msg = ethers.utils.arrayify(
     ///     ethers.utils.sha256(
     ///       ethers.utils.concat([
-    ///         ethers.utils.toUtf8Bytes("com.deotp.test"),
+    ///         ethers.utils.toUtf8Bytes("com.rub3.test"),
     ///         ethers.utils.zeroPad(ethers.utils.hexlify(42), 8),
     ///         ethers.utils.toUtf8Bytes("sha256:test-machine-id"),
     ///       ])
@@ -188,7 +188,7 @@ mod tests {
     /// signing. `recover_address()` applies the same prefix via
     /// `personal_sign_hash()` before recovery.
 
-    const TEST_APP_ID: &str = "com.deotp.test";
+    const TEST_APP_ID: &str = "com.rub3.test";
     const TEST_TOKEN_ID: u64 = 42;
     const TEST_MACHINE_ID: &str = "sha256:test-machine-id";
 

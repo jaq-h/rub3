@@ -12,11 +12,11 @@ use std::path::PathBuf;
 // ── App configuration ─────────────────────────────────────────────────────────
 //
 // These constants are placeholders for the POC.
-// Phase 2.1 (deotp pack) will inject them at build time from the developer's
+// Phase 2.1 (rub3 pack) will inject them at build time from the developer's
 // config, embedding the correct values for each distributed binary.
 
 /// Reverse-DNS identifier for this application.
-const APP_ID: &str = "com.deotp.example";
+const APP_ID: &str = "com.rub3.example";
 
 /// ERC-721 license contract address on the target chain.
 const CONTRACT: &str = "0x0000000000000000000000000000000000000000";
@@ -34,7 +34,7 @@ const DEVELOPER_ENS: Option<&str> = None;
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "deotp-wrapper", about = "deotp license wrapper")]
+#[command(name = "rub3-wrapper", about = "rub3 license wrapper")]
 struct Cli {
     /// Path to the binary to launch
     #[arg(long)]
