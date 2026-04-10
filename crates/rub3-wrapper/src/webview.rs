@@ -20,7 +20,6 @@ pub struct ActivationContext {
     pub chain_id: u64,
     pub rpc_url: String,
     pub developer_ens: Option<String>,
-    pub machine_id: String,
 }
 
 pub enum ActivationResult {
@@ -84,7 +83,6 @@ pub fn run_activation_window(ctx: ActivationContext) -> ActivationResult {
         chain_id: ctx.chain_id,
         rpc_url: ctx.rpc_url.clone(),
         developer_ens: ctx.developer_ens.clone(),
-        machine_id: ctx.machine_id.clone(),
         cmd_tx: cmd_tx.clone(),
         result_tx: result_tx.clone(),
     };
@@ -135,7 +133,6 @@ struct IpcState {
     chain_id: u64,
     rpc_url: String,
     developer_ens: Option<String>,
-    machine_id: String,
     cmd_tx: mpsc::Sender<Cmd>,
     result_tx: mpsc::Sender<ActivationResult>,
 }
@@ -178,7 +175,6 @@ impl IpcState {
                     token_id,
                     wallet_address: owner_address,
                     paid_by,
-                    machine_id: self.machine_id.clone(),
                     signature,
                     activated_at: chrono::Utc::now().to_rfc3339(),
                     chain: "base".to_string(),

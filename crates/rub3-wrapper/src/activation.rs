@@ -1,9 +1,8 @@
 use crate::webview::{ActivationContext, ActivationResult};
-use crate::{license, machine_id, store, webview};
+use crate::{license, store, webview};
 
 #[derive(Debug)]
 pub enum ActivationError {
-    MachineId(machine_id::MachineIdError),
     Cancelled,
     Error(String),
 }
@@ -11,7 +10,6 @@ pub enum ActivationError {
 impl std::fmt::Display for ActivationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ActivationError::MachineId(e) => write!(f, "machine ID unavailable: {e}"),
             ActivationError::Cancelled => write!(f, "activation cancelled"),
             ActivationError::Error(e) => write!(f, "{e}"),
         }
@@ -30,14 +28,12 @@ pub fn ensure(
     rpc_url: &str,
     developer_ens: Option<String>,
 ) -> Result<(), ActivationError> {
-    let mid = machine_id::machine_id(app_id).map_err(ActivationError::MachineId)?;
-
     // Fast path: a valid proof is already stored.
     if let Ok(proof) = store::load_proof(app_id) {
-        if license::verify(&proof, &mid).is_ok() {
+        if license::verify(&proof).is_ok() {
             return Ok(());
         }
-        // Proof exists but is invalid (wrong machine, bad sig, etc.) — fall through.
+        // Proof exists but is invalid (bad sig, etc.) — fall through.
     }
 
     // Slow path: open the activation window.
@@ -47,7 +43,6 @@ pub fn ensure(
         chain_id,
         rpc_url: rpc_url.to_string(),
         developer_ens,
-        machine_id: mid,
     };
 
     match webview::run_activation_window(ctx) {

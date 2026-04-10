@@ -84,7 +84,6 @@ mod tests {
             token_id: 7,
             wallet_address: "0xabc123".into(),
             paid_by: None,
-            machine_id: "sha256:deadbeef".into(),
             signature: "0xsig".into(),
             activated_at: "2026-04-09T00:00:00Z".into(),
             chain: "base".into(),
@@ -103,7 +102,6 @@ mod tests {
         assert_eq!(original.app_id, loaded.app_id);
         assert_eq!(original.token_id, loaded.token_id);
         assert_eq!(original.wallet_address, loaded.wallet_address);
-        assert_eq!(original.machine_id, loaded.machine_id);
         assert_eq!(original.signature, loaded.signature);
 
         // cleanup

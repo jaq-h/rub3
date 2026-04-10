@@ -16,8 +16,7 @@ pub struct LicenseProof {
     pub wallet_address: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paid_by: Option<String>,
-    pub machine_id: String,
-    /// Hex-encoded ECDSA signature over H(app_id || token_id || machine_id)
+    /// Hex-encoded ECDSA signature over H(app_id || token_id)
     pub signature: String,
     pub activated_at: String,
     pub chain: String,
@@ -28,16 +27,15 @@ pub struct LicenseProof {
 
 /// Builds the raw bytes that the wallet signs during activation.
 ///
-/// message = SHA-256(app_id || token_id_be_bytes || machine_id)
+/// message = SHA-256(app_id || token_id_be_bytes)
 ///
 /// The token_id is encoded as a big-endian u64 (8 bytes) to give it a fixed
 /// width — prevents ambiguity between e.g. token 1 + "2..." vs token 12 + "...".
-pub fn activation_message(app_id: &str, token_id: u64, machine_id: &str) -> [u8; 32] {
+pub fn activation_message(app_id: &str, token_id: u64) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(app_id.as_bytes());
     hasher.update(token_id.to_be_bytes());
-    hasher.update(machine_id.as_bytes());
     hasher.finalize().into()
 }
 
@@ -47,7 +45,6 @@ pub fn activation_message(app_id: &str, token_id: u64, machine_id: &str) -> [u8;
 pub enum VerifyError {
     InvalidSignature(String),
     AddressMismatch { expected: String, recovered: String },
-    MachineIdMismatch,
 }
 
 impl std::fmt::Display for VerifyError {
@@ -58,24 +55,15 @@ impl std::fmt::Display for VerifyError {
                 f,
                 "address mismatch: proof claims {expected}, signature recovers {recovered}"
             ),
-            VerifyError::MachineIdMismatch => {
-                write!(f, "machine ID mismatch: license is bound to a different machine")
-            }
         }
     }
 }
 
-/// Verifies a stored license proof against the current machine.
+/// Verifies a stored license proof.
 ///
-/// Checks:
-/// 1. The current machine_id matches the one in the proof.
-/// 2. The ECDSA signature recovers to the wallet address in the proof.
-pub fn verify(proof: &LicenseProof, current_machine_id: &str) -> Result<(), VerifyError> {
-    if proof.machine_id != current_machine_id {
-        return Err(VerifyError::MachineIdMismatch);
-    }
-
-    let msg = activation_message(&proof.app_id, proof.token_id, &proof.machine_id);
+/// Checks that the ECDSA signature recovers to the wallet address in the proof.
+pub fn verify(proof: &LicenseProof) -> Result<(), VerifyError> {
+    let msg = activation_message(&proof.app_id, proof.token_id);
     let recovered = recover_address(&msg, &proof.signature)?;
 
     let expected = proof.wallet_address.to_lowercase();
@@ -169,47 +157,20 @@ fn public_key_to_address(key: &k256::ecdsa::VerifyingKey) -> String {
 mod tests {
     use super::*;
 
-    /// Test vector produced with ethers.js:
-    ///
-    ///   const wallet = new ethers.Wallet(privateKey);
-    ///   const msg = ethers.utils.arrayify(
-    ///     ethers.utils.sha256(
-    ///       ethers.utils.concat([
-    ///         ethers.utils.toUtf8Bytes("com.rub3.test"),
-    ///         ethers.utils.zeroPad(ethers.utils.hexlify(42), 8),
-    ///         ethers.utils.toUtf8Bytes("sha256:test-machine-id"),
-    ///       ])
-    ///     )
-    ///   );
-    ///   const sig = await wallet.signMessage(msg);  // wallet applies personal_sign prefix
-    ///
-    /// `activation_message()` produces the raw 32-byte preimage. The wallet
-    /// prepends "\x19Ethereum Signed Message:\n32" and keccak256-hashes before
-    /// signing. `recover_address()` applies the same prefix via
-    /// `personal_sign_hash()` before recovery.
-
     const TEST_APP_ID: &str = "com.rub3.test";
     const TEST_TOKEN_ID: u64 = 42;
-    const TEST_MACHINE_ID: &str = "sha256:test-machine-id";
 
     #[test]
     fn activation_message_is_deterministic() {
-        let a = activation_message(TEST_APP_ID, TEST_TOKEN_ID, TEST_MACHINE_ID);
-        let b = activation_message(TEST_APP_ID, TEST_TOKEN_ID, TEST_MACHINE_ID);
+        let a = activation_message(TEST_APP_ID, TEST_TOKEN_ID);
+        let b = activation_message(TEST_APP_ID, TEST_TOKEN_ID);
         assert_eq!(a, b);
     }
 
     #[test]
     fn activation_message_differs_by_token_id() {
-        let a = activation_message(TEST_APP_ID, 1, TEST_MACHINE_ID);
-        let b = activation_message(TEST_APP_ID, 2, TEST_MACHINE_ID);
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn activation_message_differs_by_machine_id() {
-        let a = activation_message(TEST_APP_ID, TEST_TOKEN_ID, "sha256:machine-a");
-        let b = activation_message(TEST_APP_ID, TEST_TOKEN_ID, "sha256:machine-b");
+        let a = activation_message(TEST_APP_ID, 1);
+        let b = activation_message(TEST_APP_ID, 2);
         assert_ne!(a, b);
     }
 
@@ -234,31 +195,12 @@ mod tests {
     }
 
     #[test]
-    fn verify_rejects_wrong_machine_id() {
-        let proof = LicenseProof {
-            app_id: TEST_APP_ID.into(),
-            token_id: TEST_TOKEN_ID,
-            wallet_address: "0xdeadbeef".into(),
-            paid_by: None,
-            machine_id: "sha256:original-machine".into(),
-            signature: "0x00".repeat(32) + "00", // placeholder — won't reach sig check
-            activated_at: "2026-01-01T00:00:00Z".into(),
-            chain: "base".into(),
-            contract: "0x1234".into(),
-        };
-
-        let err = verify(&proof, "sha256:different-machine").unwrap_err();
-        assert!(matches!(err, VerifyError::MachineIdMismatch));
-    }
-
-    #[test]
     fn license_proof_serialises_without_paid_by_when_none() {
         let proof = LicenseProof {
             app_id: "com.example.app".into(),
             token_id: 1,
             wallet_address: "0xabc".into(),
             paid_by: None,
-            machine_id: "sha256:abc".into(),
             signature: "0xsig".into(),
             activated_at: "2026-01-01T00:00:00Z".into(),
             chain: "base".into(),
@@ -276,7 +218,6 @@ mod tests {
             token_id: 1,
             wallet_address: "0xabc".into(),
             paid_by: Some("0xdef".into()),
-            machine_id: "sha256:abc".into(),
             signature: "0xsig".into(),
             activated_at: "2026-01-01T00:00:00Z".into(),
             chain: "base".into(),
@@ -295,7 +236,6 @@ mod tests {
             token_id: 99,
             wallet_address: "0xabc123".into(),
             paid_by: Some("0xdef456".into()),
-            machine_id: "sha256:somehash".into(),
             signature: "0xdeadbeef".into(),
             activated_at: "2026-04-08T00:00:00Z".into(),
             chain: "base".into(),
@@ -309,7 +249,6 @@ mod tests {
         assert_eq!(original.token_id, restored.token_id);
         assert_eq!(original.wallet_address, restored.wallet_address);
         assert_eq!(original.paid_by, restored.paid_by);
-        assert_eq!(original.machine_id, restored.machine_id);
         assert_eq!(original.signature, restored.signature);
     }
 }

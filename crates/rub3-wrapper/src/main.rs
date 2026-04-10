@@ -1,6 +1,6 @@
 mod activation;
 mod license;
-mod machine_id;
+
 mod rpc;
 mod store;
 mod supervisor;
