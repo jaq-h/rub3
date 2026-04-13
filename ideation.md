@@ -1,67 +1,87 @@
-# deotp
+# rub3
 
-Decentralized One-Time Purchase — NFT-based software licensing with a native application wrapper.
+Wallet-native desktop software. NFT-gated access for native applications, without a browser.
 
-## Core Concept
+## The Paradigm
 
-A developer deploys a standard NFT contract (ERC-721 + payable mint) for their application. Users purchase a license by minting an NFT. A native Rust wrapper enforces the license locally — the user connects their wallet once to activate, and the wrapper verifies offline on every subsequent launch. No backend servers, no key services, no intermediaries.
+Web3 replaced username/password with wallet connect for web apps. rub3 does the same for native desktop applications.
+
+The NFT is not a license key in the DRM sense. It is an access credential in the web3 sense — owned by a wallet, verifiable on-chain, transferrable, composable. The wrapper is the runtime that enforces this on the user's machine, independent of any browser or web context.
+
+There is no offline mode. There is no machine binding. The wallet is the identity layer. Connecting it is how you prove who you are, the same way it works in every other web3 context — except here the gated resource is a native binary, not a webpage.
 
 ## How It Works
 
-1. **Developer** packages their Rust or Tauri app inside the deotp wrapper using the CLI
-2. **Developer** deploys a standard ERC-721 contract with a `purchase()` function (price, supply cap, etc.)
-3. **User** buys the NFT (standard on-chain transaction)
-4. **User** launches the wrapped app → prompted to connect wallet
-5. **Wrapper** checks chain: does this wallet own an NFT from this app's contract? (one-time, online)
-6. **Wallet** signs a machine-bound activation message: `H(app_id || tokenId || machine_id)`
-7. **Wrapper** stores `{signature, wallet_addr, tokenId}` locally as the license proof
-8. **Every subsequent launch**: wrapper re-derives message, verifies signature offline — no network needed
+1. **Developer** packages their Rust or Tauri app inside the rub3 wrapper using the CLI
+2. **Developer** deploys a license contract (one-time purchase or subscription) on Base
+3. **User** purchases access — mints an NFT via the in-wrapper purchase UI or any standard frontend
+4. **User** launches the wrapped app → wrapper checks for a valid cached session
+5. If no session (or session expired): wrapper opens wallet connection, verifies on-chain ownership, requests a session signature
+6. **Wrapper** caches the session locally for the configured TTL
+7. **Every launch within TTL**: wrapper verifies session signature locally, launches immediately
+8. **Session expiry**: wallet prompt again — ownership re-verified on-chain
 
-## What Already Exists (Off the Shelf)
+## What rub3 Builds
 
-- NFT minting contracts (OpenZeppelin ERC-721 templates)
-- Wallet connection (ethers.js, wagmi, WalletConnect)
-- On-chain ownership verification (`ownerOf(tokenId)`)
-
-## What deotp Builds (The Product)
-
-The wrapper is the entire product. Without it, an NFT receipt has no enforcement on the user's machine.
-
-- **deotp-wrapper** — Rust binary that hosts and gates the embedded application
-- **deotp-sdk** — Rust crate that apps link against for heartbeat/lifecycle integration
-- **deotp-cli** — Packaging tool that bundles an app into a wrapped distributable
-- **tauri-plugin-deotp** — Tauri plugin for web-app integration
+- **rub3-wrapper** — Rust binary that manages wallet sessions and gates the embedded application
+- **rub3-sdk** — Rust crate apps link against for heartbeat and session access
+- **rub3-cli** — Packaging and deployment tool for developers
+- **tauri-plugin-rub3** — First-class Tauri integration
 
 ## Design Principles
 
-- The wrapper does not need internet after initial activation
-- The wrapper can host embedded Rust binaries and Tauri web applications
-- The embedded app cannot run if the wrapper process is killed (heartbeat IPC)
-- The wrapper takes minimal CPU/memory overhead
-- The wrapper does not interfere with the app's system file access but can pause compute and kill the app
-- Binary encryption is explicitly a non-goal — the wrapper enforces license checks, not cryptographic DRM. This matches how most commercial software works (the effort to crack exceeds the cost to buy).
+- **Wallet is identity.** No machine fingerprinting, no license files, no key servers. The wallet signature is the credential.
+- **Desktop ≠ browser.** Native UX — system tray, OS notifications, no browser dependency. The embedded webview is only for wallet connection UI, not the app itself.
+- **Always-online by design.** Session TTL enforces periodic on-chain re-verification. This is a feature, not a limitation — it means NFT transfers take effect on next session renewal, subscriptions expire naturally, and ownership is always current.
+- **Multi-device by default.** One wallet works on any number of machines. Each device maintains its own session cache. No coordination, no device slots, no gas cost per device.
+- **Transfer = re-activation.** When an NFT is sold or transferred, the old owner's sessions expire at their next TTL. The new owner activates fresh. No revocation infrastructure needed.
+- **No backend.** The chain is the source of truth. The wallet is the key. rub3 has no servers, no databases, no auth service.
+
+## Two Dimensions of Choice
+
+These are orthogonal decisions the contract issuer makes at deploy time.
+
+### Billing model
+**One-time purchase** (`Rub3Access`) — pay once, own forever. NFT is transferrable.
+
+**Subscription** (`Rub3Subscription`) — recurring payment, `expiresAt` on-chain. Expired = no session issued.
+
+### Identity model
+**Access** (`identity = "access"`) — wallet is the user identity. The NFT is a gate. Each holder is a distinct user. Transfer to a new wallet creates a fresh account in the application.
+
+**Account** (`identity = "account"`) — the NFT is the user. Identity is the token's ERC-6551 Token Bound Account (TBA) address — deterministic, permanent, independent of who holds the NFT. Transfer sells the account: buyer inherits the history, preferences, and any on-chain assets attached to the TBA.
+
+The wrapper reads the identity model from the contract at session creation. The SDK's `user_id` field reflects this — application code keys all persistent data on `user_id` and never needs to know which model is in use.
+
+### The four combinations
+
+| | Access model | Account model |
+|---|---|---|
+| **One-time** | Standard software license. Wallet = account. | Software with persistent user data. NFT = account. Transferring sells the account. |
+| **Subscription** | Monthly SaaS. New wallet = new subscriber. | Subscription tied to a character/account. Buyer inherits the account and must renew it. |
 
 ## Key Decisions
 
-- **Chain: Base (Ethereum L2).** Coinbase on-ramp means users can fund their wallet without bridging. EVM compatibility gives us ENS, ERC-721, and the `alloy` Rust crate. Solana was considered but ENS doesn't exist there, the Rust SDK is heavy (~150 deps vs ~30), and the cost/speed difference is negligible for one-time purchases. Chain config is abstracted so Arbitrum or others can be added later.
-- **ENS trust layer.** Developers register an ENS name (their own or a `deotp.eth` subdomain) pointing to their license contract. The wrapper resolves ENS at activation and verifies it matches the embedded contract address. This prevents payment redirection attacks from compromised wrapper binaries.
-- **Wallet-as-license.** No key service, no MPC, no backend. The user's wallet signature IS the license proof. The wrapper never holds private keys — it communicates with the wallet via WalletConnect. A compromised wrapper cannot steal NFTs because that requires an on-chain transaction the user must approve.
-- **On-chain binary hash.** The license contract stores `bytes32 wrapperHash` (SHA-256 of the distributed binary). Users can verify the download before running. Trust chain: ENS → contract → binary hash → running wrapper.
+- **Chain: Base.** Coinbase on-ramp, ENS support, EVM compatibility, `alloy` Rust crate (~30 deps). Chain abstracted behind config.
+- **SIWE-style sessions.** Wrapper requests a signed statement from the wallet: `H(app_id || tokenId || user_id || nonce || expires_at)`. This is the session token — no backend, no JWT, no cookie. Cached locally, verified cryptographically on each launch.
+- **Token selection.** A wallet may own multiple tokens from the same contract. The wrapper presents a selection UI after wallet connection. Each token maintains its own independent session cache — switching tokens at launch is frictionless.
+- **ENS trust layer.** Developer registers ENS pointing to their contract. Wrapper resolves at session creation and rejects mismatches. Trust chain: ENS → contract → binary hash → running wrapper.
+- **Webview for wallet UI only.** `wry` embeds a minimal webview for WalletConnect. The wrapped app never touches the webview — it is only used for the session creation flow.
 
-## Open Questions
+## What This Is Not
 
-- **Machine ID stability** — how to derive a machine fingerprint that's stable across reboots but unique per machine, cross-platform
-- **NFT transfer = license transfer?** If the NFT is sold, the old activation signature is still valid on the old machine. Options: expiring activations that require periodic re-check, or accept that transfers need re-activation.
-- **Wallet connection from native Rust** — no browser available. Options: small webview for wallet flow, WalletConnect QR code, or direct keystore access.
-- **Multi-machine licenses** — user wants the app on desktop and laptop. One NFT = one machine? Or allow N activations per token?
+- Not DRM. Binary encryption is not a goal. The wrapper enforces access, not cryptographic lockdown.
+- Not a backend auth system. There is no server validating requests.
+- Not browser-based. The app runs natively. The wallet connection happens natively.
+- Not machine-locked. The same wallet activates on any device.
 
 ## Related Projects
 
-- **Valist** (valist.io) — Decentralized software distribution with NFT license keys. Handles distribution but not local enforcement.
-- **Keygen** (keygen.sh) — Mature offline license verification with Rust SDK. Not blockchain-based. Closest prior art for the wrapper side.
-- **Unlock Protocol** — ERC-721 membership keys with time-limited access. Smart contract patterns are relevant.
-- **CryptLex** — Commercial RSA-signed offline license files. Machine-locking approach is relevant.
+- **Valist** — Decentralized software distribution with NFT license keys. Handles distribution, not runtime enforcement.
+- **Unlock Protocol** — Subscription NFT contracts. Smart contract patterns are relevant; they require a backend for enforcement.
+- **SIWE** — Sign-In With Ethereum. The session primitive rub3 adapts for desktop.
+- **Privy / Magic** — Custodial wallet auth. Opposite philosophy — they manage keys server-side.
 
-No existing project combines on-chain NFT purchase with offline native wrapper enforcement. That's the gap.
+No existing project delivers wallet-native session management for native desktop binaries without a backend. That is the gap.
 
 See [architecture.md](architecture.md) and [implementation.md](implementation.md) for technical details.

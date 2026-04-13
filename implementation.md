@@ -1,117 +1,162 @@
-# deotp — Implementation Plan
+# rub3 — Implementation Plan
 
 ## Phase 1: Proof of Concept
 
-Goal: A working wrapper that gates a simple Rust binary behind a wallet signature check.
+Goal: A working wrapper that gates a Rust binary behind wallet ownership, using a cached SIWE-style session.
 
-### 1.1 — Wrapper skeleton (Rust)
-- Create `deotp-wrapper` Rust project
-- Implement basic CLI: `deotp-wrapper --binary <path>` launches embedded app as child process
+### 1.1 — Wrapper skeleton (Rust) `[implemented]`
+- `rub3-wrapper` Rust project with CLI: `rub3-wrapper --binary <path>`
+- Launches embedded app as child process
 - SIGTERM/SIGCHLD handling: wrapper kills child on exit, child exits if wrapper dies
-- No license check yet — just prove the process supervision model works
+- Process supervision model proven
 
-### 1.2 — Machine ID
-- Implement `machine_id()` for macOS first (IOPlatformUUID via IOKit FFI)
-- Linux (`/sys/class/dmi/id/product_uuid`) as second target
-- Hash with SHA-256, salt with app_id
-- Write tests to verify stability across runs
+### 1.2 — Session verification
+- Define session JSON schema (`session.rs`)
+- Implement signature verification: recover signer address from ECDSA signature over `keccak256(app_id || token_id || user_id || nonce || expires_at)`
+- Use `k256` crate for secp256k1
+- Check `expires_at` against current time
+- Session files keyed by token: `~/.rub3/sessions/<app_id>/<token_id>.json`
+- Result: valid session → launch app, invalid/expired → trigger wallet flow
 
-### 1.3 — License verification (offline)
-- Define license proof JSON schema
-- Implement signature verification: recover signer address from ECDSA signature, compare to stored address
-- Use `k256` crate for secp256k1 (same curve as Ethereum wallets)
-- Hardcode a test license proof for development
+### 1.3 — Wallet connection + token selection + session creation
+- Embed minimal webview (`wry`) with WalletConnect UI
+- On connect: call `tokensOfOwner(wallet)` (ERC-721Enumerable) via `alloy` to get owned token IDs
+- If 0 tokens: show purchase UI
+- If 1 token: auto-select, proceed
+- If >1 tokens: show token selector UI — display token IDs, active session indicator, TBA address (account model) or wallet (access model), expiry (subscription)
+- On token selected: confirm `ownerOf()` / `isValid()`, read `identityModel` from contract
+- Compute `user_id`: access → wallet address, account → ERC-6551 TBA address (local derivation, no RPC)
+- Generate nonce + `expires_at` (now + session_ttl)
+- Request wallet signature over `(app_id || token_id || user_id || nonce || expires_at)`
+- Write session to `~/.rub3/sessions/<app_id>/<token_id>.json`
+- Close webview, launch app
 
-### 1.4 — Wallet connection + activation
-- Embed a minimal webview (via `wry` crate — same engine Tauri uses) for WalletConnect
-- Activation UI includes an optional "Deliver license to" field (address or ENS name)
-  - Resolved via `alloy` ENS resolution before the transaction is submitted
-  - If blank, recipient defaults to the connected (paying) wallet
-- On purchase: call `purchase(recipient)` with the resolved address
-- On activation: connect the *recipient* wallet (not necessarily the paying wallet), query `ownerOf(tokenId)`, request signature
-- Request wallet signature over `H(app_id || tokenId || machine_id)`
-- Store license proof to `~/.deotp/licenses/<app_id>.json` with `paid_by` recorded if it differs from the signing wallet
-- Use `alloy` crate for Ethereum RPC, ABI encoding, and ENS resolution
-
-### 1.5 — Smart contract
-- Standard ERC-721 with payable `purchase(address recipient)` function
-  - If `recipient == address(0)`, mint to `msg.sender`
-  - Otherwise mint to `recipient` — decouples payment wallet from license wallet
-- Add `bytes32 wrapperHash` for binary verification
-- Use OpenZeppelin contracts, deploy to Base Sepolia (testnet) for development
-- Foundry project for contract development/testing
-
-### 1.6 — ENS verification
-- At activation, resolve developer's ENS name via `alloy`
+### 1.4 — ENS verification
+- At session creation, resolve developer ENS via `alloy`
 - Compare resolved address to embedded contract address
-- Refuse activation on mismatch, show clear warning
-- Display ENS name prominently in activation UI
+- Refuse session creation on mismatch, show warning in activation UI
+- Display ENS name prominently in wallet connection UI
 
-**Phase 1 deliverable:** A wrapped binary that requires NFT ownership + wallet signature to run, with ENS-based contract verification, verified offline on subsequent launches.
+### 1.5 — Smart contracts
+- `Rub3Access.sol` — ERC-721 + ERC-721Enumerable, payable `purchase(address recipient)`, `bytes32 wrapperHash`, `uint8 identityModel`
+- `Rub3Subscription.sol` — same base + `expiresAt` mapping, payable `purchase()` and `renew(tokenId)`, `isValid(tokenId)` view
+- `identityModel`: `0 = access`, `1 = account` — set at deploy time, readable by wrapper
+- OpenZeppelin base contracts, Foundry project
+- Deploy to Base Sepolia for development
+
+### 1.6 — Identity model + TBA derivation (`identity.rs`)
+- Read `identityModel` from contract at session creation (one RPC call, cached in session)
+- Access model: `user_id = wallet_address`
+- Account model: derive TBA address locally using ERC-6551 CREATE2 formula
+  - Canonical registry: `0x000000006551c19487814612e58FE06813775758`
+  - Inputs: `chainId`, `contract`, `tokenId`, `salt = 0`, `implementation` (set by developer at deploy)
+  - Pure computation via `alloy` — no RPC call needed
+- `user_id` is written into the session and passed to the embedded app via SDK
+
+### 1.6 — Purchase UI
+- In-wrapper purchase flow: if no token found in wallet, show purchase option
+- Display price, contract details, ENS identity
+- Call `purchase(recipient)` with connected wallet
+- After tx confirms, proceed to session creation
+
+**Phase 1 deliverable:** A wrapped binary that requires wallet ownership + session signature to run, with ENS verification, session caching, and automatic renewal on expiry.
+
+---
 
 ## Phase 2: Developer Tooling
 
-### 2.1 — deotp CLI (`deotp pack`)
-- Takes a compiled binary, app_id, contract address, chain config
-- Bundles wrapper + app into single distributable binary
-- Binary packing: embed app as a compressed payload, extract to temp on first run (or use `include_bytes!` at pack time for static embedding)
-- Output: single executable for target platform
+### 2.1 — rub3 CLI (`rub3 pack`)
+- Input: compiled binary, app_id, contract address, chain config, session TTL
+- Output: single distributable binary (wrapper + embedded app + config)
+- Binary packing via `include_bytes!` at pack time or compressed payload extracted on first run
+- Cross-platform output targets
 
-### 2.2 — deotp SDK crate
-- `deotp::heartbeat()` — IPC check against wrapper, panics if dead
-- `deotp::license_info()` — returns license metadata
-- Communication via Unix domain socket (path passed as env var by wrapper)
-- Minimal dependency footprint
+### 2.2 — rub3 CLI (`rub3 deploy`)
+- Deploy `Rub3Access` or `Rub3Subscription` to target chain
+- `--identity access|account` sets `identityModel` in contract
+- `--tba-implementation <address>` required when `--identity account` (ERC-6551 TBA implementation to use)
+- Configurable: price, supply cap, period (subscription), wrapperHash
+- Outputs deployed contract address
 
-### 2.3 — Contract templates
-- Provide a ready-to-deploy Solidity contract template
-- Configurable: price, max supply, royalty (ERC-2981), metadata URI, wrapperHash
-- CLI command: `deotp deploy --chain base --price 0.01`
-- Requires user to have Foundry/cast installed, or use a bundled deployer
+```
+rub3 deploy --type access --identity account --tba-implementation 0x... --price 0.05 --chain base
+rub3 deploy --type subscription --identity access --price 0.01 --period 30 --chain base
+```
 
-### 2.4 — ENS + deotp registry
-- Deploy `DeotpRegistry` contract on Base
-- Permissionless `register()` — developer proves contract ownership on-chain
-- Sets `appName.deotp.eth` subdomain pointing to their license contract
-- CLI command: `deotp register --name myapp --contract 0x1234...abcd`
-- Wrapper shows "verified on deotp.eth" badge when registry entry exists
+### 2.3 — rub3 SDK crate
+- `rub3::heartbeat()` — panics if wrapper not alive (Unix socket / named pipe)
+- `rub3::session()` — returns `SessionInfo`
+  ```rust
+  pub struct SessionInfo {
+      pub app_id:     String,
+      pub token_id:   u64,
+      pub user_id:    String,        // stable identity: TBA (account) or wallet (access)
+      pub wallet:     String,        // current signing wallet
+      pub identity:   IdentityModel, // Access | Account
+      pub expires_at: DateTime<Utc>,
+  }
+  ```
+- Application code should key all persistent data on `user_id`, never on `wallet`
+- Socket path passed as env var by wrapper
+- Minimal dependency footprint — no `alloy` or `wry`
 
-**Phase 2 deliverable:** A developer can package, deploy, register, and distribute a licensed application with a few CLI commands.
+### 2.4 — ENS + rub3 registry
+- Deploy `Rub3Registry` on Base
+- `register(appName, contractAddress)` — proves ownership, sets `appName.rub3.eth` subdomain
+- CLI: `rub3 register --name myapp --contract 0x...`
+- Wrapper shows "verified on rub3.eth" badge when registry entry resolves
+
+**Phase 2 deliverable:** Developer can deploy, pack, register, and distribute a wallet-gated app with a handful of CLI commands.
+
+---
 
 ## Phase 3: Tauri Integration
 
-### 3.1 — Tauri plugin
-- `tauri-plugin-deotp` crate
-- Auto-heartbeat in the Tauri event loop
-- Frontend JS API: `invoke('plugin:deotp|license_info')`
-- Activation flow rendered in the app's own webview (no separate window needed)
+### 3.1 — Tauri plugin (`tauri-plugin-rub3`)
+- Auto-heartbeat in Tauri event loop
+- Session renewal flow rendered inside the app's own webview — no separate window
+- Frontend JS API:
+  ```js
+  const session = await invoke('plugin:rub3|session');
+  // { token_id, wallet, expires_at }
+  ```
+- Emits `rub3://session-renewed` event when TTL is refreshed in background
 
 ### 3.2 — Tauri starter template
-- `create-deotp-app` or similar scaffold
-- Pre-configured Tauri app with deotp plugin, ready to build and package
+- `create-rub3-app` scaffold
+- Pre-configured with `tauri-plugin-rub3`, contract config placeholders, wallet connection UI component
+- Works out of the box against Base Sepolia
 
-**Phase 3 deliverable:** Tauri developers can add license gating to their apps with a plugin and a few lines of config.
+**Phase 3 deliverable:** Tauri developers add wallet-gated access with a plugin and a few lines of config.
+
+---
 
 ## Phase 4: Polish and Hardening
 
-### 4.1 — Multi-machine support
-- Allow N activations per NFT (configurable by developer in contract)
-- Track activation count on-chain or via signed activation receipts
-- Deactivation flow: user can release a machine slot
+### 4.1 — Background session renewal
+- Wrapper monitors `expires_at` and triggers renewal in the background N hours before expiry
+- User prompted via OS notification: "Your session expires soon — reconnect wallet to continue"
+- App continues running during renewal; suspension only if renewal is declined or fails
 
-### 4.2 — License transfer
-- When NFT is transferred, old activations should expire
-- Options: time-limited signatures (re-check every 30 days), or activation includes block number and wrapper periodically verifies ownership hasn't changed
-
-### 4.3 — Windows support
-- Machine ID from registry (`MachineGuid`)
-- Named pipes instead of Unix domain sockets
+### 4.2 — Windows support
+- Named pipes instead of Unix domain sockets for heartbeat IPC
 - MSVC build target for wrapper
+- WalletConnect webview tested on Windows WebView2
 
-### 4.4 — Binary obfuscation (optional)
+### 4.3 — Subscription renewal UI
+- In-wrapper subscription management: view expiry, renew from the tray/menu
+- `rub3::session().expires_at` exposed to app for in-app renewal prompts
+
+### 4.4 — Multi-wallet support
+- User can associate multiple wallets with a session (e.g. hardware wallet for ownership, hot wallet for daily use)
+- Pattern: hot wallet signs sessions, ownership wallet proves NFT ownership once — requires a delegation mechanism (EIP-7702 or a simple delegation registry)
+- Phase 4 exploration — not required for core functionality
+
+### 4.5 — Binary obfuscation (optional)
 - UPX-style compression to raise the bar for casual extraction
-- Not encryption — just inconvenience
-- Clearly documented as a deterrent, not a guarantee
+- Documented as a deterrent, not a guarantee
+
+---
 
 ## Tech Stack
 
@@ -123,27 +168,31 @@ Goal: A working wrapper that gates a simple Rust binary behind a wallet signatur
 | Webview (wallet connection) | `wry` crate |
 | IPC (wrapper ↔ app) | Unix domain sockets / named pipes |
 | Smart contracts | Solidity, OpenZeppelin, Foundry |
-| Target chain | Base (primary). Chain abstracted behind config for future EVM L2 support |
+| Target chain | Base (primary). Config-abstracted for other EVM L2s |
 | CLI | `clap` crate |
-| Packaging | Custom binary bundler or `goblin` crate for ELF/Mach-O manipulation |
+| Packaging | `include_bytes!` embedding or custom bundler |
+
+---
 
 ## Directory Structure
 
 ```
-deotp/
+rub3/
 ├── crates/
-│   ├── deotp-wrapper/       # The wrapper runtime
-│   ├── deotp-sdk/           # Crate apps link against
-│   ├── deotp-cli/           # Developer packaging tool
-│   └── tauri-plugin-deotp/  # Tauri integration
+│   ├── rub3-wrapper/        # Wrapper runtime: session, wallet, supervisor
+│   ├── rub3-sdk/            # Crate apps link against (heartbeat, session info)
+│   ├── rub3-cli/            # Developer tooling (pack, deploy, register)
+│   └── tauri-plugin-rub3/   # Tauri integration
 ├── contracts/
 │   ├── src/
-│   │   ├── DeotpLicense.sol  # ERC-721 license contract
-│   │   └── DeotpRegistry.sol # ENS subdomain registry
+│   │   ├── Rub3Access.sol       # ERC-721 one-time purchase
+│   │   ├── Rub3Subscription.sol # ERC-721 with expiry + renewal
+│   │   └── Rub3Registry.sol     # rub3.eth subdomain registry
 │   ├── test/
 │   └── foundry.toml
 ├── examples/
-│   ├── hello-rust/          # Minimal Rust app example
-│   └── hello-tauri/         # Minimal Tauri app example
+│   ├── hello-rust/           # Minimal Rust app — one-time access
+│   ├── hello-subscription/   # Minimal Rust app — subscription
+│   └── hello-tauri/          # Minimal Tauri app with plugin
 └── docs/
 ```
