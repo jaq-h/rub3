@@ -263,34 +263,45 @@ rub3-wrapper
     └── Tauri mode: launch Tauri app entry point
 ```
 
-#### Source layout
+#### Source layout (current)
 
 ```
 crates/rub3-wrapper/
 ├── src/
-│   ├── main.rs          — CLI entry point
-│   ├── session.rs       — session cache read/write/verify, token_id keyed paths
-│   ├── wallet.rs        — WalletConnect flow, tokensOfOwner, ownerOf/isValid
-│   ├── identity.rs      — access vs account model, TBA address derivation
-│   ├── token_select.rs  — multi-token selector UI state
-│   ├── ens.rs           — ENS resolution and contract verification
-│   ├── supervisor.rs    — child process lifecycle
-│   └── webview.rs       — embedded wallet connection UI (wry)
+│   ├── main.rs          — CLI entry point, app constants (APP_ID, CONTRACT, CHAIN_ID, RPC_URL)
+│   ├── lib.rs           — public module re-exports (license, store, activation, supervisor)
+│   ├── license.rs       — license proof schema, activation message, ECDSA signature verification
+│   ├── store.rs         — proof persistence (~/.rub3/licenses/ or $RUB3_LICENSE_DIR)
+│   ├── activation.rs    — activation flow: check proof → verify → launch or open webview
+│   ├── rpc.rs           — on-chain queries (ownerOf, price) via alloy JSON-RPC
+│   ├── supervisor.rs    — child process lifecycle, SIGTERM forwarding
+│   └── webview.rs       — native activation window (wry/tao), JS↔Rust IPC
+├── assets/
+│   └── activation.html  — activation UI (connect, signature input, processing screens)
 └── tests/
-    └── integration.rs
+    ├── helpers/mod.rs   — test utilities (wallet gen, signing, license creation)
+    ├── integration.rs   — wrapper binary tests (exit codes, args, missing binary)
+    └── license_e2e.rs   — static + dynamic license tests, SIGTERM forwarding
 ```
+
+Planned but not yet created: `session.rs`, `wallet.rs`, `identity.rs`, `token_select.rs`, `ens.rs`
 
 #### Dependencies
 
 | Crate | Purpose |
 |---|---|
 | `clap` | CLI argument parsing |
-| `alloy` | Ethereum RPC, ABI encoding, ENS resolution, ERC-6551 address derivation |
-| `k256` | secp256k1 ECDSA signature verification |
-| `wry` | Embedded webview for wallet connection UI |
-| `serde_json` | Session cache serialization |
-| `sha2` | SHA-256 for binary hash verification |
-| `nix` | Unix signal handling |
+| `alloy` | Ethereum RPC, ABI encoding (ownerOf, price) |
+| `k256` | secp256k1 ECDSA signature recovery |
+| `sha2` | SHA-256 for activation message hash |
+| `sha3` | Keccak-256 for Ethereum address derivation + personal_sign |
+| `hex` | Hex encoding/decoding |
+| `wry` | Embedded webview for activation UI |
+| `tao` | Native window/event loop |
+| `serde` / `serde_json` | License proof serialization |
+| `dirs` | Platform data directory resolution |
+| `chrono` | RFC-3339 timestamps |
+| `nix` / `libc` | Unix signal handling |
 
 ---
 
