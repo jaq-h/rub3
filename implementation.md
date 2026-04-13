@@ -4,47 +4,41 @@
 
 Goal: A working wrapper that gates a Rust binary behind wallet ownership, using a cached SIWE-style session.
 
-### 1.1 — Wrapper skeleton (Rust) `[implemented]`
-- `rub3-wrapper` Rust project with CLI: `rub3-wrapper --binary <path>`
-- Launches embedded app as child process
-- SIGTERM/SIGCHLD handling: wrapper kills child on exit, child exits if wrapper dies
-- Process supervision model proven
+### 1.1 — Wrapper skeleton `[complete]`
+- `rub3-wrapper` Rust project with CLI: `rub3-wrapper --binary <path>` (clap)
+- Launches embedded app as child process (`supervisor.rs`)
+- SIGTERM forwarding: wrapper forwards signals to child, exits when child exits
+- Process supervision proven with integration tests
 
-### 1.2 — Session verification
-- Define session JSON schema (`session.rs`)
-- Implement signature verification: recover signer address from ECDSA signature over `keccak256(app_id || token_id || user_id || nonce || expires_at)`
-- Use `k256` crate for secp256k1
-- Check `expires_at` against current time
-- Session files keyed by token: `~/.rub3/sessions/<app_id>/<token_id>.json`
-- Result: valid session → launch app, invalid/expired → trigger wallet flow
+### 1.2 — License proof + signature verification `[complete]`
+- License proof JSON schema (`license.rs`): `app_id`, `token_id`, `wallet_address`, `signature`, `activated_at`, `chain`, `contract`, optional `paid_by`
+- Activation message: `SHA-256(app_id || token_id_be_bytes)` — deterministic, fixed-width
+- Signature verification: `personal_sign` prefix (keccak256), secp256k1 ECDSA recovery via `k256`, address comparison
+- Proof persistence (`store.rs`): save/load to `~/.rub3/licenses/<app_id>.json` or `$RUB3_LICENSE_DIR`
+- Static and dynamic integration tests verify the full crypto pipeline natively in Rust (no external tools)
+- Result: valid proof → launch app, invalid/missing → trigger activation flow
 
-### 1.3 — Wallet connection + token selection + session creation
-- Embed minimal webview (`wry`) with WalletConnect UI
-- On connect: call `tokensOfOwner(wallet)` (ERC-721Enumerable) via `alloy` to get owned token IDs
-- If 0 tokens: show purchase UI
-- If 1 token: auto-select, proceed
-- If >1 tokens: show token selector UI — display token IDs, active session indicator, TBA address (account model) or wallet (access model), expiry (subscription)
-- On token selected: confirm `ownerOf()` / `isValid()`, read `identityModel` from contract
-- Compute `user_id`: access → wallet address, account → ERC-6551 TBA address (local derivation, no RPC)
-- Generate nonce + `expires_at` (now + session_ttl)
-- Request wallet signature over `(app_id || token_id || user_id || nonce || expires_at)`
-- Write session to `~/.rub3/sessions/<app_id>/<token_id>.json`
-- Close webview, launch app
+### 1.3 — Activation flow + webview `[partial]`
+- Activation orchestration (`activation.rs`): check cached proof → verify → launch, or open activation window
+- Native webview (`wry`/`tao`) with dark-themed activation UI (`assets/activation.html`)
+- IPC message protocol: JS ↔ Rust (ready, connect, signed, cancel, error)
+- Screens: connect → activate (token + signature input) → processing
+- **Done:** manual wallet address input, manual signature paste, proof storage on success
+- **Not yet done:** WalletConnect integration, token selection UI, `tokensOfOwner()` enumeration
 
-### 1.4 — ENS verification
-- At session creation, resolve developer ENS via `alloy`
-- Compare resolved address to embedded contract address
-- Refuse session creation on mismatch, show warning in activation UI
-- Display ENS name prominently in wallet connection UI
+### 1.4 — On-chain queries `[partial]`
+- `rpc.rs`: `ownerOf(tokenId)` and `price()` via alloy JSON-RPC with minimal ABI (`IRub3License`)
+- Synchronous wrapper over async alloy calls (`block_on` with single-threaded tokio runtime)
+- **Not yet done:** ENS resolution (stub returns `EnsNotSupported`), ownership check wired into webview flow
 
-### 1.5 — Smart contracts
+### 1.5 — Smart contracts `[not started]`
 - `Rub3Access.sol` — ERC-721 + ERC-721Enumerable, payable `purchase(address recipient)`, `bytes32 wrapperHash`, `uint8 identityModel`
 - `Rub3Subscription.sol` — same base + `expiresAt` mapping, payable `purchase()` and `renew(tokenId)`, `isValid(tokenId)` view
 - `identityModel`: `0 = access`, `1 = account` — set at deploy time, readable by wrapper
 - OpenZeppelin base contracts, Foundry project
 - Deploy to Base Sepolia for development
 
-### 1.6 — Identity model + TBA derivation (`identity.rs`)
+### 1.6 — Identity model + TBA derivation `[not started]`
 - Read `identityModel` from contract at session creation (one RPC call, cached in session)
 - Access model: `user_id = wallet_address`
 - Account model: derive TBA address locally using ERC-6551 CREATE2 formula
@@ -53,11 +47,18 @@ Goal: A working wrapper that gates a Rust binary behind wallet ownership, using 
   - Pure computation via `alloy` — no RPC call needed
 - `user_id` is written into the session and passed to the embedded app via SDK
 
-### 1.6 — Purchase UI
+### 1.7 — Purchase UI `[not started]`
 - In-wrapper purchase flow: if no token found in wallet, show purchase option
 - Display price, contract details, ENS identity
 - Call `purchase(recipient)` with connected wallet
-- After tx confirms, proceed to session creation
+- After tx confirms, proceed to activation
+
+### 1.8 — Session model `[not started]`
+- Upgrade from one-time license proof to TTL-based sessions
+- Session schema: add `nonce`, `issued_at`, `expires_at`, `identity` model fields
+- Signature over `keccak256(app_id || token_id || user_id || nonce || expires_at)`
+- Session files keyed by token: `~/.rub3/sessions/<app_id>/<token_id>.json`
+- On expiry: re-verify on-chain ownership, request new wallet signature
 
 **Phase 1 deliverable:** A wrapped binary that requires wallet ownership + session signature to run, with ENS verification, session caching, and automatic renewal on expiry.
 
@@ -176,23 +177,52 @@ rub3 deploy --type subscription --identity access --price 0.01 --period 30 --cha
 
 ## Directory Structure
 
+Current (implemented):
+
 ```
 rub3/
 ├── crates/
-│   ├── rub3-wrapper/        # Wrapper runtime: session, wallet, supervisor
+│   └── rub3-wrapper/                 # Wrapper runtime
+│       ├── src/
+│       │   ├── main.rs               # CLI entry point, app constants
+│       │   ├── lib.rs                # Public module re-exports
+│       │   ├── license.rs            # Proof schema, activation message, ECDSA verification
+│       │   ├── store.rs              # Proof persistence (RUB3_LICENSE_DIR override)
+│       │   ├── activation.rs         # Activation flow orchestration
+│       │   ├── rpc.rs                # On-chain queries (ownerOf, price) via alloy
+│       │   ├── webview.rs            # Native activation window (wry/tao), IPC
+│       │   └── supervisor.rs         # Child process lifecycle, signal forwarding
+│       ├── assets/
+│       │   └── activation.html       # Activation UI
+│       └── tests/
+│           ├── helpers/mod.rs        # Wallet gen, signing, license creation
+│           ├── integration.rs        # Wrapper binary tests
+│           └── license_e2e.rs        # Static + dynamic license verification tests
+├── licenses/
+│   └── com.rub3.example.json         # Valid example license proof
+├── scripts/
+│   └── test-e2e.sh                   # Runs cargo test
+├── architecture.md
+├── implementation.md
+├── ideation.md
+└── testing.md
+```
+
+Planned (not yet created):
+
+```
+├── crates/
 │   ├── rub3-sdk/            # Crate apps link against (heartbeat, session info)
 │   ├── rub3-cli/            # Developer tooling (pack, deploy, register)
 │   └── tauri-plugin-rub3/   # Tauri integration
 ├── contracts/
 │   ├── src/
-│   │   ├── Rub3Access.sol       # ERC-721 one-time purchase
-│   │   ├── Rub3Subscription.sol # ERC-721 with expiry + renewal
-│   │   └── Rub3Registry.sol     # rub3.eth subdomain registry
-│   ├── test/
+│   │   ├── Rub3Access.sol
+│   │   ├── Rub3Subscription.sol
+│   │   └── Rub3Registry.sol
 │   └── foundry.toml
-├── examples/
-│   ├── hello-rust/           # Minimal Rust app — one-time access
-│   ├── hello-subscription/   # Minimal Rust app — subscription
-│   └── hello-tauri/          # Minimal Tauri app with plugin
-└── docs/
+└── examples/
+    ├── hello-rust/
+    ├── hello-subscription/
+    └── hello-tauri/
 ```

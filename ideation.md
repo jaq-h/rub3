@@ -84,4 +84,17 @@ The wrapper reads the identity model from the contract at session creation. The 
 
 No existing project delivers wallet-native session management for native desktop binaries without a backend. That is the gap.
 
+## Current Status
+
+The project is in early Phase 1 (Proof of Concept). What works today:
+
+- **rub3-wrapper** binary: wraps any executable behind license proof verification
+- **License proof system**: ECDSA signature verification (secp256k1 via `k256`), local proof caching, `SHA-256(app_id || token_id)` activation message
+- **Native activation window**: embedded webview (wry/tao) with wallet address input and signature paste (WalletConnect integration not yet wired)
+- **Process supervision**: child process lifecycle management, SIGTERM forwarding
+- **On-chain queries**: `ownerOf()` and `price()` via alloy JSON-RPC (not yet wired into activation flow)
+- **Test suite**: 26 tests — unit tests for crypto + storage, integration tests for wrapper binary, static + dynamic license e2e tests with native Rust wallet generation
+
+Not yet built: TTL-based sessions, WalletConnect, token selection, ENS verification, identity models (access/account), smart contracts, CLI tooling, SDK, Tauri plugin.
+
 See [architecture.md](architecture.md) and [implementation.md](implementation.md) for technical details.

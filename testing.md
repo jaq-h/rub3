@@ -3,45 +3,84 @@
 ## Prerequisites
 
 - Rust toolchain (rustc 1.91+): `rustup update stable`
-- Foundry (`cast`, `anvil`): `curl -L https://foundry.paradigm.xyz | bash && foundryup`
-- Access to Base mainnet RPC (default: `https://mainnet.base.org`)
+- Optional: Foundry (`cast`, `anvil`) for manual wallet operations: `curl -L https://foundry.paradigm.xyz | bash && foundryup`
+- Optional: Access to Base mainnet RPC (default: `https://mainnet.base.org`) for network tests
 
-## 1. Build the wrapper
+## 1. Run all tests
 
 ```bash
-cargo build -p rub3-wrapper
+cargo test -p rub3-wrapper
 ```
 
-The binary lands at `target/debug/rub3-wrapper`.
+This runs all unit tests, integration tests, and license e2e tests. No external tools required — wallet generation and signing are done natively in Rust via `k256`.
 
-## 2. Run unit tests
+To include network-dependent tests (requires internet):
 
 ```bash
-# All offline tests
-cargo test -p rub3-wrapper
-
-# Include network-dependent tests (requires internet)
 cargo test -p rub3-wrapper -- --ignored
 ```
 
-Key test modules:
-- `license` — activation message hashing, signature recovery, proof serialisation
-- `store` — license proof read/write/overwrite on disk
-- `rpc` — provider construction, contract call error paths
+Or use the convenience script:
 
-## 3. Set up a test wallet with `cast`
+```bash
+scripts/test-e2e.sh
+```
 
-### Create a new wallet
+## 2. Test suites
+
+### Unit tests (in `src/`)
+
+- **`license::tests`** — activation message hashing, personal_sign prefix, proof serialization round-trips
+- **`store::tests`** — proof save/load, directory creation, overwrite, missing file handling
+- **`rpc::tests`** — provider construction, contract call error paths, ENS stub
+
+### Integration tests (`tests/integration.rs`)
+
+Binary-level tests that spawn the wrapper process:
+
+- `runs_child_and_exits_zero` — wrapper exits 0 when child succeeds
+- `propagates_nonzero_exit_code` — wrapper forwards child's exit code
+- `passes_args_to_child` — `--` separator passes trailing args to child
+- `errors_on_missing_binary` — wrapper rejects nonexistent binary path
+
+Each test provisions a valid license proof in a temp directory via `RUB3_LICENSE_DIR`.
+
+### License E2E tests (`tests/license_e2e.rs`)
+
+**Static tests** — use a deterministic test keypair (hardcoded private key `0xac0974...`). Fully reproducible:
+
+- `static_license_verifies` — construct proof, verify signature recovery matches wallet address
+- `static_license_loads_and_verifies` — write proof to disk, load it back, verify
+- `static_wrapper_runs_with_valid_license` — run wrapper binary with a valid proof, assert child executes
+
+**Dynamic tests** — generate a random wallet each run via `k256::ecdsa::SigningKey::random()`:
+
+- `dynamic_wallet_generates_valid_signature` — prove the full crypto pipeline works with random keys
+- `dynamic_license_round_trips` — generate, save, load, verify with fresh keypair
+- `dynamic_wrapper_runs_with_fresh_license` — run wrapper with ephemeral license
+
+**Signal handling:**
+
+- `wrapper_forwards_sigterm` — spawn wrapper with `/bin/sleep`, send SIGTERM, assert clean exit
+
+### Test helpers (`tests/helpers/mod.rs`)
+
+Shared utilities available to all integration test files:
+
+- `generate_wallet()` — random secp256k1 keypair, returns `(SigningKey, address_hex)`
+- `sign_activation(key, app_id, token_id)` — compute activation message, personal_sign, return hex signature
+- `create_license_json(dir, ...)` — write a valid `LicenseProof` JSON file
+- `wrapper_bin()` — path to the compiled wrapper binary
+- `verifying_key_to_address(key)` — derive Ethereum address from public key
+
+## 3. Manual testing with `cast`
+
+For manual wallet operations (not required for automated tests):
+
+### Create a wallet
 
 ```bash
 cast wallet new
-```
-
-This outputs a private key and address. To persist it in a keystore:
-
-```bash
-cast wallet import test-wallet --interactive
-# Paste your private key when prompted, set a password
 ```
 
 ### Check wallet balance on Base
@@ -52,110 +91,56 @@ cast balance <ADDRESS> --rpc-url https://mainnet.base.org
 
 ### Query the license contract
 
-Check NFT ownership:
-
 ```bash
 cast call <CONTRACT_ADDRESS> "ownerOf(uint256)" 1 --rpc-url https://mainnet.base.org
-```
-
-Check the license price:
-
-```bash
 cast call <CONTRACT_ADDRESS> "price()" --rpc-url https://mainnet.base.org
 ```
 
-### Sign an activation message (for manual testing)
+### Sign an activation message
 
 ```bash
-# Build the activation message hash (SHA-256 of app_id || token_id_be)
-# Then sign with personal_sign:
-cast wallet sign --keystore ~/.foundry/keystores/test-wallet <MESSAGE_HASH>
+cast wallet sign --private-key <KEY> <MESSAGE_HASH>
 ```
 
-### Use a local testnet with `anvil`
-
-For offline testing without real funds:
+### Use a local testnet
 
 ```bash
-# Start a local fork of Base
 anvil --fork-url https://mainnet.base.org
-
-# Use one of the default anvil accounts (printed on startup)
 cast call <CONTRACT_ADDRESS> "ownerOf(uint256)" 1 --rpc-url http://127.0.0.1:8545
 ```
 
-## 4. Run the wrapper against a test binary
-
-Create a trivial binary to wrap:
+## 4. Run the wrapper manually
 
 ```bash
-echo '#!/bin/sh
-echo "hello from wrapped app"' > /tmp/test-app.sh
-chmod +x /tmp/test-app.sh
-```
-
-Launch the wrapper:
-
-```bash
+# With a test binary
 cargo run -p rub3-wrapper -- --binary /tmp/test-app.sh
-```
 
-### What happens
-
-1. It checks `~/Library/Application Support/rub3/licenses/com.rub3.example.json` for a cached proof.
-2. If no valid proof exists, it opens an **activation window** (native webview).
-3. The webview walks you through: connect wallet → verify NFT ownership → sign activation message.
-4. On success, the proof is saved and the wrapped binary (`test-app.sh`) is launched.
-5. On subsequent runs with a valid proof, the binary launches immediately (no window). The license is wallet-bound (not machine-bound), so the same proof works on any device.
-
-### Overriding the license directory
-
-Set `RUB3_LICENSE_DIR` to store proofs somewhere other than the platform default:
-
-```bash
+# Override the license directory
 RUB3_LICENSE_DIR=/tmp/rub3-test cargo run -p rub3-wrapper -- --binary /tmp/test-app.sh
 ```
 
-This is useful for testing activation from scratch without touching your real license store.
+On first run with no cached proof, the wrapper opens an activation window. After activation, the binary launches immediately on subsequent runs.
 
 ## 5. Reset activation state
 
-Delete the cached proof to force re-activation:
-
 ```bash
+# Default location (macOS)
 rm ~/Library/Application\ Support/rub3/licenses/com.rub3.example.json
-```
 
-Or if using the override:
-
-```bash
+# If using override
 rm -rf /tmp/rub3-test
 ```
 
-## 6. Configuring app constants
+## 6. App constants
 
 The wrapper's identity is controlled by constants in `crates/rub3-wrapper/src/main.rs`:
 
-| Constant        | Default                                      | Purpose                          |
-|-----------------|----------------------------------------------|----------------------------------|
-| `APP_ID`        | `com.rub3.example`                           | Reverse-DNS app identifier       |
-| `CONTRACT`      | `0x0000...0000`                              | ERC-721 license contract address |
-| `CHAIN_ID`      | `8453`                                       | EVM chain ID (Base mainnet)      |
-| `RPC_URL`       | `https://mainnet.base.org`                   | JSON-RPC endpoint                |
-| `DEVELOPER_ENS` | `None`                                       | Optional ENS name                |
+| Constant | Default | Purpose |
+|---|---|---|
+| `APP_ID` | `com.rub3.example` | Reverse-DNS app identifier |
+| `CONTRACT` | `0x0000...0000` | ERC-721 license contract address |
+| `CHAIN_ID` | `8453` | EVM chain ID (Base mainnet) |
+| `RPC_URL` | `https://mainnet.base.org` | JSON-RPC endpoint |
+| `DEVELOPER_ENS` | `None` | Optional ENS name |
 
 To test against a real contract, update `CONTRACT` to your deployed ERC-721 address and rebuild.
-
-## 7. Signal handling (Unix)
-
-The wrapper forwards `SIGTERM` to the child process. To test:
-
-```bash
-# In one terminal
-cargo run -p rub3-wrapper -- --binary /bin/sleep -- 300
-
-# In another terminal
-kill -TERM <wrapper-pid>
-```
-
-The wrapper should forward the signal and exit cleanly.
