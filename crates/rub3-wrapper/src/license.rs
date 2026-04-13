@@ -176,14 +176,13 @@ mod tests {
 
     #[test]
     fn personal_sign_hash_matches_known_vector() {
-        // Vector computed with ethers.js:
-        //   ethers.utils.hashMessage(ethers.utils.arrayify("0x" + "00".repeat(32)))
-        // which is keccak256("\x19Ethereum Signed Message:\n32" || [0u8; 32])
+        // keccak256("\x19Ethereum Signed Message:\n32" || [0u8; 32])
+        // Verified with pycryptodome keccak.new(digest_bits=256)
         let message = [0u8; 32];
         let hash = personal_sign_hash(&message);
         assert_eq!(
             hex::encode(hash),
-            "47173285a8d7341e5e972fc677286384f802f8ef42a5ec5f03bbfa254cb01fad"
+            "5e4106618209740b9f773a94c5667b9659a7a4e2691c7c8a78336e9889a6be07"
         );
     }
 
