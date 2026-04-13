@@ -1,11 +1,3 @@
-mod activation;
-mod license;
-
-mod rpc;
-mod store;
-mod supervisor;
-mod webview;
-
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -55,7 +47,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    if let Err(e) = activation::ensure(
+    if let Err(e) = rub3_wrapper::ensure(
         APP_ID,
         CONTRACT,
         CHAIN_ID,
@@ -66,5 +58,5 @@ fn main() {
         std::process::exit(1);
     }
 
-    std::process::exit(supervisor::run(&cli.binary, &cli.args));
+    std::process::exit(rub3_wrapper::supervisor_run(&cli.binary, &cli.args));
 }

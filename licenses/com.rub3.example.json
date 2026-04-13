@@ -1,0 +1,9 @@
+{
+  "app_id": "com.rub3.example",
+  "token_id": 1,
+  "wallet_address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "signature": "0xc0a9559f7e5df832026da4a39ad29e6bf7a90b9232919d4c06dd9b04a28e0f910065d94edcb814386f7fa606dd6dc07445f8462dde8b1cebc8216b1f2eaf03201c",
+  "activated_at": "2026-04-09T00:00:00Z",
+  "chain": "base",
+  "contract": "0x0000000000000000000000000000000000000000"
+}
