@@ -39,7 +39,8 @@ rub3/
 ├── licenses/
 │   └── com.rub3.example.json         # Example license proof with valid signature
 ├── scripts/
-│   └── test-e2e.sh                   # Convenience script — runs cargo test
+│   ├── test-e2e.sh                   # Convenience script — runs cargo test
+│   └── seed-license.sh               # Generate a valid license proof for manual testing
 ├── architecture.md                   # System design, session model, security model
 ├── implementation.md                 # Phased development plan with status
 ├── ideation.md                       # Project vision and design principles
@@ -100,15 +101,23 @@ All crypto (wallet generation, signing) is done natively in Rust via `k256` — 
 
 ## Running the wrapper
 
-```bash
-# With a test binary
-cargo run -p rub3-wrapper -- --binary /path/to/your/app
+On first run with no cached proof, the wrapper opens an activation window. To skip activation during development, seed a valid license proof:
 
-# Override the license directory
+```bash
+# Generate a valid proof (requires Foundry's cast)
+./scripts/seed-license.sh
+
+# Run the wrapper — skips activation, launches binary directly
 RUB3_LICENSE_DIR=/tmp/rub3-test cargo run -p rub3-wrapper -- --binary /path/to/your/app
 ```
 
-On first run, the wrapper opens an activation window. After activation, the license proof is cached and the wrapped binary launches immediately on subsequent runs.
+Without the seed script, the wrapper opens the activation window for wallet connect + signature:
+
+```bash
+cargo run -p rub3-wrapper -- --binary /path/to/your/app
+```
+
+After activation, the proof is cached and the binary launches immediately on subsequent runs.
 
 ## License proof format
 

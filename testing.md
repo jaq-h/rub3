@@ -73,65 +73,52 @@ Shared utilities available to all integration test files:
 - `wrapper_bin()` — path to the compiled wrapper binary
 - `verifying_key_to_address(key)` — derive Ethereum address from public key
 
-## 3. Manual testing with `cast`
+## 3. Seed a license proof for manual testing
 
-For manual wallet operations (not required for automated tests):
-
-### Create a wallet
+The `seed-license.sh` script generates a valid license proof so the wrapper skips the activation window. Requires Foundry (`cast`).
 
 ```bash
+./scripts/seed-license.sh
+```
+
+This writes a proof to `/tmp/rub3-test/com.rub3.example.json` signed by anvil's default account 0. Then run the wrapper with:
+
+```bash
+RUB3_LICENSE_DIR=/tmp/rub3-test cargo run -p rub3-wrapper -- --binary /path/to/your/binary
+```
+
+The wrapper will verify the proof's signature, skip activation, and launch the binary directly.
+
+To reset and force re-activation:
+
+```bash
+rm -rf /tmp/rub3-test
+```
+
+## 4. Manual wallet operations with `cast`
+
+For ad-hoc wallet operations (not required for automated tests):
+
+```bash
+# Create a wallet
 cast wallet new
-```
 
-### Check wallet balance on Base
-
-```bash
+# Check balance on Base
 cast balance <ADDRESS> --rpc-url https://mainnet.base.org
-```
 
-### Query the license contract
-
-```bash
+# Query a license contract
 cast call <CONTRACT_ADDRESS> "ownerOf(uint256)" 1 --rpc-url https://mainnet.base.org
 cast call <CONTRACT_ADDRESS> "price()" --rpc-url https://mainnet.base.org
-```
 
-### Sign an activation message
-
-```bash
+# Sign an activation message
 cast wallet sign --private-key <KEY> <MESSAGE_HASH>
-```
 
-### Use a local testnet
-
-```bash
+# Use a local fork
 anvil --fork-url https://mainnet.base.org
 cast call <CONTRACT_ADDRESS> "ownerOf(uint256)" 1 --rpc-url http://127.0.0.1:8545
 ```
 
-## 4. Run the wrapper manually
-
-```bash
-# With a test binary
-cargo run -p rub3-wrapper -- --binary /tmp/test-app.sh
-
-# Override the license directory
-RUB3_LICENSE_DIR=/tmp/rub3-test cargo run -p rub3-wrapper -- --binary /tmp/test-app.sh
-```
-
-On first run with no cached proof, the wrapper opens an activation window. After activation, the binary launches immediately on subsequent runs.
-
-## 5. Reset activation state
-
-```bash
-# Default location (macOS)
-rm ~/Library/Application\ Support/rub3/licenses/com.rub3.example.json
-
-# If using override
-rm -rf /tmp/rub3-test
-```
-
-## 6. App constants
+## 5. App constants
 
 The wrapper's identity is controlled by constants in `crates/rub3-wrapper/src/main.rs`:
 
