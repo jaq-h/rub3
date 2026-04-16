@@ -100,7 +100,7 @@ The developer chooses a security tier when packaging their app. Each tier is a c
 [license]
 tier = "cooldown"           # offline | cached | verified | cooldown | hardened
 session_ttl_days = 7        # tiers 1-3 (ignored by tier 0 and 4)
-cooldown_blocks = 1800      # tiers 3-4 (~1hr on Base at 2s/block)
+cooldown_blocks = 1800      # tiers 3-4 (~1hr on Base at 2s/block); min 15 (~30s, one TOTP window)
 offline_grace_hours = 24    # tiers 2-3: allow launch without network within window
 device_key_storage = "keychain"  # tier 4: "file" | "keychain" | "enclave"
 ```
@@ -151,11 +151,13 @@ Adds on-chain activation with a cooldown and session revocation counter. At acti
   ```solidity
   mapping(uint256 => uint256) public lastActivationBlock;
   mapping(uint256 => uint256) public activeSessionId;
-  uint256 public cooldownBlocks;
+  uint256 public immutable cooldownBlocks;
+  uint256 public constant MIN_COOLDOWN_BLOCKS = 15; // ~30s on Base; one TOTP window
 
   function activate(uint256 tokenId) external returns (uint256 sessionId) {
       require(ownerOf(tokenId) == msg.sender, "not owner");
-      require(block.number - lastActivationBlock[tokenId] >= cooldownBlocks, "cooldown");
+      uint256 last = lastActivationBlock[tokenId];
+      if (last != 0) require(block.number - last >= cooldownBlocks, "cooldown");
       lastActivationBlock[tokenId] = block.number;
       activeSessionId[tokenId] = ++_sessionCounter;
       return activeSessionId[tokenId];
@@ -175,7 +177,8 @@ Adds a device-bound ephemeral keypair. At activation, the wrapper generates a fr
 
   function activate(uint256 tokenId, bytes32 devicePubKey) external returns (uint256 sessionId) {
       require(ownerOf(tokenId) == msg.sender, "not owner");
-      require(block.number - lastActivationBlock[tokenId] >= cooldownBlocks, "cooldown");
+      uint256 last = lastActivationBlock[tokenId];
+      if (last != 0) require(block.number - last >= cooldownBlocks, "cooldown");
       lastActivationBlock[tokenId] = block.number;
       activeSessionId[tokenId] = ++_sessionCounter;
       registeredDevice[tokenId] = devicePubKey;
@@ -354,16 +357,29 @@ Both Rub3Access and Rub3Subscription include the activation/session management i
 mapping(uint256 => uint256) public lastActivationBlock;
 mapping(uint256 => uint256) public activeSessionId;
 mapping(uint256 => bytes32) public registeredDevice;  // tier 4 only
-uint256 public cooldownBlocks;
+uint256 public immutable cooldownBlocks;
+uint256 public constant MIN_COOLDOWN_BLOCKS = 15; // ~30s on Base; one TOTP window
 uint256 private _sessionCounter;
 
 // ── Events ──
 event Activated(uint256 indexed tokenId, address indexed owner, uint256 sessionId);
 
+// ── Helpers ──
+function cooldownReady(uint256 tokenId)
+    external view returns (bool ready, uint256 blocksRemaining)
+{
+    uint256 last = lastActivationBlock[tokenId];
+    if (last == 0) return (true, 0);
+    uint256 elapsed = block.number - last;
+    if (elapsed >= cooldownBlocks) return (true, 0);
+    return (false, cooldownBlocks - elapsed);
+}
+
 // ── Tier 3: cooldown activation ──
 function activate(uint256 tokenId) external returns (uint256 sessionId) {
     require(ownerOf(tokenId) == msg.sender, "not owner");
-    require(block.number - lastActivationBlock[tokenId] >= cooldownBlocks, "cooldown");
+    uint256 last = lastActivationBlock[tokenId];
+    if (last != 0) require(block.number - last >= cooldownBlocks, "cooldown");
     lastActivationBlock[tokenId] = block.number;
     activeSessionId[tokenId] = ++_sessionCounter;
     emit Activated(tokenId, msg.sender, activeSessionId[tokenId]);
@@ -373,7 +389,8 @@ function activate(uint256 tokenId) external returns (uint256 sessionId) {
 // ── Tier 4: hardened activation with device key registration ──
 function activateDevice(uint256 tokenId, bytes32 devicePubKey) external returns (uint256 sessionId) {
     require(ownerOf(tokenId) == msg.sender, "not owner");
-    require(block.number - lastActivationBlock[tokenId] >= cooldownBlocks, "cooldown");
+    uint256 last = lastActivationBlock[tokenId];
+    if (last != 0) require(block.number - last >= cooldownBlocks, "cooldown");
     lastActivationBlock[tokenId] = block.number;
     activeSessionId[tokenId] = ++_sessionCounter;
     registeredDevice[tokenId] = devicePubKey;

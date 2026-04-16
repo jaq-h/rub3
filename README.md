@@ -7,11 +7,11 @@ rub3 replaces username/password with wallet connect for native apps. The NFT is 
 ## How it works
 
 1. Developer packages their binary inside the rub3 wrapper
-2. Developer deploys an ERC-721 license contract on Base
-3. User launches the wrapped app — the wrapper checks for a cached license proof
-4. If no proof exists: the wrapper opens a native activation window (wallet connect, signature)
-5. On success: proof is cached locally, wrapped binary launches
-6. On subsequent launches: proof is verified locally, binary launches immediately
+2. Developer deploys an ERC-721 license contract on Base (`Rub3Access` or `Rub3Subscription`)
+3. User launches the wrapped app — the wrapper checks for a valid cached session
+4. If no session (or session expired): the wrapper opens a native activation window, verifies on-chain ownership, and requests a wallet signature
+5. On success: session is cached locally, wrapped binary launches
+6. On subsequent launches within TTL: session is verified locally, binary launches immediately
 
 There is no backend. The chain is the source of truth. The wallet is the identity.
 
@@ -20,51 +20,66 @@ There is no backend. The chain is the source of truth. The wallet is the identit
 ```
 rub3/
 ├── crates/
-│   └── rub3-wrapper/                 # Wrapper runtime (the only crate implemented so far)
+│   └── rub3-wrapper/                 # Wrapper runtime
 │       ├── src/
 │       │   ├── main.rs               # CLI entry point (clap), app constants
-│       │   ├── lib.rs                # Public module re-exports
+│       │   ├── lib.rs                # Public module re-exports (feature-gated)
 │       │   ├── license.rs            # License proof schema, activation message, ECDSA verification
 │       │   ├── store.rs              # Proof persistence (~/.rub3/licenses/ or RUB3_LICENSE_DIR)
 │       │   ├── activation.rs         # Activation flow orchestration (load proof → verify → webview)
-│       │   ├── rpc.rs                # On-chain queries (ownerOf, price) via alloy
+│       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner) via alloy
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC message handling
-│       │   └── supervisor.rs         # Child process lifecycle, SIGTERM forwarding
+│       │   ├── supervisor.rs         # Child process lifecycle, SIGTERM forwarding
+│       │   ├── session.rs            # Session schema, message hash, verify_local, is_expired
+│       │   └── session_store.rs      # Session persistence, load_latest_session
 │       ├── assets/
-│       │   └── activation.html       # Activation window UI (dark theme, wallet input, signature)
+│       │   └── activation.html       # Activation UI (address input, token select, signature)
 │       └── tests/
 │           ├── helpers/mod.rs        # Shared test utilities (wallet gen, signing, license creation)
 │           ├── integration.rs        # Wrapper binary tests (exit codes, args, missing binary)
 │           └── license_e2e.rs        # License verification tests (static + dynamic wallets, SIGTERM)
+├── contracts/                        # Foundry project — ERC-721 license contracts
+│   ├── src/
+│   │   ├── Rub3License.sol           # Abstract base (ERC-721 + Enumerable + Ownable)
+│   │   ├── Rub3Access.sol            # One-time purchase license
+│   │   └── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
+│   ├── test/
+│   │   ├── Rub3Access.t.sol
+│   │   └── Rub3Subscription.t.sol
+│   ├── script/
+│   │   └── Deploy.s.sol              # Deploy either contract to any EVM chain
+│   ├── foundry.toml
+│   ├── .env.example
+│   └── contracts.md                  # Local (Anvil) + on-chain (Base Sepolia) setup guide
 ├── licenses/
 │   └── com.rub3.example.json         # Example license proof with valid signature
 ├── scripts/
-│   ├── test-e2e.sh                   # Convenience script — runs cargo test
-│   └── seed-license.sh               # Generate a valid license proof for manual testing
-├── architecture.md                   # System design, session model, security model
+│   └── test-e2e.sh                   # Convenience script — runs cargo test
+├── architecture.md                   # System design, session model, security tiers
 ├── implementation.md                 # Phased development plan with status
 ├── ideation.md                       # Project vision and design principles
-└── testing.md                        # Manual testing guide (wallet setup, activation flow)
+└── testing.md                        # Manual testing guide
 ```
 
-## Dependencies
+## Rust dependencies
 
 | Crate | Purpose |
 |---|---|
 | `clap` | CLI argument parsing |
 | `k256` | secp256k1 ECDSA signature recovery |
-| `sha2` | SHA-256 activation message hash |
+| `sha2` | SHA-256 for activation message + session message |
 | `sha3` | Keccak-256 for Ethereum address derivation + personal_sign |
 | `hex` | Hex encoding/decoding |
-| `alloy` | Ethereum JSON-RPC (ownerOf, price queries) |
+| `alloy` | Ethereum JSON-RPC (ownerOf, tokensOfOwner, price) |
 | `wry` | Embedded webview for activation UI |
 | `tao` | Native window/event loop |
-| `serde` / `serde_json` | License proof serialization |
+| `serde` / `serde_json` | Proof and session serialization |
 | `dirs` | Platform data directory resolution |
-| `chrono` | RFC-3339 timestamps |
+| `chrono` | RFC-3339 timestamps, session TTL |
+| `rand` | Nonce generation (feature = `session`) |
 | `nix` / `libc` | Unix signal handling (SIGTERM forwarding) |
 
-Dev dependencies: `rand`, `tempfile` (for integration tests).
+Dev dependencies: `rand`, `tempfile`.
 
 ## Building
 
@@ -74,6 +89,8 @@ cargo build -p rub3-wrapper
 
 ## Testing
 
+### Rust
+
 ```bash
 # All tests (unit + integration + license e2e)
 cargo test -p rub3-wrapper
@@ -82,74 +99,54 @@ cargo test -p rub3-wrapper
 cargo test -p rub3-wrapper -- --ignored
 ```
 
-### Test suites
+**Unit tests** (`src/`): `license`, `store`, `rpc`, `session`, `session_store`
 
-**Unit tests** (in `src/`):
-- `license::tests` — activation message hashing, personal_sign, proof serialization
-- `store::tests` — proof persistence round-trips, directory creation, overwrite
-- `rpc::tests` — provider construction, error handling
+**Integration tests** (`tests/`): wrapper binary exit codes, argument passing, SIGTERM forwarding, static + dynamic license E2E
 
-**Integration tests** (`tests/integration.rs`):
-- Wrapper binary: exit codes, argument passing, missing binary rejection
+### Contracts
 
-**License E2E tests** (`tests/license_e2e.rs`):
-- **Static tests** — deterministic keypair, repeatable: proof verification, save/load/verify pipeline, wrapper binary execution with valid license
-- **Dynamic tests** — random wallet per run: signature generation, round-trip verification, wrapper execution with fresh license
-- **SIGTERM forwarding** — wrapper forwards signals to child process
+```bash
+cd contracts
+forge test
+```
 
-All crypto (wallet generation, signing) is done natively in Rust via `k256` — no external tools required.
+See [contracts/contracts.md](contracts/contracts.md) for local Anvil setup and Base Sepolia deployment.
 
 ## Running the wrapper
 
-On first run with no cached proof, the wrapper opens an activation window. To skip activation during development, seed a valid license proof:
-
-```bash
-# Generate a valid proof (requires Foundry's cast)
-./scripts/seed-license.sh
-
-# Run the wrapper — skips activation, launches binary directly
-RUB3_LICENSE_DIR=/tmp/rub3-test cargo run -p rub3-wrapper -- --binary /path/to/your/app
-```
-
-Without the seed script, the wrapper opens the activation window for wallet connect + signature:
+On first run with no cached proof, the wrapper opens an activation window:
 
 ```bash
 cargo run -p rub3-wrapper -- --binary /path/to/your/app
 ```
 
-After activation, the proof is cached and the binary launches immediately on subsequent runs.
+To skip activation during development, seed a valid license proof:
 
-## License proof format
+```bash
+./scripts/seed-license.sh
 
-```json
-{
-  "app_id": "com.rub3.example",
-  "token_id": 1,
-  "wallet_address": "0x...",
-  "signature": "0x...",
-  "activated_at": "2026-04-09T00:00:00Z",
-  "chain": "base",
-  "contract": "0x..."
-}
+RUB3_LICENSE_DIR=/tmp/rub3-test cargo run -p rub3-wrapper -- --binary /path/to/your/app
 ```
-
-The signature is an ECDSA `personal_sign` over `SHA-256(app_id || token_id_be_bytes)`. Verification recovers the signer address and compares it to `wallet_address`.
 
 ## Current status
 
-See [implementation.md](implementation.md) for the full roadmap. Currently implemented:
+See [implementation.md](implementation.md) for the full roadmap.
 
-- Wrapper skeleton with process supervision and signal forwarding
-- License proof schema, ECDSA signature verification, local proof caching
-- Activation flow with native webview (wallet connect UI stubbed, manual signature input works)
-- On-chain queries via alloy (ownerOf, price)
-- Static and dynamic integration test suite
+**Implemented:**
+- Wrapper skeleton with process supervision and SIGTERM forwarding
+- License proof schema, ECDSA signature verification (`personal_sign` / secp256k1), local proof caching
+- Activation window: wallet address input, `tokensOfOwner()` enumeration, multi-token selection, activation message display, signature paste
+- On-chain queries via alloy: `ownerOf`, `price`, `balanceOf`, `tokenOfOwnerByIndex`
+- Session model (tier 1-4): schema, `session_message()` hash, `verify_local()`, `is_expired()`, `new_nonce()`, full persistence with `load_latest_session()`
+- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`), 18 forge tests
+- Deploy script: `forge script` deploys either contract to any EVM chain from env vars
 
-Not yet implemented: sessions (TTL-based), WalletConnect integration, token selection, ENS verification, identity models, smart contracts, CLI tooling, SDK, Tauri plugin.
+**Not yet implemented:** WalletConnect integration, cooldown extension in contracts, ENS verification, identity models (TBA derivation), purchase UI, session wiring into activation flow, CLI tooling, SDK, Tauri plugin.
 
 ## Design documents
 
 - [ideation.md](ideation.md) — project vision, design principles, what rub3 is and isn't
-- [architecture.md](architecture.md) — system design, session model, components, security model
+- [architecture.md](architecture.md) — system design, session model, security tiers, components
 - [implementation.md](implementation.md) — phased development plan with current status
+- [contracts/contracts.md](contracts/contracts.md) — contract setup, local testing, deployment
 - [testing.md](testing.md) — manual testing guide
