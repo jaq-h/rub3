@@ -7,6 +7,25 @@ edition = "2021"
 name = "rub3-wrapper"
 path = "src/main.rs"
 
+[features]
+# Default: tier 2 matches the current runtime behaviour (signature + TTL + on-chain ownership check).
+default = ["tier-2"]
+
+# ── Tier bundles (pick exactly one at pack time) ──────────────────────────────
+tier-0 = []
+tier-1 = ["session"]
+tier-2 = ["session", "onchain-read"]
+tier-3 = ["session", "onchain-read", "onchain-write", "cooldown"]
+tier-4 = ["tier-3", "device-key"]
+
+# ── Composable capability flags (enabled by tier bundles) ─────────────────────
+session         = ["dep:rand"]
+onchain-read    = []
+onchain-write   = []
+cooldown        = []
+device-key      = ["dep:keyring"]
+binary-encryption = ["dep:aes-gcm"]   # orthogonal add-on, composes with tier-3+
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
@@ -22,6 +41,11 @@ tokio = { version = "1", features = ["rt"] }
 wry = "0.43"
 tao = "0.30"
 chrono = { version = "0.4", features = ["serde"] }
+
+# Optional — pulled in by the capability flags above.
+rand = { version = "0.8", optional = true }
+keyring = { version = "2", optional = true }
+aes-gcm = { version = "0.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }

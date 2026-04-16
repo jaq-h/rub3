@@ -4,6 +4,11 @@ set -euo pipefail
 # Generates a valid license proof so the wrapper skips the activation window.
 # Requires: cast (Foundry)
 #
+# NOTE: This proof only passes the signature check. When a real contract
+# address is configured (non-zero), the wrapper also verifies on-chain
+# ownership via ownerOf(). To test that path, deploy a contract to a
+# local Anvil node and update CONTRACT in main.rs.
+#
 # Usage:
 #   ./scripts/seed-license.sh
 #   RUB3_LICENSE_DIR=/tmp/rub3-test cargo run -p rub3-wrapper -- --binary <path>
