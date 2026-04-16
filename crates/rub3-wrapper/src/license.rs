@@ -83,7 +83,7 @@ pub fn verify(proof: &LicenseProof) -> Result<(), VerifyError> {
 ///
 /// Wallets sign: keccak256("\x19Ethereum Signed Message:\n32" || message)
 /// where `message` is the 32-byte raw preimage from `activation_message()`.
-fn personal_sign_hash(message: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn personal_sign_hash(message: &[u8; 32]) -> [u8; 32] {
     use sha3::{Digest, Keccak256};
     let mut hasher = Keccak256::new();
     hasher.update(b"\x19Ethereum Signed Message:\n32");
@@ -98,7 +98,7 @@ fn personal_sign_hash(message: &[u8; 32]) -> [u8; 32] {
 ///
 /// Ethereum signatures are 65 bytes: [r (32)] [s (32)] [v (1)].
 /// v is either 27/28 (legacy) or 0/1 (modern). We normalise to 0/1.
-fn recover_address(message: &[u8; 32], sig_hex: &str) -> Result<String, VerifyError> {
+pub(crate) fn recover_address(message: &[u8; 32], sig_hex: &str) -> Result<String, VerifyError> {
     use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 
     let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
@@ -139,7 +139,7 @@ fn recover_address(message: &[u8; 32], sig_hex: &str) -> Result<String, VerifyEr
 /// Converts a secp256k1 public key to a checksummed Ethereum address.
 ///
 /// Ethereum address = last 20 bytes of Keccak-256(uncompressed public key, minus the 04 prefix).
-fn public_key_to_address(key: &k256::ecdsa::VerifyingKey) -> String {
+pub(crate) fn public_key_to_address(key: &k256::ecdsa::VerifyingKey) -> String {
     use sha3::{Digest, Keccak256};
 
     // Uncompressed encoding: 0x04 || x (32 bytes) || y (32 bytes)

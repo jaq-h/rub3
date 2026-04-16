@@ -86,12 +86,15 @@ Replaces the legacy `LicenseProof` flow with a full session model backed by an o
 
 **Expected contract interface** (not in this repo):
 ```solidity
+uint256 public constant MIN_COOLDOWN_BLOCKS = 15; // ~30s on Base; minimum is one TOTP window
+uint256 public immutable cooldownBlocks;           // default 1800 (~1hr); must be >= MIN_COOLDOWN_BLOCKS
+
 mapping(uint256 => uint256) public lastActivationBlock;
-uint256 public cooldownBlocks; // e.g. 1800 (~1hr on Base)
 
 function activate(uint256 tokenId) external {
     require(ownerOf(tokenId) == msg.sender, "not owner");
-    require(block.number - lastActivationBlock[tokenId] >= cooldownBlocks, "cooldown");
+    uint256 last = lastActivationBlock[tokenId];
+    if (last != 0) require(block.number - last >= cooldownBlocks, "cooldown");
     lastActivationBlock[tokenId] = block.number;
     emit Activated(tokenId, msg.sender, block.number);
 }
