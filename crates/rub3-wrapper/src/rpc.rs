@@ -5,13 +5,17 @@ use alloy::sol;
 // ── Contract interface ────────────────────────────────────────────────────────
 
 // Minimal ABI surface needed for activation:
-//   ownerOf(tokenId)  — ERC-721 standard
-//   price()           — rub3 license contract
+//   ownerOf(tokenId)         — ERC-721 standard
+//   price()                  — rub3 license contract
+//   balanceOf(owner)         — ERC-721 standard
+//   tokenOfOwnerByIndex(...) — ERC-721Enumerable
 sol! {
     #[sol(rpc)]
     interface IRub3License {
         function ownerOf(uint256 tokenId) external view returns (address owner);
         function price() external view returns (uint256 amount);
+        function balanceOf(address owner) external view returns (uint256 balance);
+        function tokenOfOwnerByIndex(address owner, uint256 index) external view returns (uint256 tokenId);
     }
 }
 
@@ -69,6 +73,41 @@ pub fn token_price(rpc_url: &str, contract: Address) -> Result<U256, RpcError> {
             .await
             .map_err(|e| RpcError::Contract(e.to_string()))?;
         Ok(result)
+    })
+}
+
+/// Returns all token IDs owned by `owner` on the given ERC-721Enumerable contract.
+///
+/// Uses `balanceOf` + `tokenOfOwnerByIndex`. Returns `RpcError::Contract` if the
+/// contract does not implement ERC-721Enumerable.
+pub fn tokens_of_owner(
+    rpc_url: &str,
+    contract: Address,
+    owner: Address,
+) -> Result<Vec<u64>, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+
+        let balance = instance
+            .balanceOf(owner)
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))?;
+
+        let count = balance.to::<u64>();
+        let mut tokens = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            let token_id = instance
+                .tokenOfOwnerByIndex(owner, U256::from(i))
+                .call()
+                .await
+                .map_err(|e| RpcError::Contract(e.to_string()))?;
+            tokens.push(token_id.to::<u64>());
+        }
+
+        Ok(tokens)
     })
 }
 

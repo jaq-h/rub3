@@ -145,9 +145,20 @@
 
   <!-- ── Screen: connect ─────────────────────────────────────────── -->
   <div id="screen-connect">
-    <button class="btn-primary" id="btn-connect">Connect Wallet</button>
+    <div class="field">
+      <label>Wallet Address</label>
+      <input id="wallet-input" type="text" placeholder="0x…" autocomplete="off" spellcheck="false" />
+    </div>
     <div class="error" id="connect-error"></div>
+    <button class="btn-primary" id="btn-connect">Check Ownership</button>
     <button class="btn-ghost" style="margin-top:8px" id="btn-cancel-connect">Cancel</button>
+  </div>
+
+  <!-- ── Screen: token-select ───────────────────────────────────── -->
+  <div id="screen-token-select" class="hidden">
+    <p style="font-size:13px;color:#999;margin-bottom:14px">Multiple license tokens found. Select one to activate.</p>
+    <div id="token-list"></div>
+    <button class="btn-ghost" style="margin-top:8px" id="btn-cancel-token">Cancel</button>
   </div>
 
   <!-- ── Screen: activate ───────────────────────────────────────── -->
@@ -161,7 +172,13 @@
       <div class="tv" id="owner-display">—</div>
     </div>
     <div class="field">
-      <label>Signature <span style="color:#444;font-size:10px;text-transform:none">(sign the message in your wallet and paste here)</span></label>
+      <label>Message to Sign <span style="color:#444;font-size:10px;text-transform:none">(use personal_sign / Sign Message in your wallet)</span></label>
+      <div class="token-box" style="margin-bottom:0">
+        <div class="tv" id="activation-message" style="word-break:break-all;font-size:11px">—</div>
+      </div>
+    </div>
+    <div class="field">
+      <label>Signature <span style="color:#444;font-size:10px;text-transform:none">(paste the result here)</span></label>
       <input id="sig-input" type="text" placeholder="0x…" autocomplete="off" />
       <div class="error" id="sig-error"></div>
     </div>
@@ -179,7 +196,7 @@
 <script>
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  const SCREENS = ['connect', 'activate', 'processing'];
+  const SCREENS = ['connect', 'token-select', 'activate', 'processing'];
 
   function show(name) {
     SCREENS.forEach(s => {
@@ -209,8 +226,9 @@
 
   // ── Rust → JS API ─────────────────────────────────────────────────────────
 
-  let pendingTokenId  = null;
-  let pendingOwner    = null;
+  let pendingTokenId    = null;
+  let pendingOwner      = null;
+  let pendingTokenOwner = null;
 
   window.rub3 = {
     // Called once after 'ready' is acknowledged.
@@ -226,14 +244,36 @@
       }
     },
 
+    // Multiple tokens found — show selection list.
+    // data: { ownerAddress, tokens: number[] }
+    onShowTokenSelect(data) {
+      pendingTokenOwner = data.ownerAddress;
+      const list = document.getElementById('token-list');
+      list.innerHTML = '';
+      data.tokens.forEach(id => {
+        const btn = document.createElement('button');
+        btn.className = 'btn-primary';
+        btn.style.marginBottom = '8px';
+        btn.textContent = 'Token #' + id;
+        btn.addEventListener('click', () => {
+          show('processing');
+          document.getElementById('processing-msg').textContent = 'Loading token…';
+          post({ type: 'token_selected', token_id: id, owner_address: pendingTokenOwner });
+        });
+        list.appendChild(btn);
+      });
+      show('token-select');
+    },
+
     // Wallet owns a token — show the signature prompt.
-    // data: { tokenId, ownerAddress }
+    // data: { tokenId, ownerAddress, activationMessage }
     onShowActivate(data) {
       pendingTokenId = data.tokenId;
       pendingOwner   = data.ownerAddress;
 
       document.getElementById('token-id-display').textContent = '#' + data.tokenId;
       document.getElementById('owner-display').textContent    = data.ownerAddress;
+      document.getElementById('activation-message').textContent = data.activationMessage || '—';
       document.getElementById('sig-input').value = '';
       clearError('sig-error');
 
@@ -241,18 +281,40 @@
     },
 
     // Something went wrong — surface the error on the connect screen.
-    onError(data) {
+    onError(msg) {
       show('connect');
-      setError('connect-error', data.message);
+      setError('connect-error', typeof msg === 'string' ? msg : msg.message);
     },
   };
 
   // ── Connect screen ────────────────────────────────────────────────────────
 
-  // TODO: open WalletConnect modal; on approval post({ type: 'connect', address })
   document.getElementById('btn-connect').addEventListener('click', () => {
     clearError('connect-error');
-    setError('connect-error', 'WalletConnect not yet implemented.');
+    const addr = document.getElementById('wallet-input').value.trim();
+
+    if (!addr) {
+      setError('connect-error', 'Enter your wallet address.');
+      return;
+    }
+    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) {
+      setError('connect-error', 'Enter a valid Ethereum address (0x + 40 hex chars).');
+      return;
+    }
+
+    show('processing');
+    document.getElementById('processing-msg').textContent = 'Checking ownership…';
+    post({ type: 'connect', address: addr });
+  });
+
+  document.getElementById('wallet-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('btn-connect').click();
+  });
+
+  // ── Token select screen ───────────────────────────────────────────────────
+
+  document.getElementById('btn-cancel-token').addEventListener('click', () => {
+    post({ type: 'cancel' });
   });
 
   document.getElementById('btn-cancel-connect').addEventListener('click', () => {
