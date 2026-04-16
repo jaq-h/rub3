@@ -60,9 +60,14 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 
 **Tests:** 18 forge tests (`forge test`) covering metadata, sequential mint, zero-recipient default, over/underpay, supply cap, enumeration via `tokenOfOwnerByIndex`, owner-gated setters, withdraw, subscription expiry, mid-period renewal, post-expiry renewal, nonexistent-token revert.
 
+**`script/Deploy.s.sol`** — forge script that deploys either contract from env vars:
+- `CONTRACT_TYPE`, `TOKEN_NAME`, `TOKEN_SYMBOL`, `IDENTITY_MODEL`, `WRAPPER_HASH`, `PRICE` required; `SUPPLY_CAP`, `OWNER`, `PERIOD` optional
+- Dry run (no `--broadcast`): simulates deployment, prints summary with all params
+- Live: add `--broadcast --verify --etherscan-api-key $BASESCAN_API_KEY`
+- Local: run against `anvil` with `--rpc-url http://localhost:8545` and a pre-funded Anvil key — no `.env` needed
+
 **Not yet done:**
-- `Rub3Access.sol` cooldown extension (`activate()`, `lastActivationBlock`, `cooldownBlocks`) — landed in §1.8 where the wrapper-side wiring lives
-- Deployment script (`script/Deploy.s.sol`) — landed in §2.2 (`rub3 deploy` CLI)
+- Cooldown extension in `Rub3License.sol` (`activate()`, `cooldownReady()`, `lastActivationBlock`, `cooldownBlocks`, `MIN_COOLDOWN_BLOCKS = 15`) — contract-side companion to §1.8 wrapper work
 - Base Sepolia deployment
 
 ### 1.6 — Identity model + TBA derivation `[not started]`
@@ -80,11 +85,11 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 - Call `purchase(recipient)` with connected wallet
 - After tx confirms, proceed to activation
 
-### 1.8 — On-chain cooldown + session model (tier 3) `[not started]`
+### 1.8 — On-chain cooldown + session model (tier 3) `[partial]`
 
 Replaces the legacy `LicenseProof` flow with a full session model backed by an on-chain cooldown. An NFT holder can otherwise run a signing oracle to distribute fresh sessions to non-holders; a contract-enforced `activate()` cooldown rate-limits how many sessions a single token can mint. The wrapper reads cooldown state and encodes calldata — it never sends txs or holds keys.
 
-**Expected contract interface** (not in this repo):
+**Contract interface** (pending addition to `Rub3License.sol` — see §1.5 "not yet done"):
 ```solidity
 uint256 public constant MIN_COOLDOWN_BLOCKS = 15; // ~30s on Base; minimum is one TOTP window
 uint256 public immutable cooldownBlocks;           // default 1800 (~1hr); must be >= MIN_COOLDOWN_BLOCKS
@@ -98,12 +103,16 @@ function activate(uint256 tokenId) external {
     lastActivationBlock[tokenId] = block.number;
     emit Activated(tokenId, msg.sender, block.number);
 }
+
+function cooldownReady(uint256 tokenId)
+    external view returns (bool ready, uint256 blocksRemaining) { ... }
 ```
 
-**Phase A — foundation modules** (testable in isolation)
-- `session.rs` — session schema, `session_message()` hash construction, `verify_local()` signature recovery, `is_expired()`. Extends `LicenseProof` with `nonce`, `issued_at`, `expires_at`, and tier-3 activation proof fields (`activation_tx`, `activation_block`, `activation_block_hash`); adds tier-4 fields (`session_id`, `device_pubkey`) as `Option<T>`
-- `session_store.rs` — `~/.rub3/sessions/<app_id>/<token_id>.json` with `RUB3_SESSION_DIR` override; `load_latest_session(app_id)` scans the directory for the most recent valid session (solves "don't know token_id at startup")
-- Extract `personal_sign_hash`, `recover_address`, `public_key_to_address` to `pub(crate)` in `license.rs` for session reuse
+**Phase A — foundation modules `[complete]`**
+- `session.rs` — `Session` schema; `session_message()` (SHA-256 over tier-appropriate field set, BE integers, optional fields omitted when `None`); `new_nonce()` (32-byte random hex); `verify_local()` (reconstruct message → `personal_sign` recover → compare to `session.wallet` → expiry check); `is_expired()` (RFC3339 parse vs `Utc::now()`; `None` → false for tier 4)
+- `session_store.rs` — `session_path()` (`RUB3_SESSION_DIR` override or `~/.rub3/sessions/<app_id>/<token_id>.json`); `load_session()` / `save_session()`; `load_latest_session()` scans app_id dir, filters expired + invalid-signature sessions, returns most-recently-issued valid one
+- `personal_sign_hash`, `recover_address`, `public_key_to_address` promoted to `pub(crate)` in `license.rs`
+- 15 tests: message determinism + tier diffing, expiry edge cases (future/past/None/unparseable), sign/verify round-trip, wrong-wallet failure, save/load round-trip, load_latest with mixed valid/expired sessions
 
 **Phase B — RPC + IPC wiring**
 - `rpc.rs` additions: `last_activation_block`, `cooldown_blocks`, `cooldown_ready` → `(is_ready, blocks_remaining)`, `encode_activate_calldata` (pure, no RPC), `get_tx_receipt`, `get_block_number`
@@ -287,8 +296,8 @@ rub3/
 │       │   ├── rpc.rs                # On-chain queries (ownerOf, price) via alloy
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC
 │       │   ├── supervisor.rs         # Child process lifecycle, signal forwarding
-│       │   ├── session.rs            # [scaffold, feature = "session"] session schema + verify
-│       │   ├── session_store.rs      # [scaffold, feature = "session"] session persistence
+│       │   ├── session.rs            # [feature = "session"] session schema, message, verify_local, is_expired
+│       │   ├── session_store.rs      # [feature = "session"] load/save/load_latest_session
 │       │   ├── device.rs             # [scaffold, feature = "device-key"] device keypair mgmt (tier 4)
 │       │   └── decrypt.rs            # [scaffold, feature = "binary-encryption"] AES-256-GCM binary unwrap
 │       ├── assets/
@@ -305,9 +314,13 @@ rub3/
 │   ├── test/
 │   │   ├── Rub3Access.t.sol
 │   │   └── Rub3Subscription.t.sol
+│   ├── script/
+│   │   └── Deploy.s.sol              # Deploys either contract from env vars; supports Anvil + Base Sepolia
 │   ├── lib/                          # Git submodules: openzeppelin-contracts@v5.1.0, forge-std
 │   ├── foundry.toml
-│   └── remappings.txt
+│   ├── remappings.txt
+│   ├── .env.example                  # Template for RPC URLs, keys, deploy params
+│   └── contracts.md                  # Local (Anvil) + on-chain (Base Sepolia) setup guide
 ├── licenses/
 │   └── com.rub3.example.json         # Valid example license proof
 ├── scripts/
@@ -326,10 +339,8 @@ Planned (not yet created):
 │   ├── rub3-cli/            # Developer tooling (pack, deploy, register)
 │   └── tauri-plugin-rub3/   # Tauri integration
 ├── contracts/
-│   ├── src/
-│   │   └── Rub3Registry.sol # §2.4 — ENS subdomain registry
-│   └── script/
-│       └── Deploy.s.sol     # §2.2 — forge script used by `rub3 deploy`
+│   └── src/
+│       └── Rub3Registry.sol # §2.4 — ENS subdomain registry
 └── examples/
     ├── hello-rust/
     ├── hello-subscription/
