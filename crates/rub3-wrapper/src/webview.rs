@@ -159,14 +159,45 @@ impl IpcState {
             }
 
             IpcMessage::Connect { address } => {
-                // TODO (Phase 1.6): call rpc::balance_of(rpc_url, contract, address)
-                // and rpc::token_of_owner_by_index to get the real tokenId.
-                // For now, skip straight to the signature prompt.
-                let payload = serde_json::json!({
-                    "tokenId":      1,
-                    "ownerAddress": address,
-                });
-                self.eval(format!("window.rub3.onShowActivate({})", payload));
+                // TODO: enumerate tokens via tokenOfOwnerByIndex once the
+                // contract exposes ERC-721 Enumerable. For now check token 1.
+                let contract_addr: alloy::primitives::Address =
+                    self.contract.parse().unwrap_or(alloy::primitives::Address::ZERO);
+
+                let token_id: u64 = 1;
+
+                if contract_addr.is_zero() {
+                    let payload = serde_json::json!({
+                        "tokenId":      token_id,
+                        "ownerAddress": address,
+                    });
+                    self.eval(format!("window.rub3.onShowActivate({})", payload));
+                    return;
+                }
+
+                match crate::rpc::owner_of(&self.rpc_url, contract_addr, token_id) {
+                    Ok(owner) => {
+                        let owner_hex = format!("0x{}", hex::encode(owner.as_slice()));
+                        if owner_hex.eq_ignore_ascii_case(&address) {
+                            let payload = serde_json::json!({
+                                "tokenId":      token_id,
+                                "ownerAddress": address,
+                            });
+                            self.eval(format!("window.rub3.onShowActivate({})", payload));
+                        } else {
+                            self.eval(
+                                "window.rub3.onError('Wallet does not own a license token')"
+                                    .into(),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        self.eval(format!(
+                            "window.rub3.onError({})",
+                            serde_json::json!(format!("ownership check failed: {e}"))
+                        ));
+                    }
+                }
             }
 
             IpcMessage::Signed { token_id, owner_address, signature, paid_by } => {
