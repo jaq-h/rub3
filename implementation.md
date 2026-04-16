@@ -34,12 +34,36 @@ Goal: A working wrapper that gates a Rust binary behind wallet ownership, using 
 - Ownership check wired into webview `Connect` handler: 0 tokens → error, 1 → auto-proceed to activate, N → token-select screen
 - ENS resolution remains a stub (`EnsNotSupported`) — deferred to §1.6 where it is the primary deliverable
 
-### 1.5 — Smart contracts `[not started]`
-- `Rub3Access.sol` — ERC-721 + ERC-721Enumerable, payable `purchase(address recipient)`, `bytes32 wrapperHash`, `uint8 identityModel`
-- `Rub3Subscription.sol` — same base + `expiresAt` mapping, payable `purchase()` and `renew(tokenId)`, `isValid(tokenId)` view
-- `identityModel`: `0 = access`, `1 = account` — set at deploy time, readable by wrapper
-- OpenZeppelin base contracts, Foundry project
-- Deploy to Base Sepolia for development
+### 1.5 — Smart contracts `[scaffolded]`
+
+Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZeppelin v5.1.0 and forge-std installed as submodules under `contracts/lib/`.
+
+**Abstract base — `Rub3License.sol`**
+- Inherits `ERC721`, `ERC721Enumerable`, `Ownable` (OZ v5)
+- Immutable: `identityModel` (0 = access, 1 = account; rejects values > 1), `supplyCap` (0 = uncapped)
+- Mutable + owner-gated: `price` (`setPrice`), `wrapperHash` (`setWrapperHash`) — hash is rotatable so developers can rebuild the wrapper without redeploying
+- `nextTokenId` counter + internal `_mintNext` helper for sequential ids from 0
+- `_resolveRecipient(address)` helper: `address(0)` → `msg.sender` (per architecture.md §1)
+- `withdraw(address payable)` owner-only sweep
+- `_update` / `_increaseBalance` / `supportsInterface` overrides for ERC-721 + Enumerable composition
+
+**`Rub3Access.sol`** — concrete, one-time purchase:
+- `purchase(address recipient) payable returns (uint256 tokenId)` — pays `price`, mints next id
+- `Purchased(tokenId, recipient, payer)` event
+
+**`Rub3Subscription.sol`** — concrete, time-bounded:
+- Immutable `period`, `mapping(uint256 => uint256) expiresAt`
+- `purchase(address recipient) payable` — mints + sets `expiresAt = now + period`
+- `renew(uint256 tokenId) payable` — extends from current expiry if still valid, else resets to `now + period`
+- `isValid(uint256 tokenId) view` — `expiresAt[tokenId] > block.timestamp`
+- `Purchased` + `Renewed` events
+
+**Tests:** 18 forge tests (`forge test`) covering metadata, sequential mint, zero-recipient default, over/underpay, supply cap, enumeration via `tokenOfOwnerByIndex`, owner-gated setters, withdraw, subscription expiry, mid-period renewal, post-expiry renewal, nonexistent-token revert.
+
+**Not yet done:**
+- `Rub3Access.sol` cooldown extension (`activate()`, `lastActivationBlock`, `cooldownBlocks`) — landed in §1.8 where the wrapper-side wiring lives
+- Deployment script (`script/Deploy.s.sol`) — landed in §2.2 (`rub3 deploy` CLI)
+- Base Sepolia deployment
 
 ### 1.6 — Identity model + TBA derivation `[not started]`
 - Read `identityModel` from contract at session creation (one RPC call, cached in session)
@@ -270,6 +294,17 @@ rub3/
 │           ├── helpers/mod.rs        # Wallet gen, signing, license creation
 │           ├── integration.rs        # Wrapper binary tests
 │           └── license_e2e.rs        # Static + dynamic license verification tests
+├── contracts/                        # Foundry project (§1.5)
+│   ├── src/
+│   │   ├── Rub3License.sol           # Abstract base: ERC-721 + Enumerable + Ownable, metadata, mint helper
+│   │   ├── Rub3Access.sol            # One-time purchase license
+│   │   └── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
+│   ├── test/
+│   │   ├── Rub3Access.t.sol
+│   │   └── Rub3Subscription.t.sol
+│   ├── lib/                          # Git submodules: openzeppelin-contracts@v5.1.0, forge-std
+│   ├── foundry.toml
+│   └── remappings.txt
 ├── licenses/
 │   └── com.rub3.example.json         # Valid example license proof
 ├── scripts/
@@ -289,10 +324,9 @@ Planned (not yet created):
 │   └── tauri-plugin-rub3/   # Tauri integration
 ├── contracts/
 │   ├── src/
-│   │   ├── Rub3Access.sol
-│   │   ├── Rub3Subscription.sol
-│   │   └── Rub3Registry.sol
-│   └── foundry.toml
+│   │   └── Rub3Registry.sol # §2.4 — ENS subdomain registry
+│   └── script/
+│       └── Deploy.s.sol     # §2.2 — forge script used by `rub3 deploy`
 └── examples/
     ├── hello-rust/
     ├── hello-subscription/
