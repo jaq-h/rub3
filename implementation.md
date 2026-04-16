@@ -21,15 +21,18 @@ Goal: A working wrapper that gates a Rust binary behind wallet ownership, using 
 ### 1.3 — Activation flow + webview `[partial]`
 - Activation orchestration (`activation.rs`): check cached proof → verify → launch, or open activation window
 - Native webview (`wry`/`tao`) with dark-themed activation UI (`assets/activation.html`)
-- IPC message protocol: JS ↔ Rust (ready, connect, signed, cancel, error)
-- Screens: connect → activate (token + signature input) → processing
-- **Done:** manual wallet address input, manual signature paste, proof storage on success
-- **Not yet done:** WalletConnect integration, token selection UI, `tokensOfOwner()` enumeration
+- IPC message protocol: JS ↔ Rust (ready, connect, token_selected, signed, cancel, error)
+- Screens: connect (address input) → token-select (when multiple tokens owned) → activate (message + signature input) → processing
+- Activate screen surfaces the exact `personal_sign` preimage (hex) so the user knows what to sign in their wallet
+- **Done:** manual wallet address input, `tokensOfOwner()` enumeration, multi-token selection UI, activation message display, manual signature paste, proof storage on success
+- **Not yet done:** WalletConnect integration (requires WC v2 JS SDK + developer-supplied project ID)
 
-### 1.4 — On-chain queries `[partial]`
-- `rpc.rs`: `ownerOf(tokenId)` and `price()` via alloy JSON-RPC with minimal ABI (`IRub3License`)
+### 1.4 — On-chain queries `[complete]`
+- `rpc.rs`: `ownerOf(tokenId)`, `price()`, `balanceOf(owner)`, `tokenOfOwnerByIndex(owner, index)` via alloy JSON-RPC with minimal ABI (`IRub3License`)
+- `tokens_of_owner(rpc_url, contract, owner)` enumerates all tokens held by a wallet via ERC-721Enumerable
 - Synchronous wrapper over async alloy calls (`block_on` with single-threaded tokio runtime)
-- **Not yet done:** ENS resolution (stub returns `EnsNotSupported`), ownership check wired into webview flow
+- Ownership check wired into webview `Connect` handler: 0 tokens → error, 1 → auto-proceed to activate, N → token-select screen
+- ENS resolution remains a stub (`EnsNotSupported`) — deferred to §1.6 where it is the primary deliverable
 
 ### 1.5 — Smart contracts `[not started]`
 - `Rub3Access.sol` — ERC-721 + ERC-721Enumerable, payable `purchase(address recipient)`, `bytes32 wrapperHash`, `uint8 identityModel`

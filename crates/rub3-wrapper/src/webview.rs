@@ -37,6 +37,8 @@ enum IpcMessage {
     Ready,
     /// User submitted a wallet address; check ownership on-chain.
     Connect { address: String },
+    /// User selected a token from the multi-token selection screen.
+    TokenSelected { token_id: u64, owner_address: String },
     /// User completed the signature prompt.
     Signed {
         token_id: u64,
@@ -159,37 +161,42 @@ impl IpcState {
             }
 
             IpcMessage::Connect { address } => {
-                // TODO: enumerate tokens via tokenOfOwnerByIndex once the
-                // contract exposes ERC-721 Enumerable. For now check token 1.
                 let contract_addr: alloy::primitives::Address =
                     self.contract.parse().unwrap_or(alloy::primitives::Address::ZERO);
 
-                let token_id: u64 = 1;
-
                 if contract_addr.is_zero() {
-                    let payload = serde_json::json!({
-                        "tokenId":      token_id,
-                        "ownerAddress": address,
-                    });
-                    self.eval(format!("window.rub3.onShowActivate({})", payload));
+                    // No contract configured — skip on-chain check, use token 1.
+                    self.show_activate(&address, 1);
                     return;
                 }
 
-                match crate::rpc::owner_of(&self.rpc_url, contract_addr, token_id) {
-                    Ok(owner) => {
-                        let owner_hex = format!("0x{}", hex::encode(owner.as_slice()));
-                        if owner_hex.eq_ignore_ascii_case(&address) {
-                            let payload = serde_json::json!({
-                                "tokenId":      token_id,
-                                "ownerAddress": address,
-                            });
-                            self.eval(format!("window.rub3.onShowActivate({})", payload));
-                        } else {
-                            self.eval(
-                                "window.rub3.onError('Wallet does not own a license token')"
-                                    .into(),
-                            );
-                        }
+                let owner_addr: alloy::primitives::Address = match address.parse() {
+                    Ok(a) => a,
+                    Err(_) => {
+                        self.eval(format!(
+                            "window.rub3.onError({})",
+                            serde_json::json!("Invalid wallet address")
+                        ));
+                        return;
+                    }
+                };
+
+                match crate::rpc::tokens_of_owner(&self.rpc_url, contract_addr, owner_addr) {
+                    Ok(tokens) if tokens.is_empty() => {
+                        self.eval(format!(
+                            "window.rub3.onError({})",
+                            serde_json::json!("No license tokens found for this wallet")
+                        ));
+                    }
+                    Ok(tokens) if tokens.len() == 1 => {
+                        self.show_activate(&address, tokens[0]);
+                    }
+                    Ok(tokens) => {
+                        let payload = serde_json::json!({
+                            "ownerAddress": address,
+                            "tokens": tokens,
+                        });
+                        self.eval(format!("window.rub3.onShowTokenSelect({})", payload));
                     }
                     Err(e) => {
                         self.eval(format!(
@@ -198,6 +205,10 @@ impl IpcState {
                         ));
                     }
                 }
+            }
+
+            IpcMessage::TokenSelected { token_id, owner_address } => {
+                self.show_activate(&owner_address, token_id);
             }
 
             IpcMessage::Signed { token_id, owner_address, signature, paid_by } => {
@@ -225,6 +236,17 @@ impl IpcState {
                 let _ = self.cmd_tx.send(Cmd::Close);
             }
         }
+    }
+
+    fn show_activate(&self, address: &str, token_id: u64) {
+        let msg = crate::license::activation_message(&self.app_id, token_id);
+        let msg_hex = format!("0x{}", hex::encode(msg));
+        let payload = serde_json::json!({
+            "tokenId":           token_id,
+            "ownerAddress":      address,
+            "activationMessage": msg_hex,
+        });
+        self.eval(format!("window.rub3.onShowActivate({})", payload));
     }
 
     fn eval(&self, script: String) {
