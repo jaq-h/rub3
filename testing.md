@@ -32,7 +32,9 @@ scripts/test-e2e.sh
 
 - **`license::tests`** — activation message hashing, personal_sign prefix, proof serialization round-trips
 - **`store::tests`** — proof save/load, directory creation, overwrite, missing file handling
-- **`rpc::tests`** — provider construction, contract call error paths, ENS stub
+- **`rpc::tests`** — provider construction, contract call error paths, `encode_activate_calldata` selector + layout, `get_tx_receipt` / `get_block_number` error paths, ENS stub
+- **`session::tests`** (requires `session` feature) — message determinism, tier-diffing, expiry edge cases, sign/verify round-trip, wrong-wallet failure; with `cooldown` adds: `verify_onchain` missing-field + bad-URL paths, `should_reverify` distribution sanity
+- **`session_store::tests`** (requires `session` feature) — save/load round-trip, missing-session, `load_latest_session` picking the freshest valid session
 
 ### Integration tests (`tests/integration.rs`)
 
@@ -62,6 +64,23 @@ Each test provisions a valid license proof in a temp directory via `RUB3_LICENSE
 **Signal handling:**
 
 - `wrapper_forwards_sigterm` — spawn wrapper with `/bin/sleep`, send SIGTERM, assert clean exit
+
+### Tier-3 on-chain session E2E (`tests/session_onchain_e2e.rs`)
+
+Exercises `session::verify_onchain` against a live EVM node. Requires the Foundry toolchain (`anvil`, `forge`, `cast`) on PATH; gracefully prints `SKIP:` and returns when any of those are missing. Marked `#[ignore]` so default `cargo test` runs skip it.
+
+- `session_verify_onchain_e2e` — spawns `anvil` on port 8547, deploys `Rub3Access` via `forge create`, runs `purchase(address)` + `activate(uint256)` via `cast send`, extracts the receipt's block hash, then:
+  - asserts `verify_onchain` succeeds for a correctly-populated session,
+  - tampers the `contract` field → `VerifyError::ContractMismatch`,
+  - tampers the `activation_block_hash` → `VerifyError::BlockHashMismatch`,
+  - points `activation_tx` at a non-existent hash → `VerifyError::ReceiptNotFound`.
+
+Run with:
+
+```bash
+cargo test -p rub3-wrapper --no-default-features --features tier-3 \
+    -- --ignored session_verify_onchain_e2e
+```
 
 ### Test helpers (`tests/helpers/mod.rs`)
 

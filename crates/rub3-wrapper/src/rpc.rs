@@ -1,14 +1,20 @@
-use alloy::primitives::{Address, U256};
-use alloy::providers::ProviderBuilder;
+use alloy::primitives::{Address, B256, U256};
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol;
+use alloy::sol_types::SolCall;
 
 // ── Contract interface ────────────────────────────────────────────────────────
 
-// Minimal ABI surface needed for activation:
-//   ownerOf(tokenId)         — ERC-721 standard
-//   price()                  — rub3 license contract
-//   balanceOf(owner)         — ERC-721 standard
-//   tokenOfOwnerByIndex(...) — ERC-721Enumerable
+// Minimal ABI surface needed for activation + session flow (tiers 2-3):
+//   ownerOf(tokenId)              — ERC-721 standard
+//   price()                       — rub3 license contract
+//   balanceOf(owner)              — ERC-721 standard
+//   tokenOfOwnerByIndex(...)      — ERC-721Enumerable
+//   activate(tokenId)             — tier-3 session activation (returns sessionId)
+//   cooldownReady(tokenId)        — tier-3 view helper
+//   lastActivationBlock(tokenId)  — tier-3 read
+//   cooldownBlocks()              — tier-3 read
+//   activeSessionId(tokenId)      — tier-3 revocation check
 sol! {
     #[sol(rpc)]
     interface IRub3License {
@@ -16,7 +22,26 @@ sol! {
         function price() external view returns (uint256 amount);
         function balanceOf(address owner) external view returns (uint256 balance);
         function tokenOfOwnerByIndex(address owner, uint256 index) external view returns (uint256 tokenId);
+
+        function activate(uint256 tokenId) external returns (uint256 sessionId);
+        function cooldownReady(uint256 tokenId) external view returns (bool ready, uint256 blocksRemaining);
+        function lastActivationBlock(uint256 tokenId) external view returns (uint256 blockNumber);
+        function cooldownBlocks() external view returns (uint256 blocks);
+        function activeSessionId(uint256 tokenId) external view returns (uint256 sessionId);
     }
+}
+
+// ── Receipt ───────────────────────────────────────────────────────────────────
+
+/// Minimal tx receipt — the fields the wrapper cares about.
+#[derive(Debug, Clone)]
+pub struct TxReceipt {
+    pub status:       bool,
+    pub block_number: u64,
+    pub block_hash:   String,
+    /// `to` address from the receipt, lowercased hex. Used by tier-3
+    /// on-chain re-verification to confirm the tx hit the license contract.
+    pub to: Option<String>,
 }
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -118,6 +143,135 @@ pub fn resolve_ens(_rpc_url: &str, _name: &str) -> Result<Address, RpcError> {
     Err(RpcError::EnsNotSupported)
 }
 
+// ── Tier-3: activation / cooldown ─────────────────────────────────────────────
+
+/// Calls `cooldownReady(tokenId)` view; returns `(ready, blocks_remaining)`.
+pub fn cooldown_ready(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+) -> Result<(bool, u64), RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        let r = instance
+            .cooldownReady(U256::from(token_id))
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))?;
+        Ok((r.ready, r.blocksRemaining.to::<u64>()))
+    })
+}
+
+/// Calls `lastActivationBlock(tokenId)` view.
+pub fn last_activation_block(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+) -> Result<u64, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        let r = instance
+            .lastActivationBlock(U256::from(token_id))
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))?;
+        Ok(r.to::<u64>())
+    })
+}
+
+/// Calls `cooldownBlocks()` view (returns the contract's configured cooldown).
+pub fn cooldown_blocks(rpc_url: &str, contract: Address) -> Result<u64, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        let r = instance
+            .cooldownBlocks()
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))?;
+        Ok(r.to::<u64>())
+    })
+}
+
+/// Calls `activeSessionId(tokenId)` view. Used after an `activate()` tx lands
+/// to read the authoritative session id the contract assigned.
+pub fn active_session_id(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+) -> Result<u64, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        let r = instance
+            .activeSessionId(U256::from(token_id))
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))?;
+        Ok(r.to::<u64>())
+    })
+}
+
+/// Returns the 0x-prefixed ABI-encoded calldata for `activate(tokenId)`.
+///
+/// Pure — no RPC. The wrapper shows this to the user so they can paste it
+/// into their wallet to send the tx themselves.
+pub fn encode_activate_calldata(token_id: u64) -> String {
+    let call = IRub3License::activateCall { tokenId: U256::from(token_id) };
+    format!("0x{}", hex::encode(call.abi_encode()))
+}
+
+/// Fetches the receipt for `tx_hash`. Returns `Ok(None)` while the tx is still
+/// pending; `Ok(Some(receipt))` once mined.
+pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>, RpcError> {
+    let hash: B256 = tx_hash
+        .trim_start_matches("0x")
+        .parse::<B256>()
+        .map_err(|e| RpcError::Transport(format!("invalid tx hash: {e}")))?;
+
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let maybe = provider
+            .get_transaction_receipt(hash)
+            .await
+            .map_err(|e| RpcError::Transport(e.to_string()))?;
+
+        let receipt = match maybe {
+            Some(r) => r,
+            None    => return Ok(None),
+        };
+
+        let block_hash = receipt
+            .block_hash
+            .map(|h| format!("0x{}", hex::encode(h.as_slice())))
+            .unwrap_or_default();
+        let block_number = receipt.block_number.unwrap_or_default();
+        let to = receipt
+            .to
+            .map(|a| format!("0x{}", hex::encode(a.as_slice())));
+
+        Ok(Some(TxReceipt {
+            status:       receipt.status(),
+            block_number,
+            block_hash,
+            to,
+        }))
+    })
+}
+
+/// Returns the current block number on the target chain.
+pub fn get_block_number(rpc_url: &str) -> Result<u64, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        provider
+            .get_block_number()
+            .await
+            .map_err(|e| RpcError::Transport(e.to_string()))
+    })
+}
+
 // ── Internals ─────────────────────────────────────────────────────────────────
 
 fn build_provider(
@@ -177,5 +331,35 @@ mod tests {
         let contract: Address = SAMPLE_CONTRACT.parse().unwrap();
         let err = owner_of(VALID_RPC, contract, u64::MAX).unwrap_err();
         assert!(matches!(err, RpcError::Contract(_)));
+    }
+
+    #[test]
+    fn encode_activate_calldata_matches_selector() {
+        // keccak256("activate(uint256)")[..4] = 0xb260c42a
+        let data = encode_activate_calldata(42);
+        assert!(data.starts_with("0xb260c42a"), "got {data}");
+        // selector (4) + 32-byte argument = 36 bytes = 72 hex chars, plus "0x" prefix.
+        assert_eq!(data.len(), 2 + 72);
+        // Last 64 chars encode tokenId = 42 = 0x2a, left-padded.
+        assert!(data.ends_with("000000000000000000000000000000000000000000000000000000000000002a"));
+    }
+
+    #[test]
+    fn encode_activate_calldata_differs_by_token_id() {
+        let a = encode_activate_calldata(1);
+        let b = encode_activate_calldata(2);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn get_tx_receipt_invalid_hash_returns_transport_error() {
+        let err = get_tx_receipt(VALID_RPC, "not-a-hash").unwrap_err();
+        assert!(matches!(err, RpcError::Transport(_)));
+    }
+
+    #[test]
+    fn get_block_number_invalid_url_returns_transport_error() {
+        let err = get_block_number("not-a-url").unwrap_err();
+        assert!(matches!(err, RpcError::Transport(_)));
     }
 }

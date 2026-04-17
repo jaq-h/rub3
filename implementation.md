@@ -115,26 +115,28 @@ function cooldownReady(uint256 tokenId)
 - `personal_sign_hash`, `recover_address`, `public_key_to_address` promoted to `pub(crate)` in `license.rs`
 - 15 tests: message determinism + tier diffing, expiry edge cases (future/past/None/unparseable), sign/verify round-trip, wrong-wallet failure, save/load round-trip, load_latest with mixed valid/expired sessions
 
-**Phase B — RPC + IPC wiring**
-- `rpc.rs` additions: `last_activation_block`, `cooldown_blocks`, `cooldown_ready` → `(is_ready, blocks_remaining)`, `encode_activate_calldata` (pure, no RPC), `get_tx_receipt`, `get_block_number`
-- `webview.rs` new IPC variants: `ActivateTxSent { tx_hash }`, `SessionSigned { signature }` (replaces legacy `Signed`). Outbound JS: `onShowCooldown`, `onTxConfirmed`, `onProcessing`
-- Connect handler: `owner_of` → `cooldown_ready` → `encode_activate_calldata` → `onShowCooldown`
-- ActivateTxSent handler: spawn polling thread for `get_tx_receipt` (3 × 4s), extract block info on confirmation, build session message, send `onTxConfirmed`
-- SessionSigned handler: assemble `Session`, `verify_local` → return `SessionSuccess { session }`
-- `activation.rs` fast path: `load_latest_session` → `is_expired` + `verify_local` → launch; falls through to legacy `LicenseProof` path (zero-address contract) for backward compat
-- `assets/activation.html` new screens: cooldown, tx-pending, sign-session
+**Phase B — RPC + IPC wiring `[complete]`**
+- `rpc.rs` additions: `cooldown_ready` → `(is_ready, blocks_remaining)`, `last_activation_block`, `cooldown_blocks`, `active_session_id` (post-tx revocation read), `encode_activate_calldata` (pure, `SolCall::abi_encode`), `get_tx_receipt` → `TxReceipt { status, block_number, block_hash, to }`, `get_block_number`
+- `webview.rs` new IPC variants (gated on `cooldown` feature): `ActivateTxSent { tx_hash, token_id, owner_address }`, `SessionSigned { signature, ... }` — JS echoes back all state needed to assemble the `Session`, so the Rust handler is stateless across messages. Outbound JS: `onShowCooldown`, `onTxConfirmed`, `onProcessing`, `onError`. Legacy `Signed` path kept for zero-contract fallback.
+- `ActivationResult` gains `SessionSuccess { session }` variant (gated); `LegacySuccess { proof }` replaces the old plain `Success`
+- Connect handler branches: zero contract → legacy `show_activate`. Non-zero + `cooldown` → `tokens_of_owner` → `proceed_after_token_selected` → `cooldown_ready` + `encode_activate_calldata` → `onShowCooldown`
+- ActivateTxSent handler: spawns a background polling thread (10 × 3s; 30s total timeout) calling `get_tx_receipt`; on confirmation asserts `receipt.to == contract` and `status == true`, reads `activeSessionId`, mints a `new_nonce()`, computes `expires_at` from `SESSION_TTL_SECS`, builds the session message, and emits `onTxConfirmed`
+- SessionSigned handler: assembles `Session` (tier-3 fields populated from echoed state), calls `verify_local`, sends `ActivationResult::SessionSuccess`
+- `activation.rs::ensure` — tries three paths in order: (1) tier-3 session fast path (`load_latest_session` → `verify_local`), (2) legacy proof fast path, (3) webview. Takes a new `session_ttl_secs` param threaded through from `main.rs` (`SESSION_TTL_SECS = 7 days`). On `SessionSuccess` persists via `session_store::save_session`.
+- `assets/activation.html` new screens: `cooldown` (shows calldata + tx-hash input with per-block-remaining banner when cooldown is active), `sign-session` (shows tx hash / block / session id / session message, captures signature). JS tracks `pendingSessionCtx` across the cooldown → tx-confirm → sign-session flow and echoes it back in `session_signed`.
 
-**Phase C — verification hardening**
-- `session::verify_onchain(session, rpc_url)` — fetch tx receipt, confirm status=1, `to` matches contract, block hash matches session
-- Probabilistic on-chain re-verify (~1 in 5 cold starts) to catch forged tx hashes without adding latency to every launch
-- Tx polling: 30s timeout, revert detection with user-facing error
+**Phase C — verification hardening `[complete]`**
+- `session::verify_onchain(session, rpc_url)` (gated on `cooldown`) — fetches the activation tx receipt and confirms `status == true`, `receipt.to` matches `session.contract`, `receipt.block_hash` matches `session.activation_block_hash`. Each failure mode has a dedicated `VerifyError` variant (`MissingTxHash`, `MissingBlockHash`, `Rpc`, `ReceiptNotFound`, `TxReverted`, `ContractMismatch`, `BlockHashMismatch`)
+- `session::should_reverify()` — Bernoulli gate (`rand::thread_rng().gen_range(0..5) == 0`) amortising the re-verify cost across cold starts
+- `activation.rs::try_session_fast_path` now re-verifies tier-3 sessions (session_id present) on ~1 in 5 launches. `Rpc(_)` errors fall open (offline launches still work); verdict-contradicting errors fall closed (forged session → re-activate)
+- Tx polling (already in Phase B): 30s total (10 × 3s), revert → user-facing error via the existing `onError` IPC path
 
 **Verification**
-- `cargo test` — unit tests for session message determinism, sign/verify round-trip, expiry; RPC tests for calldata encoding and receipt parsing
-- End-to-end against local Anvil: deploy minimal ERC-721 + cooldown contract, exercise connect → tx → sign → session persistence across restarts
-- Cooldown enforcement: second activation within the window must revert
-- Expiry: short-TTL session must re-activate after expiry
-- Backward compat: legacy `LicenseProof` (zero-address contract) still launches
+- `cargo test` — 35 lib tests pass under default (tier-2); 39 pass under `--no-default-features --features tier-3` (adds 4 new tests: missing tx-hash, missing block-hash, bad-RPC transport, non-constant sampler); integration + license-e2e suites unchanged
+- All five tier bundles (`tier-0`/`1`/`2`/`3`/`4`) compile clean
+- Phase B `rpc` additions covered by pure tests: selector + calldata layout for `encode_activate_calldata(uint256)`, invalid-hash transport errors for `get_tx_receipt` and `get_block_number`
+- Phase C anvil-gated integration test (`tests/session_onchain_e2e.rs`, `#[ignore]`): spawns `anvil`, deploys `Rub3Access` via `forge create`, runs `purchase(address)` + `activate(uint256)` via `cast send`, extracts the real block hash, and exercises `verify_onchain` on (a) the happy path, (b) a tampered contract field, (c) a tampered block hash, and (d) a non-existent tx hash. Gracefully skips when the Foundry toolchain is unavailable. Run with `cargo test -p rub3-wrapper --no-default-features --features tier-3 -- --ignored session_verify_onchain_e2e`
+- Still to do separately from Phase C: end-to-end against anvil of the full connect → tx → sign → persistence-across-restarts webview flow (that belongs in §1.7's manual testing), cooldown enforcement path, short-TTL expiry re-activation, zero-contract legacy backward-compat test
 
 ### 1.9 — Tier scaffold + feature flags `[complete]`
 

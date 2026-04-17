@@ -186,6 +186,64 @@
     <button class="btn-ghost"   id="btn-cancel-activate">Cancel</button>
   </div>
 
+  <!-- ── Screen: cooldown (tier 3) ───────────────────────────────── -->
+  <div id="screen-cooldown" class="hidden">
+    <div class="token-box">
+      <div class="tl">License Token</div>
+      <div class="tv" id="cd-token-id">—</div>
+    </div>
+    <div class="token-box">
+      <div class="tl">Owner</div>
+      <div class="tv" id="cd-owner">—</div>
+    </div>
+    <div id="cd-wait" class="token-box hidden" style="background:#2a1a1a;border-color:#4a2a2a">
+      <div class="tl" style="color:#a65a5a">Cooldown Active</div>
+      <div class="tv" id="cd-blocks-remaining" style="color:#f0a0a0">—</div>
+    </div>
+    <div class="field">
+      <label>Send this tx from your wallet <span style="color:#444;font-size:10px;text-transform:none">(to the contract above)</span></label>
+      <div class="token-box" style="margin-bottom:0">
+        <div class="tv" id="cd-calldata" style="word-break:break-all;font-size:11px">—</div>
+      </div>
+    </div>
+    <div class="field">
+      <label>Transaction Hash <span style="color:#444;font-size:10px;text-transform:none">(paste after sending)</span></label>
+      <input id="cd-tx-input" type="text" placeholder="0x…" autocomplete="off" spellcheck="false" />
+      <div class="error" id="cd-error"></div>
+    </div>
+    <button class="btn-primary" id="btn-cd-submit">Confirm Transaction</button>
+    <button class="btn-ghost"   id="btn-cd-cancel">Cancel</button>
+  </div>
+
+  <!-- ── Screen: sign-session (tier 3) ───────────────────────────── -->
+  <div id="screen-sign-session" class="hidden">
+    <div class="token-box">
+      <div class="tl">Activation confirmed</div>
+      <div class="tv" id="ss-tx-hash" style="word-break:break-all;font-size:11px">—</div>
+    </div>
+    <div class="token-box">
+      <div class="tl">Block</div>
+      <div class="tv" id="ss-block">—</div>
+    </div>
+    <div class="token-box">
+      <div class="tl">Session ID</div>
+      <div class="tv" id="ss-session-id">—</div>
+    </div>
+    <div class="field">
+      <label>Session Message to Sign <span style="color:#444;font-size:10px;text-transform:none">(personal_sign, same wallet as before)</span></label>
+      <div class="token-box" style="margin-bottom:0">
+        <div class="tv" id="ss-message" style="word-break:break-all;font-size:11px">—</div>
+      </div>
+    </div>
+    <div class="field">
+      <label>Signature</label>
+      <input id="ss-sig-input" type="text" placeholder="0x…" autocomplete="off" />
+      <div class="error" id="ss-error"></div>
+    </div>
+    <button class="btn-primary" id="btn-ss-submit">Complete Activation</button>
+    <button class="btn-ghost"   id="btn-ss-cancel">Cancel</button>
+  </div>
+
   <!-- ── Screen: processing ─────────────────────────────────────── -->
   <div id="screen-processing" class="hidden">
     <div class="spinner"></div>
@@ -196,7 +254,7 @@
 <script>
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  const SCREENS = ['connect', 'token-select', 'activate', 'processing'];
+  const SCREENS = ['connect', 'token-select', 'activate', 'cooldown', 'sign-session', 'processing'];
 
   function show(name) {
     SCREENS.forEach(s => {
@@ -229,6 +287,11 @@
   let pendingTokenId    = null;
   let pendingOwner      = null;
   let pendingTokenOwner = null;
+
+  // State for the tier-3 session flow — populated across onShowCooldown,
+  // ActivateTxSent, onTxConfirmed, SessionSigned. The wrapper is stateless
+  // between IPC messages, so JS echoes these back in the final payload.
+  let pendingSessionCtx = null;
 
   window.rub3 = {
     // Called once after 'ready' is acknowledged.
@@ -278,6 +341,69 @@
       clearError('sig-error');
 
       show('activate');
+    },
+
+    // Tier 3 — ownership confirmed, show cooldown + calldata.
+    // data: { tokenId, ownerAddress, contractAddress, chainId, ready,
+    //         blocksRemaining, calldata }
+    onShowCooldown(data) {
+      pendingSessionCtx = {
+        tokenId:         data.tokenId,
+        ownerAddress:    data.ownerAddress,
+        contractAddress: data.contractAddress,
+      };
+
+      document.getElementById('cd-token-id').textContent = '#' + data.tokenId;
+      document.getElementById('cd-owner').textContent    = data.ownerAddress;
+      document.getElementById('cd-calldata').textContent = data.calldata;
+      document.getElementById('cd-tx-input').value = '';
+      clearError('cd-error');
+
+      const waitBox       = document.getElementById('cd-wait');
+      const blocksDisplay = document.getElementById('cd-blocks-remaining');
+      if (!data.ready && data.blocksRemaining > 0) {
+        waitBox.classList.remove('hidden');
+        blocksDisplay.textContent =
+          data.blocksRemaining + ' block' + (data.blocksRemaining === 1 ? '' : 's')
+          + ' (~' + (data.blocksRemaining * 2) + ' seconds on Base)';
+      } else {
+        waitBox.classList.add('hidden');
+      }
+
+      show('cooldown');
+    },
+
+    // Tier 3 — activate() tx confirmed; switch to session-signing screen.
+    // data: { tokenId, ownerAddress, txHash, blockNumber, blockHash,
+    //         sessionId, nonce, expiresAt, sessionMessage }
+    onTxConfirmed(data) {
+      pendingSessionCtx = {
+        tokenId:              data.tokenId,
+        ownerAddress:         data.ownerAddress,
+        nonce:                data.nonce,
+        expiresAt:            data.expiresAt,
+        sessionId:            data.sessionId,
+        activationTx:         data.txHash,
+        activationBlock:      data.blockNumber,
+        activationBlockHash:  data.blockHash,
+      };
+
+      document.getElementById('ss-tx-hash').textContent    = data.txHash;
+      document.getElementById('ss-block').textContent      =
+        '#' + data.blockNumber + '  ' + truncate(data.blockHash);
+      document.getElementById('ss-session-id').textContent = '#' + data.sessionId;
+      document.getElementById('ss-message').textContent    = data.sessionMessage;
+      document.getElementById('ss-sig-input').value = '';
+      clearError('ss-error');
+
+      show('sign-session');
+    },
+
+    // Generic processing indicator (spawned threads use this while polling).
+    onProcessing(msg) {
+      document.getElementById('processing-msg').textContent =
+        (typeof msg === 'string' ? msg : 'Please wait…');
+      show('processing');
     },
 
     // Something went wrong — surface the error on the connect screen.
@@ -343,6 +469,78 @@
   });
 
   document.getElementById('btn-cancel-activate').addEventListener('click', () => {
+    post({ type: 'cancel' });
+  });
+
+  // ── Cooldown screen (tier 3) ──────────────────────────────────────────────
+
+  document.getElementById('btn-cd-submit').addEventListener('click', () => {
+    clearError('cd-error');
+    const tx = document.getElementById('cd-tx-input').value.trim();
+
+    if (!tx) {
+      setError('cd-error', 'Paste the tx hash after sending from your wallet.');
+      return;
+    }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) {
+      setError('cd-error', 'Tx hash must be 0x + 64 hex characters.');
+      return;
+    }
+    if (!pendingSessionCtx) {
+      setError('cd-error', 'Internal error: session context missing.');
+      return;
+    }
+
+    show('processing');
+    document.getElementById('processing-msg').textContent = 'Submitting tx hash…';
+    post({
+      type:          'activate_tx_sent',
+      tx_hash:       tx,
+      token_id:      pendingSessionCtx.tokenId,
+      owner_address: pendingSessionCtx.ownerAddress,
+    });
+  });
+
+  document.getElementById('btn-cd-cancel').addEventListener('click', () => {
+    post({ type: 'cancel' });
+  });
+
+  // ── Sign-session screen (tier 3) ──────────────────────────────────────────
+
+  document.getElementById('btn-ss-submit').addEventListener('click', () => {
+    clearError('ss-error');
+    const sig = document.getElementById('ss-sig-input').value.trim();
+
+    if (!sig) {
+      setError('ss-error', 'Paste the signature from your wallet.');
+      return;
+    }
+    if (!sig.startsWith('0x')) {
+      setError('ss-error', 'Signature must start with 0x.');
+      return;
+    }
+    if (!pendingSessionCtx) {
+      setError('ss-error', 'Internal error: session context missing.');
+      return;
+    }
+
+    show('processing');
+    document.getElementById('processing-msg').textContent = 'Verifying signature…';
+    post({
+      type:                  'session_signed',
+      signature:             sig,
+      token_id:              pendingSessionCtx.tokenId,
+      owner_address:         pendingSessionCtx.ownerAddress,
+      nonce:                 pendingSessionCtx.nonce,
+      expires_at:            pendingSessionCtx.expiresAt,
+      session_id:            pendingSessionCtx.sessionId,
+      activation_tx:         pendingSessionCtx.activationTx,
+      activation_block:      pendingSessionCtx.activationBlock,
+      activation_block_hash: pendingSessionCtx.activationBlockHash,
+    });
+  });
+
+  document.getElementById('btn-ss-cancel').addEventListener('click', () => {
     post({ type: 'cancel' });
   });
 
