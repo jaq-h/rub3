@@ -15,8 +15,11 @@ contract Rub3Access is Rub3License {
         bytes32       wrapperHash_,
         uint256       price_,
         uint256       supplyCap_,
+        uint256       cooldownBlocks_,
         address       owner_
-    ) Rub3License(name_, symbol_, identityModel_, wrapperHash_, price_, supplyCap_, owner_) {}
+    ) Rub3License(
+        name_, symbol_, identityModel_, wrapperHash_, price_, supplyCap_, cooldownBlocks_, owner_
+    ) {}
 
     /// @notice Mint a fresh license token to `recipient`.
     /// @dev    Passing `address(0)` mints to `msg.sender`.

@@ -11,15 +11,16 @@ contract Rub3SubscriptionTest is Test {
     address internal owner = address(0xA11CE);
     address internal alice = address(0xA);
 
-    bytes32 internal constant WRAPPER_HASH = keccak256("sub-wrapper-v1");
-    uint256 internal constant PRICE        = 0.01 ether;
-    uint256 internal constant SUPPLY_CAP   = 0;            // uncapped
-    uint256 internal constant PERIOD       = 30 days;
-    uint8   internal constant IDENTITY     = 1;            // account (TBA)
+    bytes32 internal constant WRAPPER_HASH    = keccak256("sub-wrapper-v1");
+    uint256 internal constant PRICE           = 0.01 ether;
+    uint256 internal constant SUPPLY_CAP      = 0;            // uncapped
+    uint256 internal constant PERIOD          = 30 days;
+    uint256 internal constant COOLDOWN_BLOCKS = 15;
+    uint8   internal constant IDENTITY        = 1;            // account (TBA)
 
     function setUp() public {
         nft = new Rub3Subscription(
-            "Rub3 Sub", "R3S", IDENTITY, WRAPPER_HASH, PRICE, SUPPLY_CAP, PERIOD, owner
+            "Rub3 Sub", "R3S", IDENTITY, WRAPPER_HASH, PRICE, SUPPLY_CAP, PERIOD, COOLDOWN_BLOCKS, owner
         );
         vm.deal(alice, 10 ether);
     }

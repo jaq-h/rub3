@@ -149,6 +149,7 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | `WRAPPER_HASH` | yes | `bytes32` SHA-256 of the distributed wrapper binary |
 | `PRICE` | yes | Purchase price in wei |
 | `SUPPLY_CAP` | no | Max mintable tokens; `0` = uncapped (default) |
+| `COOLDOWN_BLOCKS` | no | Blocks between activations per token (default `1800` ≈ 1 hr on Base; floor `15` ≈ 30 s is enforced on-chain) |
 | `OWNER` | no | Contract owner address; defaults to broadcaster |
 | `PERIOD` | subscription only | Subscription length in seconds |
 

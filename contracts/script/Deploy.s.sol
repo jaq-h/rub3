@@ -18,6 +18,8 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 /// Optional env vars:
 ///   SUPPLY_CAP      — max mintable tokens; 0 = uncapped (default: 0)
 ///   OWNER           — contract owner address; defaults to the broadcaster
+///   COOLDOWN_BLOCKS — blocks between activations per token (default: 1800, ~1hr on Base;
+///                     floor is 15 ≈ 30s, enforced in the contract)
 ///   PERIOD          — subscription length in seconds (required for "subscription")
 ///
 /// Usage — dry run (no broadcast):
@@ -40,10 +42,11 @@ contract Deploy is Script {
         uint256        price         = vm.envUint("PRICE");
 
         // ── Optional params ───────────────────────────────────────────────────
-        uint256 supplyCap = vm.envOr("SUPPLY_CAP", uint256(0));
-        address owner_    = vm.envOr("OWNER",      msg.sender);
+        uint256 supplyCap      = vm.envOr("SUPPLY_CAP",      uint256(0));
+        uint256 cooldownBlocks = vm.envOr("COOLDOWN_BLOCKS", uint256(1800));
+        address owner_         = vm.envOr("OWNER",           msg.sender);
         // period is only required for "subscription"; default 0 for "access"
-        uint256 period    = _eq(contractType, "subscription") ? vm.envUint("PERIOD") : 0;
+        uint256 period         = _eq(contractType, "subscription") ? vm.envUint("PERIOD") : 0;
 
         // ── Deploy ────────────────────────────────────────────────────────────
         vm.startBroadcast();
@@ -52,11 +55,11 @@ contract Deploy is Script {
 
         if (_eq(contractType, "access")) {
             deployed = address(new Rub3Access(
-                name_, symbol_, identityModel, wrapperHash, price, supplyCap, owner_
+                name_, symbol_, identityModel, wrapperHash, price, supplyCap, cooldownBlocks, owner_
             ));
         } else if (_eq(contractType, "subscription")) {
             deployed = address(new Rub3Subscription(
-                name_, symbol_, identityModel, wrapperHash, price, supplyCap, period, owner_
+                name_, symbol_, identityModel, wrapperHash, price, supplyCap, period, cooldownBlocks, owner_
             ));
         } else {
             revert(string.concat("Deploy: unknown CONTRACT_TYPE '", contractType, "' (expected 'access' or 'subscription')"));
@@ -77,6 +80,7 @@ contract Deploy is Script {
         console.log("  identityModel: %d  (%s)", identityModel, identityModel == 0 ? "access" : "account");
         console.log("  price:         %d wei", price);
         console.log("  supplyCap:     %d  (%s)", supplyCap, supplyCap == 0 ? "uncapped" : "capped");
+        console.log("  cooldown:      %d blocks (~%d sec on Base)", cooldownBlocks, cooldownBlocks * 2);
         console.log("  owner:         %s", owner_);
         if (_eq(contractType, "subscription")) {
             console.log("  period:        %d sec", period);
