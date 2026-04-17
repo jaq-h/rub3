@@ -23,6 +23,10 @@ const RPC_URL: &str = "https://mainnet.base.org";
 /// Set to None if the developer has not registered an ENS name.
 const DEVELOPER_ENS: Option<&str> = None;
 
+/// Session lifetime (seconds) applied when a new tier-3 session is minted.
+/// 7 days matches the default `session_ttl_days` from `architecture.md`.
+const SESSION_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
@@ -53,6 +57,7 @@ fn main() {
         CHAIN_ID,
         RPC_URL,
         DEVELOPER_ENS.map(str::to_string),
+        SESSION_TTL_SECS,
     ) {
         eprintln!("error: {e}");
         std::process::exit(1);

@@ -50,6 +50,22 @@ pub enum VerifyError {
     InvalidSignature(String),
     AddressMismatch { expected: String, recovered: String },
     Expired,
+
+    // ── tier-3 on-chain re-verification errors ───────────────────────────────
+    #[cfg(feature = "cooldown")]
+    MissingTxHash,
+    #[cfg(feature = "cooldown")]
+    MissingBlockHash,
+    #[cfg(feature = "cooldown")]
+    Rpc(String),
+    #[cfg(feature = "cooldown")]
+    ReceiptNotFound,
+    #[cfg(feature = "cooldown")]
+    TxReverted,
+    #[cfg(feature = "cooldown")]
+    ContractMismatch { expected: String, got: String },
+    #[cfg(feature = "cooldown")]
+    BlockHashMismatch { expected: String, got: String },
 }
 
 impl std::fmt::Display for VerifyError {
@@ -61,6 +77,30 @@ impl std::fmt::Display for VerifyError {
                 "address mismatch: session claims {expected}, signature recovers {recovered}"
             ),
             VerifyError::Expired => write!(f, "session expired"),
+            #[cfg(feature = "cooldown")]
+            VerifyError::MissingTxHash => {
+                write!(f, "session is missing activation_tx (required for tier-3 re-verify)")
+            }
+            #[cfg(feature = "cooldown")]
+            VerifyError::MissingBlockHash => {
+                write!(f, "session is missing activation_block_hash (required for tier-3 re-verify)")
+            }
+            #[cfg(feature = "cooldown")]
+            VerifyError::Rpc(e) => write!(f, "rpc error during on-chain re-verify: {e}"),
+            #[cfg(feature = "cooldown")]
+            VerifyError::ReceiptNotFound => write!(f, "activation tx receipt not found on-chain"),
+            #[cfg(feature = "cooldown")]
+            VerifyError::TxReverted => write!(f, "activation tx reverted on-chain"),
+            #[cfg(feature = "cooldown")]
+            VerifyError::ContractMismatch { expected, got } => write!(
+                f,
+                "activation tx did not target the license contract: expected {expected}, got {got}"
+            ),
+            #[cfg(feature = "cooldown")]
+            VerifyError::BlockHashMismatch { expected, got } => write!(
+                f,
+                "activation block hash mismatch: session bound to {expected}, receipt reports {got}"
+            ),
         }
     }
 }
@@ -155,6 +195,73 @@ pub fn is_expired(session: &Session) -> bool {
             Err(_)  => true,
         },
     }
+}
+
+// ── Tier-3 on-chain re-verification ───────────────────────────────────────────
+
+/// Fetches the activation tx receipt and confirms it corresponds to the session:
+///   1. `status == true` (tx didn't revert)
+///   2. `to` matches the session's `contract`
+///   3. `block_hash` matches the session's `activation_block_hash`
+///
+/// Forged sessions that carry made-up `activation_tx` / `activation_block_hash`
+/// fields fail (1) or (3). Sessions pointing at a tx that hit a different
+/// contract fail (2).
+#[cfg(feature = "cooldown")]
+pub fn verify_onchain(session: &Session, rpc_url: &str) -> Result<(), VerifyError> {
+    let tx_hash = session
+        .activation_tx
+        .as_deref()
+        .ok_or(VerifyError::MissingTxHash)?;
+    let expected_block_hash = session
+        .activation_block_hash
+        .as_deref()
+        .ok_or(VerifyError::MissingBlockHash)?;
+
+    let receipt = crate::rpc::get_tx_receipt(rpc_url, tx_hash)
+        .map_err(|e| VerifyError::Rpc(e.to_string()))?
+        .ok_or(VerifyError::ReceiptNotFound)?;
+
+    if !receipt.status {
+        return Err(VerifyError::TxReverted);
+    }
+
+    match &receipt.to {
+        Some(to) if to.eq_ignore_ascii_case(&session.contract) => {}
+        Some(to) => {
+            return Err(VerifyError::ContractMismatch {
+                expected: session.contract.clone(),
+                got:      to.clone(),
+            });
+        }
+        None => {
+            return Err(VerifyError::ContractMismatch {
+                expected: session.contract.clone(),
+                got:      "<none>".into(),
+            });
+        }
+    }
+
+    if !receipt.block_hash.eq_ignore_ascii_case(expected_block_hash) {
+        return Err(VerifyError::BlockHashMismatch {
+            expected: expected_block_hash.to_string(),
+            got:      receipt.block_hash.clone(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Returns `true` with probability ~1/5 — the sampling gate for tier-3
+/// probabilistic on-chain re-verification.
+///
+/// Amortises the network cost across cold starts: legitimate sessions see a
+/// re-verify roughly every five launches, while a forged session is caught
+/// after a small, bounded number of attempts.
+#[cfg(feature = "cooldown")]
+pub fn should_reverify() -> bool {
+    use rand::Rng;
+    rand::thread_rng().gen_range(0..5) == 0
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -332,5 +439,57 @@ mod tests {
     fn verify_local_expired_fails() {
         let s = make_session(Some("2000-01-01T00:00:00Z"));
         assert!(matches!(verify_local(&s), Err(VerifyError::Expired)));
+    }
+
+    // ── verify_onchain — pre-flight error paths (no network needed) ──────────
+
+    #[cfg(feature = "cooldown")]
+    #[test]
+    fn verify_onchain_missing_tx_hash() {
+        let s = make_session(Some("2099-01-01T00:00:00Z"));
+        let err = verify_onchain(&s, "https://invalid.example").unwrap_err();
+        assert!(matches!(err, VerifyError::MissingTxHash));
+    }
+
+    #[cfg(feature = "cooldown")]
+    #[test]
+    fn verify_onchain_missing_block_hash() {
+        let mut s = make_session(Some("2099-01-01T00:00:00Z"));
+        s.activation_tx = Some(
+            "0x0000000000000000000000000000000000000000000000000000000000000001".into(),
+        );
+        let err = verify_onchain(&s, "https://invalid.example").unwrap_err();
+        assert!(matches!(err, VerifyError::MissingBlockHash));
+    }
+
+    #[cfg(feature = "cooldown")]
+    #[test]
+    fn verify_onchain_bad_rpc_url_returns_rpc_error() {
+        // Has all required fields but the URL is unreachable → Rpc(..) variant.
+        let mut s = make_session(Some("2099-01-01T00:00:00Z"));
+        s.activation_tx = Some(
+            "0x0000000000000000000000000000000000000000000000000000000000000001".into(),
+        );
+        s.activation_block_hash = Some(
+            "0x0000000000000000000000000000000000000000000000000000000000000002".into(),
+        );
+        let err = verify_onchain(&s, "not-a-url").unwrap_err();
+        assert!(matches!(err, VerifyError::Rpc(_)));
+    }
+
+    #[cfg(feature = "cooldown")]
+    #[test]
+    fn should_reverify_is_not_constant() {
+        // Probabilistic test — over many samples the result should not always be
+        // the same. With p=0.2 the odds of all-true or all-false across 200 tries
+        // is ~4e-20, so flakes are effectively impossible.
+        let mut saw_true  = false;
+        let mut saw_false = false;
+        for _ in 0..200 {
+            if should_reverify() { saw_true  = true; }
+            else                 { saw_false = true; }
+            if saw_true && saw_false { break; }
+        }
+        assert!(saw_true  && saw_false, "should_reverify() appears non-random");
     }
 }

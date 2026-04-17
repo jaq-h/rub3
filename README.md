@@ -136,8 +136,10 @@ See [implementation.md](implementation.md) for the full roadmap.
 - Wrapper skeleton with process supervision and SIGTERM forwarding
 - License proof schema, ECDSA signature verification (`personal_sign` / secp256k1), local proof caching
 - Activation window: wallet address input, `tokensOfOwner()` enumeration, multi-token selection, activation message display, signature paste
-- On-chain queries via alloy: `ownerOf`, `price`, `balanceOf`, `tokenOfOwnerByIndex`
+- On-chain queries via alloy: `ownerOf`, `price`, `balanceOf`, `tokenOfOwnerByIndex`, `cooldown_ready`, `active_session_id`, `get_tx_receipt`, `get_block_number`; pure `encode_activate_calldata`
 - Session model (tier 1-4): schema, `session_message()` hash, `verify_local()`, `is_expired()`, `new_nonce()`, full persistence with `load_latest_session()`
+- Tier-3 activation flow (cooldown feature): cooldown screen → user-submitted `activate()` tx → receipt polling (10 × 3s) → `activeSessionId` read → session-sign screen → `verify_local` → session persisted. Fast path tries session first, falls back to legacy `LicenseProof` for zero-contract builds.
+- Tier-3 on-chain re-verification: `session::verify_onchain` confirms tx status/contract/block hash; `try_session_fast_path` re-verifies ~1 in 5 cold starts (offline errors fall open, verdict-contradicting errors fall closed). Covered by an anvil-gated E2E test (`tests/session_onchain_e2e.rs`)
 - Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 30 forge tests
 - Deploy script: `forge script` deploys either contract to any EVM chain from env vars
 
