@@ -23,8 +23,11 @@ contract Rub3Subscription is Rub3License {
         uint256       price_,
         uint256       supplyCap_,
         uint256       period_,
+        uint256       cooldownBlocks_,
         address       owner_
-    ) Rub3License(name_, symbol_, identityModel_, wrapperHash_, price_, supplyCap_, owner_) {
+    ) Rub3License(
+        name_, symbol_, identityModel_, wrapperHash_, price_, supplyCap_, cooldownBlocks_, owner_
+    ) {
         period = period_;
     }
 

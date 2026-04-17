@@ -40,12 +40,13 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 
 **Abstract base — `Rub3License.sol`**
 - Inherits `ERC721`, `ERC721Enumerable`, `Ownable` (OZ v5)
-- Immutable: `identityModel` (0 = access, 1 = account; rejects values > 1), `supplyCap` (0 = uncapped)
+- Immutable: `identityModel` (0 = access, 1 = account; rejects values > 1), `supplyCap` (0 = uncapped), `cooldownBlocks` (floor `MIN_COOLDOWN_BLOCKS = 15` ≈ 30s on Base)
 - Mutable + owner-gated: `price` (`setPrice`), `wrapperHash` (`setWrapperHash`) — hash is rotatable so developers can rebuild the wrapper without redeploying
 - `nextTokenId` counter + internal `_mintNext` helper for sequential ids from 0
 - `_resolveRecipient(address)` helper: `address(0)` → `msg.sender` (per architecture.md §1)
 - `withdraw(address payable)` owner-only sweep
 - `_update` / `_increaseBalance` / `supportsInterface` overrides for ERC-721 + Enumerable composition
+- **Activation (tier 3)**: `activate(uint256) returns (sessionId)` — owner-only, bumps `activeSessionId[tokenId]` from a monotonic `_sessionCounter`, records `lastActivationBlock`, reverts `CooldownActive(blocksRemaining)` if called again inside the window (first call, `last == 0`, bypasses); `cooldownReady(tokenId) view returns (bool, uint256)` for the wrapper's pre-tx check; `Activated(tokenId, owner, sessionId)` event
 
 **`Rub3Access.sol`** — concrete, one-time purchase:
 - `purchase(address recipient) payable returns (uint256 tokenId)` — pays `price`, mints next id
@@ -58,16 +59,16 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 - `isValid(uint256 tokenId) view` — `expiresAt[tokenId] > block.timestamp`
 - `Purchased` + `Renewed` events
 
-**Tests:** 18 forge tests (`forge test`) covering metadata, sequential mint, zero-recipient default, over/underpay, supply cap, enumeration via `tokenOfOwnerByIndex`, owner-gated setters, withdraw, subscription expiry, mid-period renewal, post-expiry renewal, nonexistent-token revert.
+**Tests:** 30 forge tests (`forge test`) covering metadata, sequential mint, zero-recipient default, over/underpay, supply cap, enumeration via `tokenOfOwnerByIndex`, owner-gated setters, withdraw, subscription expiry, mid-period renewal, post-expiry renewal, nonexistent-token revert, plus activation: first-call success, session-id increments across tokens, cooldown-window revert, post-cooldown success, non-owner revert, nonexistent-token revert, `cooldownReady` in all three states, constructor floor check (`cooldownBlocks < 15`), and transfer-then-activate (new owner authorized, old owner rejected).
 
 **`script/Deploy.s.sol`** — forge script that deploys either contract from env vars:
-- `CONTRACT_TYPE`, `TOKEN_NAME`, `TOKEN_SYMBOL`, `IDENTITY_MODEL`, `WRAPPER_HASH`, `PRICE` required; `SUPPLY_CAP`, `OWNER`, `PERIOD` optional
+- `CONTRACT_TYPE`, `TOKEN_NAME`, `TOKEN_SYMBOL`, `IDENTITY_MODEL`, `WRAPPER_HASH`, `PRICE` required; `SUPPLY_CAP`, `OWNER`, `COOLDOWN_BLOCKS` (default 1800 ≈ 1hr on Base), `PERIOD` optional
 - Dry run (no `--broadcast`): simulates deployment, prints summary with all params
 - Live: add `--broadcast --verify --etherscan-api-key $BASESCAN_API_KEY`
 - Local: run against `anvil` with `--rpc-url http://localhost:8545` and a pre-funded Anvil key — no `.env` needed
 
 **Not yet done:**
-- Cooldown extension in `Rub3License.sol` (`activate()`, `cooldownReady()`, `lastActivationBlock`, `cooldownBlocks`, `MIN_COOLDOWN_BLOCKS = 15`) — contract-side companion to §1.8 wrapper work
+- Tier 4: `activateDevice(tokenId, devicePubKey)` + `registeredDevice` mapping — deferred to tier-4 work
 - Base Sepolia deployment
 
 ### 1.6 — Identity model + TBA derivation `[not started]`
@@ -89,7 +90,7 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 
 Replaces the legacy `LicenseProof` flow with a full session model backed by an on-chain cooldown. An NFT holder can otherwise run a signing oracle to distribute fresh sessions to non-holders; a contract-enforced `activate()` cooldown rate-limits how many sessions a single token can mint. The wrapper reads cooldown state and encodes calldata — it never sends txs or holds keys.
 
-**Contract interface** (pending addition to `Rub3License.sol` — see §1.5 "not yet done"):
+**Contract interface** (now live in `Rub3License.sol`, see §1.5):
 ```solidity
 uint256 public constant MIN_COOLDOWN_BLOCKS = 15; // ~30s on Base; minimum is one TOTP window
 uint256 public immutable cooldownBlocks;           // default 1800 (~1hr); must be >= MIN_COOLDOWN_BLOCKS

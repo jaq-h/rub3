@@ -138,7 +138,7 @@ See [implementation.md](implementation.md) for the full roadmap.
 - Activation window: wallet address input, `tokensOfOwner()` enumeration, multi-token selection, activation message display, signature paste
 - On-chain queries via alloy: `ownerOf`, `price`, `balanceOf`, `tokenOfOwnerByIndex`
 - Session model (tier 1-4): schema, `session_message()` hash, `verify_local()`, `is_expired()`, `new_nonce()`, full persistence with `load_latest_session()`
-- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`), 18 forge tests
+- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 30 forge tests
 - Deploy script: `forge script` deploys either contract to any EVM chain from env vars
 
 **Not yet implemented:** WalletConnect integration, cooldown extension in contracts, ENS verification, identity models (TBA derivation), purchase UI, session wiring into activation flow, CLI tooling, SDK, Tauri plugin.
