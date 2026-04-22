@@ -71,14 +71,29 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 - Tier 4: `activateDevice(tokenId, devicePubKey)` + `registeredDevice` mapping — deferred to tier-4 work
 - Base Sepolia deployment
 
-### 1.6 — Identity model + TBA derivation `[not started]`
-- Read `identityModel` from contract at session creation (one RPC call, cached in session)
-- Access model: `user_id = wallet_address`
-- Account model: derive TBA address locally using ERC-6551 CREATE2 formula
-  - Canonical registry: `0x000000006551c19487814612e58FE06813775758`
-  - Inputs: `chainId`, `contract`, `tokenId`, `salt = 0`, `implementation` (set by developer at deploy)
-  - Pure computation via `alloy` — no RPC call needed
-- `user_id` is written into the session and passed to the embedded app via SDK
+### 1.6 — Identity model + TBA derivation `[complete]`
+
+**Contract change** — `Rub3License.sol` gains `address public immutable tbaImplementation`. Constructor now validates that account-model deploys supply a non-zero impl and access-model deploys supply `address(0)` (new errors `TbaImplementationRequired` / `TbaImplementationForbidden`). Threaded through `Rub3Access` + `Rub3Subscription` constructors, the `Deploy.s.sol` script (new `TBA_IMPLEMENTATION` env var), and the Foundry test fixtures. Forge test suite: 33 pass, up from 29 (4 new tests covering the two new reverts plus the happy-path account-model construction).
+
+**Wrapper changes**
+- `identity.rs` (new, gated on `session`) — `IdentityModel { Access, Account }` with `from_u8` / `as_str`; `derive_tba(implementation, chain_id, contract, token_id)` computes the ERC-6551 TBA via CREATE2 against canonical registry `0x000000006551c19487814612e58FE06813775758` with `salt = 0` and the reference account-proxy init bytecode (pure, no RPC); `resolve_user_id(model, wallet, tba)` returns lower-case 0x-hex; `format_addr(addr)` helper
+- `rpc.rs` — `IRub3License` gains `identityModel() -> uint8` + `tbaImplementation() -> address` getters; new `identity_model()` and `tba_implementation()` pub fns
+- `session.rs` — `Session` gains `identity: String`, `user_id: String`, `tba: Option<String>`; `session_message()` adds `identity` + `user_id` into the preimage (between `wallet` and the existing fields) so a forger cannot flip an access-model session into account-model without re-signing. Ordering: `app_id, token_id, identity, user_id, wallet, nonce, [expires_at], [activation_block_hash], [session_id], [device_pubkey]`
+- `webview.rs::spawn_tx_poller` — after the existing `active_session_id` read, calls `identity_model()`; for account model also calls `tba_implementation()` and derives the TBA locally. Includes the resolved `identity`, `user_id`, and optional `tba` in the signed preimage + `onTxConfirmed` payload. `IpcMessage::SessionSigned` / `FinalizeArgs` carry the three identity fields through back to the final `Session`
+- `activation.html` — sign-session screen shows the identity model label, user_id, and (for account model) TBA address. Echoes all three back in the `session_signed` IPC message
+
+**Tests**
+- `identity.rs`: 10 tests — `IdentityModel` from_u8 / as_str / rejects-out-of-range; TBA determinism + sensitivity to each of `{implementation, chain_id, contract, token_id}`; `resolve_user_id` for both models + panic on missing TBA
+- `session.rs`: 2 new preimage tests — differs by identity (access → account), differs by user_id alone; 1 new verify test — tampered identity fails `verify_local` with `AddressMismatch`; all existing tests updated to the new 10-arg `session_message()` signature
+- `rpc.rs`: 2 new transport-error tests for `identity_model()` + `tba_implementation()`
+- `tests/session_onchain_e2e.rs`: updated `forge create` to pass the new `tbaImplementation = address(0)` arg; `Session` struct literal updated. Passes against anvil.
+
+**Verification**
+- `cargo test -p rub3-wrapper --lib` (default tier-2): 51 pass (up from 35)
+- `cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib`: 55 pass (up from 39)
+- All five tier bundles (`tier-0`/`1`/`2`/`3`/`4`) compile clean
+- `forge test` (contracts/): 33 pass
+- Anvil-gated e2e (`session_verify_onchain_e2e`): passes with the new 9-arg constructor
 
 ### 1.7 — Purchase UI `[not started]`
 - In-wrapper purchase flow: if no token found in wallet, show purchase option

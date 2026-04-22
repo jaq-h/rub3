@@ -120,7 +120,9 @@ mod tests {
         let signing_key   = SigningKey::random(&mut OsRng);
         let wallet        = crate::license::public_key_to_address(signing_key.verifying_key());
         let nonce         = new_nonce();
-        let msg           = session_message(app_id, token_id, &wallet, &nonce, Some(expires_at), None, None, None);
+        let identity      = "access";
+        let user_id       = wallet.clone();
+        let msg           = session_message(app_id, token_id, identity, &user_id, &wallet, &nonce, Some(expires_at), None, None, None);
         let prefixed      = crate::license::personal_sign_hash(&msg);
 
         use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature};
@@ -131,6 +133,9 @@ mod tests {
         Session {
             app_id:                app_id.into(),
             token_id,
+            identity:              identity.into(),
+            user_id,
+            tba:                   None,
             wallet,
             nonce,
             issued_at:             chrono::Utc::now().to_rfc3339(),

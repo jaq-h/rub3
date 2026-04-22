@@ -79,6 +79,9 @@ enum IpcMessage {
         signature:             String,
         token_id:              u64,
         owner_address:         String,
+        identity:              String,
+        user_id:               String,
+        tba:                   Option<String>,
         nonce:                 String,
         expires_at:            String,
         session_id:            u64,
@@ -280,6 +283,9 @@ impl IpcState {
                 signature,
                 token_id,
                 owner_address,
+                identity,
+                user_id,
+                tba,
                 nonce,
                 expires_at,
                 session_id,
@@ -291,6 +297,9 @@ impl IpcState {
                     signature,
                     token_id,
                     owner_address,
+                    identity,
+                    user_id,
+                    tba,
                     nonce,
                     expires_at,
                     session_id,
@@ -431,6 +440,54 @@ impl IpcState {
                 }
             };
 
+            // ── Identity model + TBA derivation ─────────────────────────────
+            // Read identityModel once; for account-model deploys, read the
+            // tbaImplementation and derive the TBA locally (pure CREATE2).
+            let model_u8 = match crate::rpc::identity_model(&state.rpc_url, contract_addr) {
+                Ok(m) => m,
+                Err(e) => {
+                    state.eval_err(&format!("failed to read identityModel: {e}"));
+                    return;
+                }
+            };
+            let model = match crate::identity::IdentityModel::from_u8(model_u8) {
+                Some(m) => m,
+                None => {
+                    state.eval_err(&format!("contract returned unknown identityModel = {model_u8}"));
+                    return;
+                }
+            };
+
+            let wallet_addr: alloy::primitives::Address = match owner_address.parse() {
+                Ok(a) => a,
+                Err(_) => {
+                    state.eval_err("owner address is malformed");
+                    return;
+                }
+            };
+
+            let tba_addr_opt: Option<alloy::primitives::Address> = match model {
+                crate::identity::IdentityModel::Access => None,
+                crate::identity::IdentityModel::Account => {
+                    let impl_addr = match crate::rpc::tba_implementation(
+                        &state.rpc_url, contract_addr,
+                    ) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            state.eval_err(&format!("failed to read tbaImplementation: {e}"));
+                            return;
+                        }
+                    };
+                    Some(crate::identity::derive_tba(
+                        impl_addr, state.chain_id, contract_addr, token_id,
+                    ))
+                }
+            };
+
+            let user_id = crate::identity::resolve_user_id(model, wallet_addr, tba_addr_opt);
+            let tba_str = tba_addr_opt.map(crate::identity::format_addr);
+            let identity_str = model.as_str();
+
             let nonce = crate::session::new_nonce();
             let expires_at = (chrono::Utc::now()
                 + chrono::Duration::seconds(state.session_ttl_secs))
@@ -439,6 +496,8 @@ impl IpcState {
             let session_msg = crate::session::session_message(
                 &state.app_id,
                 token_id,
+                identity_str,
+                &user_id,
                 &owner_address,
                 &nonce,
                 Some(&expires_at),
@@ -451,6 +510,9 @@ impl IpcState {
             let payload = serde_json::json!({
                 "tokenId":             token_id,
                 "ownerAddress":        owner_address,
+                "identity":            identity_str,
+                "userId":              user_id,
+                "tba":                 tba_str,
                 "txHash":              tx_hash,
                 "blockNumber":         receipt.block_number,
                 "blockHash":           receipt.block_hash,
@@ -468,6 +530,9 @@ impl IpcState {
         let session = Session {
             app_id:                self.app_id.clone(),
             token_id:              a.token_id,
+            identity:              a.identity,
+            user_id:               a.user_id,
+            tba:                   a.tba,
             wallet:                a.owner_address,
             nonce:                 a.nonce,
             issued_at:             chrono::Utc::now().to_rfc3339(),
@@ -512,6 +577,9 @@ struct FinalizeArgs {
     signature:             String,
     token_id:              u64,
     owner_address:         String,
+    identity:              String,
+    user_id:               String,
+    tba:                   Option<String>,
     nonce:                 String,
     expires_at:            String,
     session_id:            u64,

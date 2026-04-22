@@ -17,10 +17,12 @@ contract Rub3AccessTest is Test {
     uint256 internal constant SUPPLY_CAP      = 3;
     uint256 internal constant COOLDOWN_BLOCKS = 15; // == MIN_COOLDOWN_BLOCKS
     uint8   internal constant IDENTITY        = 0; // access
+    address internal constant TBA_IMPL        = address(0); // unused for access model
 
     function setUp() public {
         nft = new Rub3Access(
-            "Rub3 Test", "R3T", IDENTITY, WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner
+            "Rub3 Test", "R3T", IDENTITY, TBA_IMPL,
+            WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner
         );
         vm.deal(alice, 10 ether);
         vm.deal(bob,   10 ether);
@@ -29,21 +31,48 @@ contract Rub3AccessTest is Test {
     // ── Metadata ──────────────────────────────────────────────────────────────
 
     function test_metadata() public view {
-        assertEq(nft.identityModel(), IDENTITY);
-        assertEq(nft.wrapperHash(),   WRAPPER_HASH);
-        assertEq(nft.price(),         PRICE);
-        assertEq(nft.supplyCap(),     SUPPLY_CAP);
-        assertEq(nft.owner(),         owner);
+        assertEq(nft.identityModel(),     IDENTITY);
+        assertEq(nft.tbaImplementation(), TBA_IMPL);
+        assertEq(nft.wrapperHash(),       WRAPPER_HASH);
+        assertEq(nft.price(),             PRICE);
+        assertEq(nft.supplyCap(),         SUPPLY_CAP);
+        assertEq(nft.owner(),             owner);
     }
 
     function test_invalidIdentityModel_reverts() public {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.InvalidIdentityModel.selector, 2));
-        new Rub3Access("x", "x", 2, WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner);
+        new Rub3Access("x", "x", 2, TBA_IMPL, WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner);
     }
 
     function test_cooldownTooSmall_reverts() public {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.CooldownTooSmall.selector, 14, 15));
-        new Rub3Access("x", "x", IDENTITY, WRAPPER_HASH, PRICE, SUPPLY_CAP, 14, owner);
+        new Rub3Access("x", "x", IDENTITY, TBA_IMPL, WRAPPER_HASH, PRICE, SUPPLY_CAP, 14, owner);
+    }
+
+    function test_accessModel_rejectsNonZeroTbaImpl() public {
+        vm.expectRevert(Rub3License.TbaImplementationForbidden.selector);
+        new Rub3Access(
+            "x", "x", 0, address(0xBEEF),
+            WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner
+        );
+    }
+
+    function test_accountModel_requiresTbaImpl() public {
+        vm.expectRevert(Rub3License.TbaImplementationRequired.selector);
+        new Rub3Access(
+            "x", "x", 1, address(0),
+            WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner
+        );
+    }
+
+    function test_accountModel_acceptsTbaImpl() public {
+        address impl = address(0xDEAD);
+        Rub3Access acct = new Rub3Access(
+            "Rub3 Acct", "R3A", 1, impl,
+            WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner
+        );
+        assertEq(acct.identityModel(),     1);
+        assertEq(acct.tbaImplementation(), impl);
     }
 
     function test_metadata_cooldownBlocks() public view {

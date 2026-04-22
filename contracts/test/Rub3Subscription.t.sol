@@ -17,10 +17,12 @@ contract Rub3SubscriptionTest is Test {
     uint256 internal constant PERIOD          = 30 days;
     uint256 internal constant COOLDOWN_BLOCKS = 15;
     uint8   internal constant IDENTITY        = 1;            // account (TBA)
+    address internal constant TBA_IMPL        = address(0xBEEF); // any non-zero impl
 
     function setUp() public {
         nft = new Rub3Subscription(
-            "Rub3 Sub", "R3S", IDENTITY, WRAPPER_HASH, PRICE, SUPPLY_CAP, PERIOD, COOLDOWN_BLOCKS, owner
+            "Rub3 Sub", "R3S", IDENTITY, TBA_IMPL,
+            WRAPPER_HASH, PRICE, SUPPLY_CAP, PERIOD, COOLDOWN_BLOCKS, owner
         );
         vm.deal(alice, 10 ether);
     }
@@ -28,8 +30,9 @@ contract Rub3SubscriptionTest is Test {
     // ── Metadata ──────────────────────────────────────────────────────────────
 
     function test_metadata() public view {
-        assertEq(nft.period(),        PERIOD);
-        assertEq(nft.identityModel(), IDENTITY);
+        assertEq(nft.period(),            PERIOD);
+        assertEq(nft.identityModel(),     IDENTITY);
+        assertEq(nft.tbaImplementation(), TBA_IMPL);
     }
 
     // ── Purchase ──────────────────────────────────────────────────────────────

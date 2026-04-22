@@ -14,6 +14,16 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     /// @notice 0 = access (user_id = wallet), 1 = account (user_id = TBA).
     uint8 public immutable identityModel;
 
+    /// @notice ERC-6551 account implementation that token-bound accounts for
+    ///         this collection resolve to. Only meaningful when
+    ///         `identityModel == 1` — the wrapper derives each token's TBA
+    ///         address by CREATE2 against the canonical ERC-6551 registry with
+    ///         this implementation and `salt = 0`. Immutable so the developer
+    ///         cannot silently reassign every user's identity.
+    ///
+    ///         Must be `address(0)` for access-model deploys.
+    address public immutable tbaImplementation;
+
     /// @notice SHA-256 of the distributed wrapper binary. Mutable so the
     ///         developer can rotate after rebuilds without redeploying.
     bytes32 public wrapperHash;
@@ -59,6 +69,8 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
 
     error InvalidIdentityModel(uint8 value);
     error CooldownTooSmall(uint256 value, uint256 minimum);
+    error TbaImplementationRequired();
+    error TbaImplementationForbidden();
     error SoldOut();
     error InsufficientPayment(uint256 sent, uint256 required);
     error WithdrawFailed();
@@ -69,6 +81,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
         string memory name_,
         string memory symbol_,
         uint8         identityModel_,
+        address       tbaImplementation_,
         bytes32       wrapperHash_,
         uint256       price_,
         uint256       supplyCap_,
@@ -79,11 +92,20 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
         if (cooldownBlocks_ < MIN_COOLDOWN_BLOCKS) {
             revert CooldownTooSmall(cooldownBlocks_, MIN_COOLDOWN_BLOCKS);
         }
-        identityModel  = identityModel_;
-        wrapperHash    = wrapperHash_;
-        price          = price_;
-        supplyCap      = supplyCap_;
-        cooldownBlocks = cooldownBlocks_;
+        // Account model must pick a TBA implementation; access model must not.
+        if (identityModel_ == 1 && tbaImplementation_ == address(0)) {
+            revert TbaImplementationRequired();
+        }
+        if (identityModel_ == 0 && tbaImplementation_ != address(0)) {
+            revert TbaImplementationForbidden();
+        }
+
+        identityModel     = identityModel_;
+        tbaImplementation = tbaImplementation_;
+        wrapperHash       = wrapperHash_;
+        price             = price_;
+        supplyCap         = supplyCap_;
+        cooldownBlocks    = cooldownBlocks_;
     }
 
     // ── Owner controls ────────────────────────────────────────────────────────
