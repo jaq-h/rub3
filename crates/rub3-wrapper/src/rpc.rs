@@ -15,6 +15,8 @@ use alloy::sol_types::SolCall;
 //   lastActivationBlock(tokenId)  — tier-3 read
 //   cooldownBlocks()              — tier-3 read
 //   activeSessionId(tokenId)      — tier-3 revocation check
+//   identityModel()               — 0 = access, 1 = account (read at session creation)
+//   tbaImplementation()           — ERC-6551 impl for account-model TBA derivation
 sol! {
     #[sol(rpc)]
     interface IRub3License {
@@ -28,6 +30,9 @@ sol! {
         function lastActivationBlock(uint256 tokenId) external view returns (uint256 blockNumber);
         function cooldownBlocks() external view returns (uint256 blocks);
         function activeSessionId(uint256 tokenId) external view returns (uint256 sessionId);
+
+        function identityModel() external view returns (uint8 model);
+        function tbaImplementation() external view returns (address impl);
     }
 }
 
@@ -261,6 +266,40 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
     })
 }
 
+// ── Identity model ────────────────────────────────────────────────────────────
+
+/// Reads the contract's `identityModel()` getter. Returns the raw `uint8`:
+/// `0` = access (user_id = wallet), `1` = account (user_id = TBA).
+pub fn identity_model(rpc_url: &str, contract: Address) -> Result<u8, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        let r = instance
+            .identityModel()
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))?;
+        Ok(r)
+    })
+}
+
+/// Reads the contract's `tbaImplementation()` getter — the ERC-6551 account
+/// implementation address used to derive token-bound account addresses.
+///
+/// Returns `Address::ZERO` for access-model deploys (enforced on-chain).
+pub fn tba_implementation(rpc_url: &str, contract: Address) -> Result<Address, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        let r = instance
+            .tbaImplementation()
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))?;
+        Ok(r)
+    })
+}
+
 /// Returns the current block number on the target chain.
 pub fn get_block_number(rpc_url: &str) -> Result<u64, RpcError> {
     block_on(async move {
@@ -360,6 +399,18 @@ mod tests {
     #[test]
     fn get_block_number_invalid_url_returns_transport_error() {
         let err = get_block_number("not-a-url").unwrap_err();
+        assert!(matches!(err, RpcError::Transport(_)));
+    }
+
+    #[test]
+    fn identity_model_invalid_url_returns_transport_error() {
+        let err = identity_model("not-a-url", Address::ZERO).unwrap_err();
+        assert!(matches!(err, RpcError::Transport(_)));
+    }
+
+    #[test]
+    fn tba_implementation_invalid_url_returns_transport_error() {
+        let err = tba_implementation("not-a-url", Address::ZERO).unwrap_err();
         assert!(matches!(err, RpcError::Transport(_)));
     }
 }

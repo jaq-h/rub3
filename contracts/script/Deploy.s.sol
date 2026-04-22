@@ -8,12 +8,17 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 /// @notice Deploys either Rub3Access or Rub3Subscription from environment variables.
 ///
 /// Required env vars:
-///   CONTRACT_TYPE   — "access" | "subscription"
-///   TOKEN_NAME      — ERC-721 name  (e.g. "My App License")
-///   TOKEN_SYMBOL    — ERC-721 symbol (e.g. "MAL")
-///   IDENTITY_MODEL  — 0 (access: user_id = wallet) | 1 (account: user_id = TBA)
-///   WRAPPER_HASH    — bytes32 hex of the distributed wrapper binary SHA-256
-///   PRICE           — purchase price in wei
+///   CONTRACT_TYPE      — "access" | "subscription"
+///   TOKEN_NAME         — ERC-721 name  (e.g. "My App License")
+///   TOKEN_SYMBOL       — ERC-721 symbol (e.g. "MAL")
+///   IDENTITY_MODEL     — 0 (access: user_id = wallet) | 1 (account: user_id = TBA)
+///   WRAPPER_HASH       — bytes32 hex of the distributed wrapper binary SHA-256
+///   PRICE              — purchase price in wei
+///
+/// Conditionally required:
+///   TBA_IMPLEMENTATION — ERC-6551 account implementation address. Required
+///                        when IDENTITY_MODEL=1 (account); must be 0x0 when
+///                        IDENTITY_MODEL=0 (access).
 ///
 /// Optional env vars:
 ///   SUPPLY_CAP      — max mintable tokens; 0 = uncapped (default: 0)
@@ -47,6 +52,8 @@ contract Deploy is Script {
         address owner_         = vm.envOr("OWNER",           msg.sender);
         // period is only required for "subscription"; default 0 for "access"
         uint256 period         = _eq(contractType, "subscription") ? vm.envUint("PERIOD") : 0;
+        // TBA implementation — required for account model, forbidden for access model.
+        address tbaImpl        = vm.envOr("TBA_IMPLEMENTATION", address(0));
 
         // ── Deploy ────────────────────────────────────────────────────────────
         vm.startBroadcast();
@@ -55,11 +62,13 @@ contract Deploy is Script {
 
         if (_eq(contractType, "access")) {
             deployed = address(new Rub3Access(
-                name_, symbol_, identityModel, wrapperHash, price, supplyCap, cooldownBlocks, owner_
+                name_, symbol_, identityModel, tbaImpl, wrapperHash,
+                price, supplyCap, cooldownBlocks, owner_
             ));
         } else if (_eq(contractType, "subscription")) {
             deployed = address(new Rub3Subscription(
-                name_, symbol_, identityModel, wrapperHash, price, supplyCap, period, cooldownBlocks, owner_
+                name_, symbol_, identityModel, tbaImpl, wrapperHash,
+                price, supplyCap, period, cooldownBlocks, owner_
             ));
         } else {
             revert(string.concat("Deploy: unknown CONTRACT_TYPE '", contractType, "' (expected 'access' or 'subscription')"));
@@ -78,6 +87,9 @@ contract Deploy is Script {
         console.log("  name:          %s", name_);
         console.log("  symbol:        %s", symbol_);
         console.log("  identityModel: %d  (%s)", identityModel, identityModel == 0 ? "access" : "account");
+        if (identityModel == 1) {
+            console.log("  tbaImpl:       %s", tbaImpl);
+        }
         console.log("  price:         %d wei", price);
         console.log("  supplyCap:     %d  (%s)", supplyCap, supplyCap == 0 ? "uncapped" : "capped");
         console.log("  cooldown:      %d blocks (~%d sec on Base)", cooldownBlocks, cooldownBlocks * 2);

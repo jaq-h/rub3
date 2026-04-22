@@ -2,6 +2,8 @@ pub mod license;
 pub mod store;
 
 #[cfg(feature = "session")]
+pub mod identity;
+#[cfg(feature = "session")]
 pub mod session;
 #[cfg(feature = "session")]
 pub mod session_store;

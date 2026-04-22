@@ -90,10 +90,11 @@ fn start_anvil() -> AnvilGuard {
 // ── Subprocess helpers ────────────────────────────────────────────────────────
 
 fn forge_create_rub3_access() -> String {
-    // 8 constructor args:
-    //   name, symbol, identityModel, wrapperHash, price, supplyCap,
-    //   cooldownBlocks, owner
+    // 9 constructor args:
+    //   name, symbol, identityModel, tbaImplementation, wrapperHash,
+    //   price, supplyCap, cooldownBlocks, owner
     let zero_hash = "0x0000000000000000000000000000000000000000000000000000000000000000";
+    let zero_addr = "0x0000000000000000000000000000000000000000";
     let output = Command::new("forge")
         .current_dir(contracts_dir())
         .args([
@@ -103,7 +104,7 @@ fn forge_create_rub3_access() -> String {
             "--private-key", DEPLOYER_KEY,
             "--rpc-url", &rpc_url(),
             "--constructor-args",
-            "Rub3 Test", "RUB3", "0", zero_hash, "0", "0", "15", DEPLOYER_ADDR,
+            "Rub3 Test", "RUB3", "0", zero_addr, zero_hash, "0", "0", "15", DEPLOYER_ADDR,
         ])
         .output()
         .expect("failed to run forge create");
@@ -209,6 +210,9 @@ fn session_verify_onchain_e2e() {
     let session = Session {
         app_id:                "com.rub3.test".into(),
         token_id:              0,
+        identity:              "access".into(),
+        user_id:               DEPLOYER_ADDR.into(),
+        tba:                   None,
         wallet:                DEPLOYER_ADDR.into(),
         nonce:                 "00".into(),
         issued_at:             chrono::Utc::now().to_rfc3339(),

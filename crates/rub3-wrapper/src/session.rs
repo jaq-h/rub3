@@ -10,13 +10,25 @@ use serde::{Deserialize, Serialize};
 /// Cached session written to `~/.rub3/sessions/<app_id>/<token_id>.json`.
 ///
 /// Populated fields depend on tier:
-///   1-2: app_id, token_id, wallet, nonce, issued_at, expires_at, signature, chain, contract
+///   1-2: app_id, token_id, identity, user_id, (tba?), wallet, nonce, issued_at,
+///        expires_at, signature, chain, contract
 ///   3:   adds activation_tx, activation_block, activation_block_hash, session_id
 ///   4:   adds device_pubkey; omits expires_at (device challenge replaces TTL)
+///
+/// `identity` is the wire string ("access" | "account"). `user_id` is the
+/// stable identity key the app sees — wallet address for access model, TBA
+/// address for account model. `tba` is populated only for the account model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub app_id:    String,
     pub token_id:  u64,
+
+    // ── Identity ─────────────────────────────────────────────────────────────
+    pub identity:  String,
+    pub user_id:   String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tba:       Option<String>,
+
     pub wallet:    String,
 
     pub nonce:     String,
@@ -112,13 +124,19 @@ impl std::fmt::Display for VerifyError {
 /// Fields are SHA-256'd in a fixed order; optional fields are omitted when
 /// `None`. Integers use big-endian encoding for fixed width.
 ///
+/// `identity` + `user_id` are part of the preimage so a forger cannot flip the
+/// identity model of a captured session (e.g. turn an access session into an
+/// account session, changing the `user_id` the app keys its data on).
+///
 /// Tier mapping:
-///   1-2: app_id, token_id, wallet, nonce, expires_at
+///   1-2: app_id, token_id, identity, user_id, wallet, nonce, expires_at
 ///   3:   + activation_block_hash, session_id
 ///   4:   + device_pubkey (expires_at is None for tier 4)
 pub fn session_message(
     app_id:                &str,
     token_id:              u64,
+    identity:              &str,
+    user_id:               &str,
     wallet:                &str,
     nonce:                 &str,
     expires_at:            Option<&str>,
@@ -130,6 +148,8 @@ pub fn session_message(
     let mut h = Sha256::new();
     h.update(app_id.as_bytes());
     h.update(token_id.to_be_bytes());
+    h.update(identity.as_bytes());
+    h.update(user_id.as_bytes());
     h.update(wallet.as_bytes());
     h.update(nonce.as_bytes());
     if let Some(exp) = expires_at            { h.update(exp.as_bytes()); }
@@ -161,6 +181,8 @@ pub fn verify_local(session: &Session) -> Result<(), VerifyError> {
     let msg = session_message(
         &session.app_id,
         session.token_id,
+        &session.identity,
+        &session.user_id,
         &session.wallet,
         &session.nonce,
         session.expires_at.as_deref(),
@@ -271,10 +293,14 @@ mod tests {
     use super::*;
 
     fn make_session(expires_at: Option<&str>) -> Session {
+        let wallet = "0x0000000000000000000000000000000000000001";
         Session {
             app_id:                "com.rub3.test".into(),
             token_id:              1,
-            wallet:                "0x0000000000000000000000000000000000000001".into(),
+            identity:              "access".into(),
+            user_id:               wallet.into(),
+            tba:                   None,
+            wallet:                wallet.into(),
             nonce:                 "aabbcc".into(),
             issued_at:             "2026-01-01T00:00:00Z".into(),
             expires_at:            expires_at.map(String::from),
@@ -291,30 +317,49 @@ mod tests {
 
     #[test]
     fn session_message_is_deterministic() {
-        let a = session_message("app", 1, "0xabc", "nonce", Some("2030-01-01T00:00:00Z"), None, None, None);
-        let b = session_message("app", 1, "0xabc", "nonce", Some("2030-01-01T00:00:00Z"), None, None, None);
+        let a = session_message("app", 1, "access", "0xabc", "0xabc", "nonce", Some("2030-01-01T00:00:00Z"), None, None, None);
+        let b = session_message("app", 1, "access", "0xabc", "0xabc", "nonce", Some("2030-01-01T00:00:00Z"), None, None, None);
         assert_eq!(a, b);
     }
 
     #[test]
     fn session_message_differs_by_nonce() {
-        let a = session_message("app", 1, "0xabc", "nonce1", None, None, None, None);
-        let b = session_message("app", 1, "0xabc", "nonce2", None, None, None, None);
+        let a = session_message("app", 1, "access", "0xabc", "0xabc", "nonce1", None, None, None, None);
+        let b = session_message("app", 1, "access", "0xabc", "0xabc", "nonce2", None, None, None, None);
         assert_ne!(a, b);
     }
 
     #[test]
     fn session_message_differs_by_expires_at_presence() {
-        let with_exp    = session_message("app", 1, "0xabc", "n", Some("2030-01-01T00:00:00Z"), None, None, None);
-        let without_exp = session_message("app", 1, "0xabc", "n", None, None, None, None);
+        let with_exp    = session_message("app", 1, "access", "0xabc", "0xabc", "n", Some("2030-01-01T00:00:00Z"), None, None, None);
+        let without_exp = session_message("app", 1, "access", "0xabc", "0xabc", "n", None, None, None, None);
         assert_ne!(with_exp, without_exp);
     }
 
     #[test]
     fn session_message_differs_by_tier3_fields() {
-        let tier2 = session_message("app", 1, "0xabc", "n", Some("2030-01-01T00:00:00Z"), None, None, None);
-        let tier3 = session_message("app", 1, "0xabc", "n", Some("2030-01-01T00:00:00Z"), Some("0xdeadbeef"), Some(42), None);
+        let tier2 = session_message("app", 1, "access", "0xabc", "0xabc", "n", Some("2030-01-01T00:00:00Z"), None, None, None);
+        let tier3 = session_message("app", 1, "access", "0xabc", "0xabc", "n", Some("2030-01-01T00:00:00Z"), Some("0xdeadbeef"), Some(42), None);
         assert_ne!(tier2, tier3);
+    }
+
+    #[test]
+    fn session_message_differs_by_identity() {
+        // Flipping access -> account (with a different user_id) MUST change
+        // the preimage, so a captured signature cannot be replayed with a
+        // different identity model.
+        let access  = session_message("app", 1, "access",  "0xwallet", "0xwallet", "n", None, None, None, None);
+        let account = session_message("app", 1, "account", "0xtba",    "0xwallet", "n", None, None, None, None);
+        assert_ne!(access, account);
+    }
+
+    #[test]
+    fn session_message_differs_by_user_id_only() {
+        // Same identity string, but swapping user_id alone (e.g. pointing at
+        // a different TBA) must change the preimage.
+        let a = session_message("app", 1, "account", "0xtba1", "0xwallet", "n", None, None, None, None);
+        let b = session_message("app", 1, "account", "0xtba2", "0xwallet", "n", None, None, None, None);
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -363,8 +408,10 @@ mod tests {
         let token_id = 7u64;
         let nonce    = new_nonce();
         let expires_at = "2099-01-01T00:00:00Z";
+        let identity  = "access";
+        let user_id   = wallet.clone();
 
-        let msg = session_message(app_id, token_id, &wallet, &nonce, Some(expires_at), None, None, None);
+        let msg = session_message(app_id, token_id, identity, &user_id, &wallet, &nonce, Some(expires_at), None, None, None);
 
         // Apply personal_sign prefix before signing (matches wallet behaviour).
         let prefixed = crate::license::personal_sign_hash(&msg);
@@ -378,6 +425,9 @@ mod tests {
         let session = Session {
             app_id:                app_id.into(),
             token_id,
+            identity:              identity.into(),
+            user_id,
+            tba:                   None,
             wallet:                wallet.clone(),
             nonce,
             issued_at:             chrono::Utc::now().to_rfc3339(),
@@ -406,7 +456,7 @@ mod tests {
 
         let nonce     = new_nonce();
         let expires_at = "2099-01-01T00:00:00Z";
-        let msg = session_message("app", 1, &real_wallet, &nonce, Some(expires_at), None, None, None);
+        let msg = session_message("app", 1, "access", &real_wallet, &real_wallet, &nonce, Some(expires_at), None, None, None);
         let prefixed = crate::license::personal_sign_hash(&msg);
 
         use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature};
@@ -415,14 +465,62 @@ mod tests {
         let sig_bytes: Vec<u8> = sig.to_bytes().iter().copied().chain(std::iter::once(v)).collect();
         let sig_hex = format!("0x{}", hex::encode(&sig_bytes));
 
+        let fake_wallet = "0x0000000000000000000000000000000000000099";
         let session = Session {
             app_id:                "app".into(),
             token_id:              1,
-            wallet:                "0x0000000000000000000000000000000000000099".into(), // wrong
+            identity:              "access".into(),
+            user_id:               fake_wallet.into(),
+            tba:                   None,
+            wallet:                fake_wallet.into(), // wrong
             nonce,
             issued_at:             chrono::Utc::now().to_rfc3339(),
             expires_at:            Some(expires_at.into()),
             signature:             sig_hex,
+            chain:                 "base".into(),
+            contract:              "0x0000000000000000000000000000000000000002".into(),
+            activation_tx:         None,
+            activation_block:      None,
+            activation_block_hash: None,
+            session_id:            None,
+            device_pubkey:         None,
+        };
+
+        assert!(matches!(verify_local(&session), Err(VerifyError::AddressMismatch { .. })));
+    }
+
+    #[test]
+    fn verify_local_tampered_identity_fails() {
+        // Sign a valid access-model session, then flip `identity` to "account"
+        // without re-signing. Verification must fail because the tampered
+        // identity string changes the preimage.
+        use k256::ecdsa::SigningKey;
+        use rand::rngs::OsRng;
+
+        let signing_key  = SigningKey::random(&mut OsRng);
+        let wallet       = crate::license::public_key_to_address(signing_key.verifying_key());
+
+        let nonce      = new_nonce();
+        let expires_at = "2099-01-01T00:00:00Z";
+        let msg = session_message("app", 1, "access", &wallet, &wallet, &nonce, Some(expires_at), None, None, None);
+        let prefixed = crate::license::personal_sign_hash(&msg);
+
+        use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature};
+        let (sig, rec_id): (Signature, RecoveryId) = signing_key.sign_prehash(&prefixed).unwrap();
+        let v = rec_id.to_byte() + 27;
+        let sig_bytes: Vec<u8> = sig.to_bytes().iter().copied().chain(std::iter::once(v)).collect();
+
+        let session = Session {
+            app_id:                "app".into(),
+            token_id:              1,
+            identity:              "account".into(),          // tampered
+            user_id:               wallet.clone(),            // keep matching
+            tba:                   None,
+            wallet:                wallet.clone(),
+            nonce,
+            issued_at:             chrono::Utc::now().to_rfc3339(),
+            expires_at:            Some(expires_at.into()),
+            signature:             format!("0x{}", hex::encode(&sig_bytes)),
             chain:                 "base".into(),
             contract:              "0x0000000000000000000000000000000000000002".into(),
             activation_tx:         None,

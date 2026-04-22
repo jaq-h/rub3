@@ -229,6 +229,18 @@
       <div class="tl">Session ID</div>
       <div class="tv" id="ss-session-id">—</div>
     </div>
+    <div class="token-box">
+      <div class="tl">Identity Model</div>
+      <div class="tv" id="ss-identity">—</div>
+    </div>
+    <div class="token-box">
+      <div class="tl">User ID <span style="color:#444;font-size:10px;text-transform:none">(stable identity key your app sees)</span></div>
+      <div class="tv" id="ss-user-id" style="word-break:break-all;font-size:11px">—</div>
+    </div>
+    <div class="token-box hidden" id="ss-tba-row">
+      <div class="tl">Token-Bound Account</div>
+      <div class="tv" id="ss-tba" style="word-break:break-all;font-size:11px">—</div>
+    </div>
     <div class="field">
       <label>Session Message to Sign <span style="color:#444;font-size:10px;text-transform:none">(personal_sign, same wallet as before)</span></label>
       <div class="token-box" style="margin-bottom:0">
@@ -374,12 +386,16 @@
     },
 
     // Tier 3 — activate() tx confirmed; switch to session-signing screen.
-    // data: { tokenId, ownerAddress, txHash, blockNumber, blockHash,
+    // data: { tokenId, ownerAddress, identity, userId, tba,
+    //         txHash, blockNumber, blockHash,
     //         sessionId, nonce, expiresAt, sessionMessage }
     onTxConfirmed(data) {
       pendingSessionCtx = {
         tokenId:              data.tokenId,
         ownerAddress:         data.ownerAddress,
+        identity:             data.identity,
+        userId:               data.userId,
+        tba:                  data.tba || null,
         nonce:                data.nonce,
         expiresAt:            data.expiresAt,
         sessionId:            data.sessionId,
@@ -392,6 +408,20 @@
       document.getElementById('ss-block').textContent      =
         '#' + data.blockNumber + '  ' + truncate(data.blockHash);
       document.getElementById('ss-session-id').textContent = '#' + data.sessionId;
+      document.getElementById('ss-identity').textContent   =
+        data.identity === 'account'
+          ? 'Account (NFT is the user account)'
+          : 'Access (wallet is the user identity)';
+      document.getElementById('ss-user-id').textContent    = data.userId;
+
+      const tbaRow = document.getElementById('ss-tba-row');
+      if (data.tba) {
+        document.getElementById('ss-tba').textContent = data.tba;
+        tbaRow.classList.remove('hidden');
+      } else {
+        tbaRow.classList.add('hidden');
+      }
+
       document.getElementById('ss-message').textContent    = data.sessionMessage;
       document.getElementById('ss-sig-input').value = '';
       clearError('ss-error');
@@ -531,6 +561,9 @@
       signature:             sig,
       token_id:              pendingSessionCtx.tokenId,
       owner_address:         pendingSessionCtx.ownerAddress,
+      identity:              pendingSessionCtx.identity,
+      user_id:               pendingSessionCtx.userId,
+      tba:                   pendingSessionCtx.tba,
       nonce:                 pendingSessionCtx.nonce,
       expires_at:            pendingSessionCtx.expiresAt,
       session_id:            pendingSessionCtx.sessionId,

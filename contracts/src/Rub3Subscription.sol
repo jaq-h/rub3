@@ -19,6 +19,7 @@ contract Rub3Subscription is Rub3License {
         string memory name_,
         string memory symbol_,
         uint8         identityModel_,
+        address       tbaImplementation_,
         bytes32       wrapperHash_,
         uint256       price_,
         uint256       supplyCap_,
@@ -26,7 +27,8 @@ contract Rub3Subscription is Rub3License {
         uint256       cooldownBlocks_,
         address       owner_
     ) Rub3License(
-        name_, symbol_, identityModel_, wrapperHash_, price_, supplyCap_, cooldownBlocks_, owner_
+        name_, symbol_, identityModel_, tbaImplementation_, wrapperHash_,
+        price_, supplyCap_, cooldownBlocks_, owner_
     ) {
         period = period_;
     }
