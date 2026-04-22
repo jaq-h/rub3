@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use rub3_wrapper::rpc;
 use rub3_wrapper::session::{self, Session, VerifyError};
 
 // Anvil's built-in account #0 (deterministic, documented, no real value).
@@ -192,10 +193,27 @@ fn session_verify_onchain_e2e() {
 
     // 1) Deploy Rub3Access.
     let contract = forge_create_rub3_access();
+    let contract_addr: alloy::primitives::Address =
+        contract.parse().expect("forge returned a malformed address");
+
+    // Pre-purchase supply state.
+    assert_eq!(rpc::supply_cap(&rpc_url(), contract_addr).unwrap(), 0,
+        "supplyCap should be unlimited (0) in this fixture");
+    assert_eq!(rpc::next_token_id(&rpc_url(), contract_addr).unwrap(), 0,
+        "nextTokenId should be 0 before any mint");
 
     // 2) purchase(address) — mints token_id 0 to DEPLOYER_ADDR.
     //    `price` is 0, so msg.value = 0.
-    let _purchase_tx = cast_send(&contract, "purchase(address)", &[DEPLOYER_ADDR]);
+    let purchase_tx = cast_send(&contract, "purchase(address)", &[DEPLOYER_ADDR]);
+
+    // Parse the Transfer log to recover the minted tokenId, and confirm the
+    // `nextTokenId` counter advanced.
+    let deployer_addr: alloy::primitives::Address = DEPLOYER_ADDR.parse().unwrap();
+    let minted = rpc::mint_token_id(&rpc_url(), &purchase_tx, contract_addr, deployer_addr)
+        .expect("mint_token_id should find the Transfer log");
+    assert_eq!(minted, 0, "first mint should be token id 0");
+    assert_eq!(rpc::next_token_id(&rpc_url(), contract_addr).unwrap(), 1,
+        "nextTokenId should be 1 after one mint");
 
     // 3) activate(uint256) — records cooldown, assigns session id 1.
     let activate_tx = cast_send(&contract, "activate(uint256)", &["0"]);

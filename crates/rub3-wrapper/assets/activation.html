@@ -161,6 +161,47 @@
     <button class="btn-ghost" style="margin-top:8px" id="btn-cancel-token">Cancel</button>
   </div>
 
+  <!-- ── Screen: purchase (tier 3, no token owned) ───────────────── -->
+  <div id="screen-purchase" class="hidden">
+    <p style="font-size:13px;color:#999;margin-bottom:14px">
+      This wallet doesn't own a license token yet. Purchase one to continue.
+    </p>
+    <div class="token-box">
+      <div class="tl">Price</div>
+      <div class="tv" id="p-price">—</div>
+    </div>
+    <div class="token-box">
+      <div class="tl">Supply</div>
+      <div class="tv" id="p-supply">—</div>
+    </div>
+    <div class="token-box">
+      <div class="tl">Recipient <span style="color:#444;font-size:10px;text-transform:none">(your wallet)</span></div>
+      <div class="tv" id="p-owner" style="word-break:break-all;font-size:11px">—</div>
+    </div>
+    <div class="field">
+      <label>Send this tx from your wallet</label>
+      <div class="token-box" style="margin-bottom:6px">
+        <div class="tl">To</div>
+        <div class="tv" id="p-to" style="word-break:break-all;font-size:11px">—</div>
+      </div>
+      <div class="token-box" style="margin-bottom:6px">
+        <div class="tl">Value (wei, hex)</div>
+        <div class="tv" id="p-value" style="word-break:break-all;font-size:11px">—</div>
+      </div>
+      <div class="token-box" style="margin-bottom:0">
+        <div class="tl">Calldata</div>
+        <div class="tv" id="p-calldata" style="word-break:break-all;font-size:11px">—</div>
+      </div>
+    </div>
+    <div class="field">
+      <label>Transaction Hash <span style="color:#444;font-size:10px;text-transform:none">(paste after sending)</span></label>
+      <input id="p-tx-input" type="text" placeholder="0x…" autocomplete="off" spellcheck="false" />
+      <div class="error" id="p-error"></div>
+    </div>
+    <button class="btn-primary" id="btn-p-submit">Confirm Purchase</button>
+    <button class="btn-ghost"   id="btn-p-cancel">Cancel</button>
+  </div>
+
   <!-- ── Screen: activate ───────────────────────────────────────── -->
   <div id="screen-activate" class="hidden">
     <div class="token-box">
@@ -266,7 +307,7 @@
 <script>
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  const SCREENS = ['connect', 'token-select', 'activate', 'cooldown', 'sign-session', 'processing'];
+  const SCREENS = ['connect', 'token-select', 'purchase', 'activate', 'cooldown', 'sign-session', 'processing'];
 
   function show(name) {
     SCREENS.forEach(s => {
@@ -294,6 +335,20 @@
     return addr;
   }
 
+  // Format a decimal-wei string as ETH with up to 4 significant fractional
+  // digits. Uses BigInt so large uint256 values don't lose precision.
+  function formatEth(weiStr) {
+    let w;
+    try { w = BigInt(weiStr); } catch { return '0'; }
+    if (w === 0n) return '0';
+    const WAD = 10n ** 18n;
+    const whole = w / WAD;
+    const frac  = w % WAD;
+    if (frac === 0n) return whole.toString();
+    const fracStr = frac.toString().padStart(18, '0').replace(/0+$/, '').slice(0, 4);
+    return whole.toString() + '.' + fracStr;
+  }
+
   // ── Rust → JS API ─────────────────────────────────────────────────────────
 
   let pendingTokenId    = null;
@@ -304,6 +359,11 @@
   // ActivateTxSent, onTxConfirmed, SessionSigned. The wrapper is stateless
   // between IPC messages, so JS echoes these back in the final payload.
   let pendingSessionCtx = null;
+
+  // State for the purchase flow. Only ownerAddress needs to survive the
+  // PurchaseTxSent round-trip; the wrapper recovers token_id from the
+  // Transfer log after polling the receipt.
+  let pendingPurchaseCtx = null;
 
   window.rub3 = {
     // Called once after 'ready' is acknowledged.
@@ -338,6 +398,33 @@
         list.appendChild(btn);
       });
       show('token-select');
+    },
+
+    // Wallet owns no token — show the purchase prompt.
+    // data: { ownerAddress, contractAddress, chainId, priceWei, valueHex,
+    //         supplyCap, nextTokenId, calldata }
+    onShowPurchase(data) {
+      pendingPurchaseCtx = { ownerAddress: data.ownerAddress };
+
+      const ethStr = formatEth(data.priceWei);
+      const priceLabel = data.priceWei === '0'
+        ? 'Free  (0 wei)'
+        : ethStr + ' ETH  (' + data.priceWei + ' wei)';
+      document.getElementById('p-price').textContent = priceLabel;
+
+      const supplyLabel = (data.supplyCap === 0 || data.supplyCap === '0')
+        ? 'Unlimited  (' + data.nextTokenId + ' minted)'
+        : data.nextTokenId + ' / ' + data.supplyCap + ' minted';
+      document.getElementById('p-supply').textContent = supplyLabel;
+
+      document.getElementById('p-owner').textContent    = data.ownerAddress;
+      document.getElementById('p-to').textContent       = data.contractAddress;
+      document.getElementById('p-value').textContent    = data.valueHex;
+      document.getElementById('p-calldata').textContent = data.calldata;
+      document.getElementById('p-tx-input').value = '';
+      clearError('p-error');
+
+      show('purchase');
     },
 
     // Wallet owns a token — show the signature prompt.
@@ -499,6 +586,38 @@
   });
 
   document.getElementById('btn-cancel-activate').addEventListener('click', () => {
+    post({ type: 'cancel' });
+  });
+
+  // ── Purchase screen ───────────────────────────────────────────────────────
+
+  document.getElementById('btn-p-submit').addEventListener('click', () => {
+    clearError('p-error');
+    const tx = document.getElementById('p-tx-input').value.trim();
+
+    if (!tx) {
+      setError('p-error', 'Paste the tx hash after sending from your wallet.');
+      return;
+    }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) {
+      setError('p-error', 'Tx hash must be 0x + 64 hex characters.');
+      return;
+    }
+    if (!pendingPurchaseCtx) {
+      setError('p-error', 'Internal error: purchase context missing.');
+      return;
+    }
+
+    show('processing');
+    document.getElementById('processing-msg').textContent = 'Waiting for purchase tx…';
+    post({
+      type:          'purchase_tx_sent',
+      tx_hash:       tx,
+      owner_address: pendingPurchaseCtx.ownerAddress,
+    });
+  });
+
+  document.getElementById('btn-p-cancel').addEventListener('click', () => {
     post({ type: 'cancel' });
   });
 

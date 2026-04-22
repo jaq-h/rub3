@@ -13,7 +13,7 @@ pub mod device;
 pub mod decrypt;
 
 mod activation;
-mod rpc;
+pub mod rpc;
 mod supervisor;
 mod webview;
 
