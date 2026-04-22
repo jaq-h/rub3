@@ -66,7 +66,8 @@ The wrapper reads the identity model from the contract at session creation. The 
 - **SIWE-style sessions.** Wrapper requests a signed statement from the wallet: `H(app_id || tokenId || user_id || nonce || expires_at)`. This is the session token — no backend, no JWT, no cookie. Cached locally, verified cryptographically on each launch.
 - **Token selection.** A wallet may own multiple tokens from the same contract. The wrapper presents a selection UI after wallet connection. Each token maintains its own independent session cache — switching tokens at launch is frictionless.
 - **ENS trust layer.** Developer registers ENS pointing to their contract. Wrapper resolves at session creation and rejects mismatches. Trust chain: ENS → contract → binary hash → running wrapper.
-- **Webview for wallet UI only.** `wry` embeds a minimal webview for WalletConnect. The wrapped app never touches the webview — it is only used for the session creation flow.
+- **Webview for wallet UI only.** `wry` embeds a minimal webview for the session-creation flow: wallet connect, token selection, and — for tiers 3+ — the tx-confirmation tabs (WalletConnect / auto-detect / manual paste). The wrapped app never touches the webview.
+- **Confirmation has a floor.** Every on-chain step (purchase, activate) degrades to a manual "paste your tx hash" path. Richer modes (WalletConnect, RPC auto-detect) layer on top as tabs; the floor is always reachable when the nicer paths aren't available.
 
 ## What This Is Not
 
@@ -95,6 +96,6 @@ The project is in early Phase 1 (Proof of Concept). What works today:
 - **On-chain queries**: `ownerOf()` and `price()` via alloy JSON-RPC (not yet wired into activation flow)
 - **Test suite**: 26 tests — unit tests for crypto + storage, integration tests for wrapper binary, static + dynamic license e2e tests with native Rust wallet generation
 
-Not yet built: TTL-based sessions, WalletConnect, token selection, ENS verification, identity models (access/account), smart contracts, CLI tooling, SDK, Tauri plugin.
+Not yet built: WalletConnect + RPC auto-detect tx confirmation tabs (implementation.md §1.10), ENS verification, CLI tooling (`rub3 pack` / `rub3 deploy` / `rub3 register`), SDK, Tauri plugin. Current activation flow uses the manual-paste tx-confirmation path as its floor.
 
 See [architecture.md](architecture.md) and [implementation.md](implementation.md) for technical details.

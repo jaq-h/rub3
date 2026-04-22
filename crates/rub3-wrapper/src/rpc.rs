@@ -1,4 +1,4 @@
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{b256, Address, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol;
 use alloy::sol_types::SolCall;
@@ -17,6 +17,9 @@ use alloy::sol_types::SolCall;
 //   activeSessionId(tokenId)      — tier-3 revocation check
 //   identityModel()               — 0 = access, 1 = account (read at session creation)
 //   tbaImplementation()           — ERC-6551 impl for account-model TBA derivation
+//   supplyCap()                   — immutable mint cap (0 = unlimited)
+//   nextTokenId()                 — next id to be minted
+//   purchase(recipient)           — payable; calldata only (wrapper never sends)
 sol! {
     #[sol(rpc)]
     interface IRub3License {
@@ -33,8 +36,17 @@ sol! {
 
         function identityModel() external view returns (uint8 model);
         function tbaImplementation() external view returns (address impl);
+
+        function supplyCap() external view returns (uint256 cap);
+        function nextTokenId() external view returns (uint256 id);
+        function purchase(address recipient) external payable returns (uint256 tokenId);
     }
 }
+
+/// `keccak256("Transfer(address,address,uint256)")` — the ERC-721 Transfer
+/// event topic0. Mint events have `from == address(0)`.
+const ERC721_TRANSFER_SIG: B256 =
+    b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 
 // ── Receipt ───────────────────────────────────────────────────────────────────
 
@@ -311,6 +323,97 @@ pub fn get_block_number(rpc_url: &str) -> Result<u64, RpcError> {
     })
 }
 
+// ── Purchase / supply (tier 3) ────────────────────────────────────────────────
+
+/// Reads `supplyCap()`. `0` means unlimited.
+pub fn supply_cap(rpc_url: &str, contract: Address) -> Result<u64, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        let r = instance
+            .supplyCap()
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))?;
+        Ok(r.to::<u64>())
+    })
+}
+
+/// Reads `nextTokenId()` — the id the next `purchase()` will mint.
+pub fn next_token_id(rpc_url: &str, contract: Address) -> Result<u64, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        let r = instance
+            .nextTokenId()
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))?;
+        Ok(r.to::<u64>())
+    })
+}
+
+/// Returns the 0x-prefixed ABI-encoded calldata for `purchase(recipient)`.
+///
+/// Pure — no RPC. The wrapper shows this to the user so they can paste it
+/// into their wallet to send the tx themselves. `msg.value` is handled
+/// separately in the UI.
+pub fn encode_purchase_calldata(recipient: Address) -> String {
+    let call = IRub3License::purchaseCall { recipient };
+    format!("0x{}", hex::encode(call.abi_encode()))
+}
+
+/// Fetches the receipt for `tx_hash` and returns the token id minted to
+/// `recipient` by the matching ERC-721 `Transfer(0x0, recipient, tokenId)` log
+/// emitted from `contract`.
+///
+/// Used after a `purchase()` tx lands to discover the id the contract assigned.
+pub fn mint_token_id(
+    rpc_url: &str,
+    tx_hash: &str,
+    contract: Address,
+    recipient: Address,
+) -> Result<u64, RpcError> {
+    let hash: B256 = tx_hash
+        .trim_start_matches("0x")
+        .parse::<B256>()
+        .map_err(|e| RpcError::Transport(format!("invalid tx hash: {e}")))?;
+
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let receipt = provider
+            .get_transaction_receipt(hash)
+            .await
+            .map_err(|e| RpcError::Transport(e.to_string()))?
+            .ok_or_else(|| RpcError::Contract("receipt not found".into()))?;
+
+        for log in receipt.inner.logs() {
+            if log.address() != contract {
+                continue;
+            }
+            let topics = log.topics();
+            if topics.len() != 4 || topics[0] != ERC721_TRANSFER_SIG {
+                continue;
+            }
+            // Mint: `from == address(0)`. Topic is the 32-byte-padded address.
+            if !topics[1].is_zero() {
+                continue;
+            }
+            // `to` must equal recipient (compare the 20 low bytes of the topic).
+            let to_bytes: &[u8] = &topics[2].as_slice()[12..];
+            if to_bytes != recipient.as_slice() {
+                continue;
+            }
+            let token_id = U256::from_be_bytes::<32>(topics[3].0);
+            return Ok(token_id.to::<u64>());
+        }
+
+        Err(RpcError::Contract(
+            "no ERC-721 mint Transfer log for recipient found in receipt".into(),
+        ))
+    })
+}
+
 // ── Internals ─────────────────────────────────────────────────────────────────
 
 fn build_provider(
@@ -412,5 +515,57 @@ mod tests {
     fn tba_implementation_invalid_url_returns_transport_error() {
         let err = tba_implementation("not-a-url", Address::ZERO).unwrap_err();
         assert!(matches!(err, RpcError::Transport(_)));
+    }
+
+    #[test]
+    fn supply_cap_invalid_url_returns_transport_error() {
+        let err = supply_cap("not-a-url", Address::ZERO).unwrap_err();
+        assert!(matches!(err, RpcError::Transport(_)));
+    }
+
+    #[test]
+    fn next_token_id_invalid_url_returns_transport_error() {
+        let err = next_token_id("not-a-url", Address::ZERO).unwrap_err();
+        assert!(matches!(err, RpcError::Transport(_)));
+    }
+
+    #[test]
+    fn mint_token_id_invalid_url_returns_transport_error() {
+        let err = mint_token_id(
+            "not-a-url",
+            "0x1111111111111111111111111111111111111111111111111111111111111111",
+            Address::ZERO,
+            Address::ZERO,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RpcError::Transport(_)));
+    }
+
+    #[test]
+    fn mint_token_id_invalid_hash_returns_transport_error() {
+        let err = mint_token_id(VALID_RPC, "not-a-hash", Address::ZERO, Address::ZERO).unwrap_err();
+        assert!(matches!(err, RpcError::Transport(_)));
+    }
+
+    #[test]
+    fn encode_purchase_calldata_matches_selector() {
+        // keccak256("purchase(address)")[..4] = 0x25b31a97
+        let recipient: Address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".parse().unwrap();
+        let data = encode_purchase_calldata(recipient);
+        assert!(data.starts_with("0x25b31a97"), "got {data}");
+        // selector (4) + 32-byte argument = 36 bytes = 72 hex chars, plus "0x" prefix.
+        assert_eq!(data.len(), 2 + 72);
+        // Last 40 chars are the recipient address hex, left-padded with zeros.
+        assert!(
+            data.ends_with("f39fd6e51aad88f6f4ce6ab8827279cfffb92266"),
+            "recipient address not present: {data}",
+        );
+    }
+
+    #[test]
+    fn encode_purchase_calldata_differs_by_recipient() {
+        let a: Address = "0x0000000000000000000000000000000000000001".parse().unwrap();
+        let b: Address = "0x0000000000000000000000000000000000000002".parse().unwrap();
+        assert_ne!(encode_purchase_calldata(a), encode_purchase_calldata(b));
     }
 }

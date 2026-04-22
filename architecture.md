@@ -322,6 +322,32 @@ Session files are keyed on both app_id and token_id: `~/.rub3/sessions/<app_id>/
 
 ---
 
+## Transaction Confirmation
+
+Tiers 3-4 require the user to send at least one on-chain tx (purchase and/or activate) during the activation flow. The wrapper never holds keys and never broadcasts txs itself — it encodes calldata, surfaces it to the user, and waits for the tx to confirm. How that "wait" happens is an orthogonal concern with three implementations, rendered side-by-side as tabs on the purchase and cooldown screens:
+
+| Mode | Reliance | Tolerant of offline activation | JS bundle |
+|---|---|---|---|
+| **WalletConnect** | Reown relay + chain RPC | no | ~255 KB vendored |
+| **Auto-detect** | Chain RPC (filter `eth_getLogs` / read `lastActivationBlock`) | no | none |
+| **Manual** | User copies a tx hash back into the wrapper | yes (paste later) | none |
+
+The modes share one downstream path: whichever tab produces a tx hash hands off to the same receipt poller that validates `status == true`, asserts `receipt.to == contract`, and recovers the minted tokenId (purchase) or the `activeSessionId` (activate). The rest of the session pipeline does not care which tab the hash came from.
+
+**Why all three.**
+- **WalletConnect** is the lowest-friction path — the user sees the standard dApp pairing QR in their wallet, approves, and the wrapper receives the tx hash directly. Cost is a vendored JS bundle and a developer-supplied Reown project id per deployment (branding + abuse boundary; not a shared rub3 credential).
+- **Auto-detect** is the fall-back when the developer does not want to adopt WalletConnect. The wrapper watches the chain directly for the expected event (ERC-721 `Transfer` mint or a bumped `lastActivationBlock`) and silently continues when the event appears.
+- **Manual** is the floor — always available, no dependencies, and the one path that still works if the user's machine is offline when they open the wrapper but they want to send the tx from a hardware wallet elsewhere and paste the hash later.
+
+Which tabs are offered is determined at build + deploy time:
+- WalletConnect tab: requires the `wallet-connect` Cargo feature (opt-in, adds the vendored JS bundle) **and** a non-placeholder `wc_project_id` in the packed wrapper.
+- Auto-detect tab: requires `onchain-write` (always present in tiers 3-4).
+- Manual tab: always on.
+
+The wrapper picks the most capable available tab as the default and lets the user tab over to the others at will. Today both purchase and cooldown screens expose only the Manual path; Auto-detect and WalletConnect are tracked in implementation.md §1.10.
+
+---
+
 ## Components
 
 ### 1. Smart Contracts
@@ -770,8 +796,11 @@ Launch app                      Open webview
                     0 tokens               ≥1 token
                          │                     │
                   Show purchase UI      Show token selector
-                         │              (auto-select if 1 token)
-                  User purchases             │
+                  (WalletConnect /      (auto-select if 1 token)
+                   auto-detect /              │
+                   manual paste)              │
+                         │                    │
+                  User purchases              │
                   → loop back          User selects token
                                             │
                                     ownerOf() / isValid()
@@ -804,9 +833,14 @@ Launch app                      Open webview
                                  ┌──────────┴──────────┐
                             Cooldown active          Cooldown ready
                                  │                       │
-                          Show "wait N blocks"     Wallet sends activate() tx
-                          + retry button                 │
-                                                   Wait for tx confirmation
+                          Show "wait N blocks"     User sends activate() tx
+                          + retry button           (WalletConnect / auto-detect /
+                                                    manual paste — see
+                                                    Transaction Confirmation)
+                                                         │
+                                                   Wrapper confirms the receipt
+                                                   (tab-specific watcher;
+                                                    same downstream poller)
                                                          │
                                                    Extract block_hash, session_id
                                                          │

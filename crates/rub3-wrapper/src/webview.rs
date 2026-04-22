@@ -71,6 +71,14 @@ enum IpcMessage {
         token_id: u64,
         owner_address: String,
     },
+    /// Purchase path: user sent `purchase(recipient)` from their wallet and is
+    /// providing the tx hash so the wrapper can poll, extract the minted token
+    /// id from the Transfer log, and continue into the activation flow.
+    #[cfg(feature = "onchain-write")]
+    PurchaseTxSent {
+        tx_hash: String,
+        owner_address: String,
+    },
     /// Tier-3 path: user signed the session message. All fields from the
     /// tx-confirmation step are echoed back so the wrapper can assemble the
     /// Session without holding in-process state between IPC calls.
@@ -230,10 +238,14 @@ impl IpcState {
 
                 match crate::rpc::tokens_of_owner(&self.rpc_url, contract_addr, owner_addr) {
                     Ok(tokens) if tokens.is_empty() => {
-                        self.eval(format!(
-                            "window.rub3.onError({})",
-                            serde_json::json!("No license tokens found for this wallet")
-                        ));
+                        #[cfg(feature = "onchain-write")]
+                        {
+                            self.show_purchase(&address, owner_addr, contract_addr);
+                        }
+                        #[cfg(not(feature = "onchain-write"))]
+                        {
+                            self.eval_err("No license tokens found for this wallet");
+                        }
                     }
                     Ok(tokens) if tokens.len() == 1 => {
                         self.proceed_after_token_selected(&address, tokens[0]);
@@ -276,6 +288,11 @@ impl IpcState {
             #[cfg(feature = "cooldown")]
             IpcMessage::ActivateTxSent { tx_hash, token_id, owner_address } => {
                 self.spawn_tx_poller(tx_hash, token_id, owner_address);
+            }
+
+            #[cfg(feature = "onchain-write")]
+            IpcMessage::PurchaseTxSent { tx_hash, owner_address } => {
+                self.spawn_purchase_poller(tx_hash, owner_address);
             }
 
             #[cfg(feature = "cooldown")]
@@ -381,6 +398,115 @@ impl IpcState {
             "calldata":        calldata,
         });
         self.eval(format!("window.rub3.onShowCooldown({})", payload));
+    }
+
+    /// Display the purchase screen: reads current supply state + price from
+    /// the contract, encodes `purchase(recipient)` calldata, and emits
+    /// `onShowPurchase` with the data the UI needs. Emits an error if supply
+    /// is exhausted.
+    #[cfg(feature = "onchain-write")]
+    fn show_purchase(
+        &self,
+        address: &str,
+        recipient: alloy::primitives::Address,
+        contract_addr: alloy::primitives::Address,
+    ) {
+        let cap = match crate::rpc::supply_cap(&self.rpc_url, contract_addr) {
+            Ok(c) => c,
+            Err(e) => { self.eval_err(&format!("supply cap read failed: {e}")); return; }
+        };
+        let next_id = match crate::rpc::next_token_id(&self.rpc_url, contract_addr) {
+            Ok(n) => n,
+            Err(e) => { self.eval_err(&format!("nextTokenId read failed: {e}")); return; }
+        };
+        if cap != 0 && next_id >= cap {
+            self.eval_err("Sold out — no more tokens available for purchase");
+            return;
+        }
+
+        let price = match crate::rpc::token_price(&self.rpc_url, contract_addr) {
+            Ok(p) => p,
+            Err(e) => { self.eval_err(&format!("price read failed: {e}")); return; }
+        };
+        let calldata = crate::rpc::encode_purchase_calldata(recipient);
+
+        // JSON numbers can't safely represent values above 2^53, and price
+        // may be full uint256. Emit as decimal + hex strings and let the UI
+        // format them.
+        let payload = serde_json::json!({
+            "ownerAddress":    address,
+            "contractAddress": self.contract,
+            "chainId":         self.chain_id,
+            "priceWei":        price.to_string(),
+            "valueHex":        format!("0x{:x}", price),
+            "supplyCap":       cap,
+            "nextTokenId":     next_id,
+            "calldata":        calldata,
+        });
+        self.eval(format!("window.rub3.onShowPurchase({})", payload));
+    }
+
+    /// Spawn a background thread that polls for the purchase() tx receipt.
+    ///
+    /// On confirmation: asserts the tx hit this contract + succeeded, parses
+    /// the ERC-721 Transfer log to recover the minted token id, and hands off
+    /// to `proceed_after_token_selected` (same path as a wallet that already
+    /// owned a token). On timeout/failure: emits an error to JS.
+    #[cfg(feature = "onchain-write")]
+    fn spawn_purchase_poller(&self, tx_hash: String, owner_address: String) {
+        let state = self.clone();
+
+        std::thread::spawn(move || {
+            state.eval(format!(
+                "window.rub3.onProcessing({})",
+                serde_json::json!("Waiting for purchase() tx to land…")
+            ));
+
+            let receipt = match poll_receipt(&state.rpc_url, &tx_hash) {
+                Ok(r) => r,
+                Err(e) => {
+                    state.eval_err(&format!("tx polling failed: {e}"));
+                    return;
+                }
+            };
+
+            if !receipt.status {
+                state.eval_err("purchase() tx reverted on-chain");
+                return;
+            }
+
+            if let Some(to) = receipt.to.as_deref() {
+                if !to.eq_ignore_ascii_case(&state.contract) {
+                    state.eval_err(&format!(
+                        "purchase() tx was sent to {to}, expected {}", state.contract
+                    ));
+                    return;
+                }
+            }
+
+            let contract_addr: alloy::primitives::Address = match state.contract.parse() {
+                Ok(a) => a,
+                Err(_) => { state.eval_err("contract address is malformed"); return; }
+            };
+            let recipient: alloy::primitives::Address = match owner_address.parse() {
+                Ok(a) => a,
+                Err(_) => { state.eval_err("owner address is malformed"); return; }
+            };
+
+            let token_id = match crate::rpc::mint_token_id(
+                &state.rpc_url, &tx_hash, contract_addr, recipient,
+            ) {
+                Ok(id) => id,
+                Err(e) => {
+                    state.eval_err(&format!("failed to extract minted tokenId: {e}"));
+                    return;
+                }
+            };
+
+            // Re-enter the normal flow exactly as if tokens_of_owner had
+            // returned this single token.
+            state.proceed_after_token_selected(&owner_address, token_id);
+        });
     }
 
     /// Spawn a background thread that polls for the activate() tx receipt.
