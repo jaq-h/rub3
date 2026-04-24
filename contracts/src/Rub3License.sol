@@ -52,17 +52,9 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     mapping(uint256 => uint256) public lastActivationBlock;
 
     /// @notice Current active session id per token. Incremented on every
-    ///         `activate()` / `activateDevice()`. Cached sessions whose
-    ///         `session_id` no longer matches are considered revoked.
+    ///         `activate()`. Cached sessions whose `session_id` no longer
+    ///         matches are considered revoked.
     mapping(uint256 => uint256) public activeSessionId;
-
-    /// @notice Device-key fingerprint registered for `tokenId` (tier 4).
-    ///         Set by `activateDevice()`; `bytes32(0)` means no device is
-    ///         currently bound. The wrapper chooses the fingerprint scheme
-    ///         (hash of compressed pubkey, derived address, …) — the contract
-    ///         only records whatever commitment it receives and emits an event
-    ///         so indexers / the wrapper can detect changes.
-    mapping(uint256 => bytes32) public registeredDevice;
 
     /// @dev Monotonic counter feeding `activeSessionId` on each activation.
     uint256 private _sessionCounter;
@@ -72,7 +64,6 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     event PriceUpdated(uint256 oldPrice, uint256 newPrice);
     event WrapperHashUpdated(bytes32 oldHash, bytes32 newHash);
     event Activated(uint256 indexed tokenId, address indexed owner, uint256 sessionId);
-    event DeviceRegistered(uint256 indexed tokenId, bytes32 devicePubKey);
 
     // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -85,7 +76,6 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     error WithdrawFailed();
     error NotTokenOwner(address caller, address owner);
     error CooldownActive(uint256 blocksRemaining);
-    error InvalidDevicePubKey();
 
     constructor(
         string memory name_,
@@ -157,37 +147,6 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     /// activation was fewer than `cooldownBlocks` ago. The first activation
     /// (`lastActivationBlock == 0`) bypasses the cooldown check.
     function activate(uint256 tokenId) external returns (uint256 sessionId) {
-        sessionId = _activate(tokenId);
-    }
-
-    // ── Activation (tier 4) ───────────────────────────────────────────────────
-
-    /// @notice Record a fresh activation for `tokenId` and bind it to the
-    ///         device-key fingerprint `devicePubKey`.
-    ///
-    /// Shares the owner + cooldown check with `activate()`. In addition,
-    /// stores `devicePubKey` in `registeredDevice[tokenId]`, overwriting any
-    /// previous registration — re-activating on a new device is the intended
-    /// way to "move" a tier-4 session between machines. Reverts if the
-    /// fingerprint is `bytes32(0)`, which would be indistinguishable from
-    /// "unbound".
-    function activateDevice(uint256 tokenId, bytes32 devicePubKey)
-        external
-        returns (uint256 sessionId)
-    {
-        if (devicePubKey == bytes32(0)) revert InvalidDevicePubKey();
-        sessionId = _activate(tokenId);
-        registeredDevice[tokenId] = devicePubKey;
-        emit DeviceRegistered(tokenId, devicePubKey);
-    }
-
-    // ── Internal helpers ──────────────────────────────────────────────────────
-
-    /// @dev Shared body of `activate()` + `activateDevice()`. Enforces
-    ///      ownership, the cooldown window, bumps the session counter, and
-    ///      emits `Activated`. Callers layer on any extra state (e.g. device
-    ///      registration) afterwards.
-    function _activate(uint256 tokenId) internal returns (uint256 sessionId) {
         address tokenOwner = ownerOf(tokenId);
         if (tokenOwner != msg.sender) revert NotTokenOwner(msg.sender, tokenOwner);
 
@@ -203,6 +162,8 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
 
         emit Activated(tokenId, msg.sender, sessionId);
     }
+
+    // ── Internal helpers ──────────────────────────────────────────────────────
 
     /// @dev Resolves `recipient == address(0)` to `msg.sender`. Used by both
     ///      concrete contracts so callers can omit the argument.

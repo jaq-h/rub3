@@ -175,11 +175,10 @@ Adds a device-bound ephemeral keypair. At activation, the wrapper generates a fr
   ```solidity
   mapping(uint256 => bytes32) public registeredDevice;
 
-  function activateDevice(uint256 tokenId, bytes32 devicePubKey) external returns (uint256 sessionId) {
+  function activate(uint256 tokenId, bytes32 devicePubKey) external returns (uint256 sessionId) {
       require(ownerOf(tokenId) == msg.sender, "not owner");
       uint256 last = lastActivationBlock[tokenId];
       if (last != 0) require(block.number - last >= cooldownBlocks, "cooldown");
-      if (devicePubKey == bytes32(0)) revert InvalidDevicePubKey();
       lastActivationBlock[tokenId] = block.number;
       activeSessionId[tokenId] = ++_sessionCounter;
       registeredDevice[tokenId] = devicePubKey;
