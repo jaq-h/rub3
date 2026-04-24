@@ -288,4 +288,148 @@ contract Rub3AccessTest is Test {
         uint256 s = nft.activate(id);
         assertEq(nft.activeSessionId(id), s);
     }
+
+    // ── activateDevice / registeredDevice (tier 4) ────────────────────────────
+
+    bytes32 internal constant DEVICE_A = keccak256("device-a");
+    bytes32 internal constant DEVICE_B = keccak256("device-b");
+
+    function test_registeredDevice_initiallyZero() public {
+        uint256 id = _mint(alice);
+        assertEq(nft.registeredDevice(id), bytes32(0));
+    }
+
+    function test_activateDevice_firstCall_recordsKeyAndSession() public {
+        uint256 id = _mint(alice);
+
+        vm.expectEmit(true, true, false, true);
+        emit Rub3License.Activated(id, alice, 1);
+        vm.expectEmit(true, false, false, true);
+        emit Rub3License.DeviceRegistered(id, DEVICE_A);
+
+        vm.prank(alice);
+        uint256 sessionId = nft.activateDevice(id, DEVICE_A);
+
+        assertEq(sessionId, 1);
+        assertEq(nft.activeSessionId(id),     1);
+        assertEq(nft.lastActivationBlock(id), block.number);
+        assertEq(nft.registeredDevice(id),    DEVICE_A);
+    }
+
+    function test_activateDevice_zeroKey_reverts() public {
+        uint256 id = _mint(alice);
+
+        vm.prank(alice);
+        vm.expectRevert(Rub3License.InvalidDevicePubKey.selector);
+        nft.activateDevice(id, bytes32(0));
+    }
+
+    function test_activateDevice_notOwner_reverts() public {
+        uint256 id = _mint(alice);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.NotTokenOwner.selector, bob, alice));
+        nft.activateDevice(id, DEVICE_A);
+    }
+
+    function test_activateDevice_duringCooldown_reverts() public {
+        uint256 id = _mint(alice);
+
+        vm.prank(alice);
+        nft.activateDevice(id, DEVICE_A);
+
+        vm.roll(block.number + 1);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(
+            Rub3License.CooldownActive.selector, COOLDOWN_BLOCKS - 1
+        ));
+        nft.activateDevice(id, DEVICE_B);
+
+        // Previous registration stands.
+        assertEq(nft.registeredDevice(id), DEVICE_A);
+    }
+
+    function test_activateDevice_afterCooldown_overwritesPreviousKey() public {
+        uint256 id = _mint(alice);
+
+        vm.prank(alice);
+        uint256 s1 = nft.activateDevice(id, DEVICE_A);
+
+        vm.roll(block.number + COOLDOWN_BLOCKS);
+
+        vm.prank(alice);
+        uint256 s2 = nft.activateDevice(id, DEVICE_B);
+
+        assertGt(s2, s1);
+        assertEq(nft.registeredDevice(id), DEVICE_B);
+    }
+
+    function test_activate_thenActivateDevice_upgradesToTier4() public {
+        // A token activated via tier-3 `activate()` should be upgradable to
+        // tier 4 by the next `activateDevice()` call (after cooldown).
+        uint256 id = _mint(alice);
+
+        vm.prank(alice);
+        nft.activate(id);
+        assertEq(nft.registeredDevice(id), bytes32(0));
+
+        vm.roll(block.number + COOLDOWN_BLOCKS);
+
+        vm.prank(alice);
+        nft.activateDevice(id, DEVICE_A);
+        assertEq(nft.registeredDevice(id), DEVICE_A);
+    }
+
+    function test_activateDevice_thenActivate_doesNotClearKey() public {
+        // Intentional: plain `activate()` leaves the device binding in place.
+        // If the holder wanted to tear it down they would `activateDevice`
+        // with a new key (or transfer away and the new owner would overwrite).
+        uint256 id = _mint(alice);
+
+        vm.prank(alice);
+        nft.activateDevice(id, DEVICE_A);
+
+        vm.roll(block.number + COOLDOWN_BLOCKS);
+
+        vm.prank(alice);
+        nft.activate(id);
+
+        assertEq(nft.registeredDevice(id), DEVICE_A);
+    }
+
+    function test_activateDevice_sessionCounter_sharedWithActivate() public {
+        // Both entry points feed the same monotonic `_sessionCounter`, so
+        // mixing them across tokens must still yield distinct ids.
+        uint256 a = _mint(alice);
+        uint256 b = _mint(bob);
+
+        vm.prank(alice); uint256 s1 = nft.activate(a);
+        vm.prank(bob);   uint256 s2 = nft.activateDevice(b, DEVICE_A);
+
+        assertEq(s1, 1);
+        assertEq(s2, 2);
+    }
+
+    function test_activateDevice_afterTransfer_newOwnerReplacesKey() public {
+        uint256 id = _mint(alice);
+
+        vm.prank(alice);
+        nft.activateDevice(id, DEVICE_A);
+
+        vm.roll(block.number + COOLDOWN_BLOCKS);
+
+        vm.prank(alice);
+        nft.transferFrom(alice, bob, id);
+
+        // Old holder no longer authorized.
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.NotTokenOwner.selector, alice, bob));
+        nft.activateDevice(id, DEVICE_B);
+
+        // New holder registers their own device, overwriting alice's.
+        vm.prank(bob);
+        nft.activateDevice(id, DEVICE_B);
+        assertEq(nft.registeredDevice(id), DEVICE_B);
+    }
 }
