@@ -47,7 +47,6 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 - `withdraw(address payable)` owner-only sweep
 - `_update` / `_increaseBalance` / `supportsInterface` overrides for ERC-721 + Enumerable composition
 - **Activation (tier 3)**: `activate(uint256) returns (sessionId)` — owner-only, bumps `activeSessionId[tokenId]` from a monotonic `_sessionCounter`, records `lastActivationBlock`, reverts `CooldownActive(blocksRemaining)` if called again inside the window (first call, `last == 0`, bypasses); `cooldownReady(tokenId) view returns (bool, uint256)` for the wrapper's pre-tx check; `Activated(tokenId, owner, sessionId)` event
-- **Activation (tier 4)**: `activateDevice(uint256 tokenId, bytes32 devicePubKey) returns (sessionId)` — shares the owner + cooldown check with `activate()` via a shared `_activate` internal helper; additionally writes `registeredDevice[tokenId] = devicePubKey` (overwriting any previous binding) and emits `DeviceRegistered(tokenId, devicePubKey)`. Rejects a zero fingerprint (`InvalidDevicePubKey`) because `bytes32(0)` is reserved for "no device bound". Plain `activate()` does not touch `registeredDevice`, so tier 3 deploys continue to work unchanged.
 
 **`Rub3Access.sol`** — concrete, one-time purchase:
 - `purchase(address recipient) payable returns (uint256 tokenId)` — pays `price`, mints next id
@@ -60,7 +59,7 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 - `isValid(uint256 tokenId) view` — `expiresAt[tokenId] > block.timestamp`
 - `Purchased` + `Renewed` events
 
-**Tests:** 43 forge tests (`forge test`) covering metadata, sequential mint, zero-recipient default, over/underpay, supply cap, enumeration via `tokenOfOwnerByIndex`, owner-gated setters, withdraw, subscription expiry, mid-period renewal, post-expiry renewal, nonexistent-token revert, plus activation: first-call success, session-id increments across tokens, cooldown-window revert, post-cooldown success, non-owner revert, nonexistent-token revert, `cooldownReady` in all three states, constructor floor check (`cooldownBlocks < 15`), transfer-then-activate (new owner authorized, old owner rejected), and 10 tier-4 tests covering `activateDevice`: initial zero `registeredDevice`, first-call records key + session, zero-key revert, non-owner revert, cooldown revert with device untouched, post-cooldown overwrite, tier-3→4 upgrade mid-flow, plain `activate` leaves binding intact, shared session counter across `activate`/`activateDevice`, post-transfer replacement.
+**Tests:** 30 forge tests (`forge test`) covering metadata, sequential mint, zero-recipient default, over/underpay, supply cap, enumeration via `tokenOfOwnerByIndex`, owner-gated setters, withdraw, subscription expiry, mid-period renewal, post-expiry renewal, nonexistent-token revert, plus activation: first-call success, session-id increments across tokens, cooldown-window revert, post-cooldown success, non-owner revert, nonexistent-token revert, `cooldownReady` in all three states, constructor floor check (`cooldownBlocks < 15`), and transfer-then-activate (new owner authorized, old owner rejected).
 
 **`script/Deploy.s.sol`** — forge script that deploys either contract from env vars:
 - `CONTRACT_TYPE`, `TOKEN_NAME`, `TOKEN_SYMBOL`, `IDENTITY_MODEL`, `WRAPPER_HASH`, `PRICE` required; `SUPPLY_CAP`, `OWNER`, `COOLDOWN_BLOCKS` (default 1800 ≈ 1hr on Base), `PERIOD` optional
@@ -69,6 +68,7 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 - Local: run against `anvil` with `--rpc-url http://localhost:8545` and a pre-funded Anvil key — no `.env` needed
 
 **Not yet done:**
+- Tier 4: `activateDevice(tokenId, devicePubKey)` + `registeredDevice` mapping — deferred to tier-4 work
 - Base Sepolia deployment
 
 ### 1.6 — Identity model + TBA derivation `[complete]`
