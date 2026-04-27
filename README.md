@@ -4,6 +4,7 @@ Wallet-native software licensing. NFT-gated access for native desktop applicatio
 
 rub3 replaces username/password with wallet connect for native apps. The NFT is the access credential — owned by a wallet, verifiable on-chain, transferrable, composable. The wrapper is the runtime that enforces this on the user's machine.
 
+
 ## How it works
 
 1. Developer packages their binary inside the rub3 wrapper
