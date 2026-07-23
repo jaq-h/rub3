@@ -164,3 +164,19 @@ cast send <CONTRACT_ADDRESS> \
   --rpc-url $BASE_SEPOLIA_RPC_URL \
   --private-key $DEPLOYER_KEY
 ```
+
+## Planned contract evolution
+
+The contracts above are the current, working set. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following — all as **new deploys**, never in-place upgrades:
+
+- **`Rub3Factory`** (§2.3) — canonical deployment path; stamps an immutable 2–3% protocol fee split into `purchase()`/`renew()`; registry and marketplace list factory deploys only
+- **USDC purchases** (§2.2) — `purchaseWithAuthorization` via EIP-3009 `transferWithAuthorization`; gasless for the buyer
+- **Append-only wrapper hash set** (§2.4) — replaces the single rotatable `wrapperHash` slot; old releases stay verifiable, compromised builds are flagged with a reason, token validity is never affected
+- **Successor pointer** (§2.4) — owner-settable, opt-in holder migration; the old contract validates its tokens forever
+- **Per-token renewal snapshot** (§2.4) — `renewPrice[tokenId]` frozen at mint in `Rub3Subscription`
+- **`contentURI`** (§3.1) — content-addressed binary location on-chain, making the contract a complete distribution record
+- **Concurrent seats** (§3.4) — `maxConcurrentSessions[tokenId] = K` generalizing `activeSessionId` for agent fleets
+- **`Rub3Metered`** (§4.1) — per-launch / per-session micropayment billing
+- **`Rub3Registry`** (§3.2) — discovery and verification, never validity; entries double as ERC-8004-style agent cards
+
+Invariants for every license contract, present and future: no burn, no admin transfer, no pause on validation reads, no proxies. Evolution changes what is offered going forward, never what was granted.

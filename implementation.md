@@ -1,5 +1,19 @@
 # rub3 — Implementation Plan
 
+> **Plan revision — July 2026 (agent-first reorientation).**
+> Everything below Phase 1 has been resequenced around a single thesis: agents will do an increasing share of software development, deployment, and purchasing, and they need to buy, verify, run, and resell locally executed software — low cost, high speed, secure payments — with no human in the loop.
+>
+> What changes:
+> - **Headless is the front door.** All session crypto is already native Rust; the webview exists only because humans keep keys in wallet apps. Signer-in/session-out activation (§2.1) becomes the primary mode; the webview is the human fallback floor.
+> - **Machine money.** USDC purchases via EIP-3009 signed authorizations join ETH pricing as the default path (§2.2).
+> - **Revenue at the network layers.** The rails (wrapper, SDK, CLI, contracts) stay open source and free. Revenue is an immutable 2–3% fee stamped by `Rub3Factory` (§2.3), metered per-launch billing only the wrapper can enforce (§4.1), and — once volume shows — a registry-filtered resale marketplace (§4.3).
+> - **The token is the invariant.** No proxies, no revocation surface, no pause on validation. Evolution only changes what is offered going forward, never what was granted (§2.4).
+> - **Distribution completes the loop.** `contentURI` on-chain + `rub3 fetch` + hash verification = discover → pay → fetch → verify → run (§3.1).
+> - **Seats, not devices.** Fleet concurrency is licensed as K on-chain seats per token (§3.4). Tier-4 device binding and binary encryption move to Deferred.
+> - **Human UX polish is demoted, not dropped.** WalletConnect tabs (§1.10), the Preact refactor, and the Tauri plugin move to Phase 5.
+>
+> Phase 1 sections are preserved unchanged below as the build record of what exists today.
+
 ## Phase 1: Proof of Concept
 
 Goal: A working wrapper that gates a Rust binary behind wallet ownership, using a cached SIWE-style session.
@@ -125,7 +139,7 @@ surfaces it to the user, and polls the receipt they paste back.
 - Anvil e2e (`tests/session_onchain_e2e.rs`) extended with `supply_cap`/`next_token_id` pre- and post-purchase checks and a `mint_token_id` parse against the real `purchase()` receipt — all four assertions pass against a live Rub3Access on anvil
 
 **Deferred**
-- Refactor `activation.html` to Preact (vendored `preact.mjs` + `htm.mjs`, custom-protocol handler via `include_dir` — no Node/build step). Tracked in Phase 2 as §2.5.
+- Refactor `activation.html` to Preact (vendored `preact.mjs` + `htm.mjs`, custom-protocol handler via `include_dir` — no Node/build step). Tracked as §5.2.
 - Replace the "paste your tx hash" box with auto-detect + WalletConnect tabs while keeping manual paste as the fallback floor. Tracked as §1.10.
 
 **Verification**
@@ -216,7 +230,9 @@ Branch: `feature/tier-scaffold`. The wrapper is a single crate with Cargo featur
 
 All five tier bundles + `binary-encryption` composition compile clean. The 15 existing lib tests pass under default features. The scaffold establishes the wiring; tier 3 behavior is implemented in §1.8, tier 4 and binary encryption in later phases.
 
-### 1.10 — Frictionless tx confirmation `[not started]`
+### 1.10 — Frictionless tx confirmation `[not started — demoted to Phase 5]`
+
+> **Plan revision:** this work now lands as §5.1, after the agent-native core. The manual-paste floor already works and stays reachable forever; richer confirmation modes are human-surface polish. The specs below (§1.10, §1.10a, §1.10b) apply unchanged when picked up.
 
 The purchase (§1.7) and activate (§1.8) flows currently ask the user to paste a transaction hash back into the webview after sending from their wallet. That manual-paste path is our robust fallback — it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
 
@@ -262,14 +278,14 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 **Scope.** The developer opts in per deployment by supplying a `wc_project_id` (obtained from cloud.reown.com). No single rub3-wide project ID — project IDs are the abuse / rate-limit boundary, and branding (the wallet QR prompt shows the dApp name) should reflect the embedded app, not rub3.
 
 **Rust additions**
-- `ActivationContext` (the `main.rs` constants struct) gains `wc_project_id: Option<&'static str>`. Missing or placeholder → WC tab is hidden. Default in the wrapper's own dev builds is `None`, not a shared project ID — `rub3 pack` (§2.1) rejects a distributable that inherits a placeholder value.
+- `ActivationContext` (the `main.rs` constants struct) gains `wc_project_id: Option<&'static str>`. Missing or placeholder → WC tab is hidden. Default in the wrapper's own dev builds is `None`, not a shared project ID — `rub3 pack` (§2.5) rejects a distributable that inherits a placeholder value.
 - Feature flag `wallet-connect` on the wrapper crate — opt-in because of the vendored JS weight. Composes with `onchain-write`; does not change tier bundle definitions (developer picks `tier-3,wallet-connect` at pack time).
 - `webview.rs::show_purchase` / `show_cooldown` include the project id in the `onShowPurchase` / `onShowCooldown` payload when the feature is compiled in; JS decides whether to render the tab based on its presence.
 
 **Assets (`assets/vendor/`)**
 - `walletconnect-sign-client.mjs` — Reown SignClient v2 bundle (~250 KB).
 - `qrcode.mjs` — ~5 KB QR-from-URI renderer.
-- Both served by the same `include_dir!` custom-protocol handler introduced in §2.5; if §2.5 has not landed yet, this section creates that handler.
+- Both served by the same `include_dir!` custom-protocol handler introduced in §5.2 (Preact refactor); if §5.2 has not landed yet, this section creates that handler.
 
 **Assets (`assets/app/`)**
 - New `wc.js` — init `SignClient`, open a session via `chains: ["eip155:<chain_id>"]`, render the pairing URI as an inline QR, call `client.request({ method: "eth_sendTransaction", params: [{ to, data, value }] })` to dispatch either the purchase or activate tx. Returns the tx hash through the existing `purchase_tx_sent` / `activate_tx_sent` IPC message — reusing the rest of the pipeline.
@@ -283,124 +299,187 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 
 ---
 
-## Phase 2: Developer Tooling
+## Phase 2: Agent-Native Core
 
-### 2.1 — rub3 CLI (`rub3 pack`)
-- Input: compiled binary, app_id, contract address, chain config, session TTL
-- Output: single distributable binary (wrapper + embedded app + config)
-- Binary packing via `include_bytes!` at pack time or compressed payload extracted on first run
-- Cross-platform output targets
+Goal: an agent holding only a funded wallet key can purchase, activate, and launch a wrapped binary in one programmatic pass — and every contract deployed from here on carries the protocol's economics and ownership invariants.
 
-### 2.2 — rub3 CLI (`rub3 deploy`)
-- Deploy `Rub3Access` or `Rub3Subscription` to target chain
-- `--identity access|account` sets `identityModel` in contract
-- `--tba-implementation <address>` required when `--identity account` (ERC-6551 TBA implementation to use)
-- Configurable: price, supply cap, period (subscription), wrapperHash
-- Outputs deployed contract address
+### 2.1 — Headless activation `[not started]`
+
+The agent path: signer in, session out. No webview, no IPC round-trips, no human.
+
+- `activation::ensure_headless(signer)` — the full flow in one call: `tokensOfOwner` → (empty → `purchase()`) → cooldown check → `activate()` → sign session message locally → `verify_local` → persist. Reuses `rpc.rs`, `session.rs`, `session_store.rs` unchanged — the webview was the only human-shaped piece of the pipeline.
+- Signer sources: `RUB3_AGENT_KEY` env var (raw hex; dev/CI), an encrypted local keystore file, and a `Signer` trait so KMS/enclave-backed setups plug in without the wrapper touching raw keys.
+- New `headless` Cargo feature that **excludes** `wry`/`tao` entirely: smaller binary, no GUI dependencies, container-friendly. Interactive and headless builds share every module below `webview.rs`.
+- Wrapper CLI: `rub3-wrapper --headless [--token-id N]`. Exit codes distinguish "insufficient funds" / "no token + sold out" / "cooldown active (retry after N blocks)" so orchestrators can react programmatically.
+- Tests: anvil-gated e2e — fresh key, funded, purchase → activate → session persisted → relaunch hits the fast path. Mirror of `session_onchain_e2e.rs` with zero webview involvement.
+
+### 2.2 — USDC purchase via EIP-3009 `[not started]`
+
+Machine money. Agents hold stablecoins, not ETH; card rails can't onboard them at all.
+
+- Contracts: `purchaseWithAuthorization(...)` — accepts a USDC EIP-3009 `transferWithAuthorization` signature; anyone (developer, facilitator, or the buyer itself) may submit, so the purchase is gasless for the buyer. `priceToken` (USDC address) + `priceAmount` alongside the existing ETH `price`; either path mints identically.
+- Same addition to `renew()` for subscriptions.
+- Wrapper/CLI: headless purchase (§2.1) prefers the USDC path when the contract advertises it; ETH remains the fallback.
+- Compatibility goal: anything that speaks x402 can pay for a rub3 license — this is the prerequisite for Bazaar-style catalog listings (§3.3).
+
+### 2.3 — Rub3Factory + protocol fee `[not started]`
+
+The revenue mechanism, stamped at deploy time and immutable thereafter.
+
+```solidity
+contract Rub3Factory {
+    uint16  public immutable feeBps;    // 200–300; frozen per factory version
+    address public immutable treasury;  // rub3 fee recipient
+    mapping(address => bool) public isDeployed;  // registry + marketplace trust only these
+
+    function deployAccess(...) external returns (address);
+    function deploySubscription(...) external returns (address);
+}
+```
+
+- Fee split executes on-chain inside `purchase()` / `renew()`: `feeBps` to `treasury`, remainder to the developer's `withdraw()` balance. **Immutable per contract** — a developer's economics can never change after deploy; rub3 changes its take only by shipping a new factory version, which affects future deploys only.
+- Direct (non-factory) deployment of the open-source contracts stays possible — it just isn't listable in the registry or marketplace. The fee buys distribution, verification, and liquidity, priced so routing around it costs more than paying it.
+- `rub3 deploy` (§2.5) goes through the factory by default.
+- Never charged: deploys, CLI, SDK, wrapper. No token.
+
+### 2.4 — Ownership invariants `[not started]`
+
+"The token is the invariant; everything else is versioned." Encode it in bytecode, not policy.
+
+- **Append-only wrapper hash set** — replace the single rotatable `wrapperHash` slot with `mapping(bytes32 => HashStatus) { Unknown, Valid, Revoked }` + `addWrapperHash` / `revokeWrapperHash(hash, reason)`. Old releases stay verifiable; compromised builds are flagged on-chain with a reason. Revoking a *binary hash* never touches *token validity*.
+- **Successor pattern** — owner-settable `successor` address on `Rub3License`. Three hard properties: the old contract validates its tokens forever regardless; migration (snapshot-claim or burn-to-mint on the successor) is holder-initiated, never forced; the wrapper accepts "contract X, or X's successor holding a token claimed from X". Covers contract bugs, paid major versions, and chain migration.
+- **Per-token renewal snapshot** — `renewPrice[tokenId]` frozen at mint in `Rub3Subscription`; a developer cannot reprice a held subscription.
+- **No-revocation audit** — verify (and test for) the absence of burn, admin transfer, and any pause affecting `ownerOf` / `isValid` / `activate` for issued tokens. Document the resulting mutability table (see architecture.md §North Star) as a machine-checkable claim agents can audit before buying.
+
+### 2.5 — rub3 CLI `[not started]`
+
+Pulled forward from the old Phase 2 — a CLI is the natural agent interface, and every step is already scriptable.
 
 ```
-rub3 deploy --type access --identity account --tba-implementation 0x... --price 0.05 --chain base
-rub3 deploy --type subscription --identity access --price 0.01 --period 30 --chain base
+rub3 pack --binary ./target/release/myapp --app-id com.example.myapp \
+  --contract 0x1234...abcd --chain base --tier cooldown --headless \
+  --session-ttl 7 --output ./dist/myapp
+
+rub3 deploy --type access --identity account --tba-implementation 0x... \
+  --price-usdc 20 --chain base            # via Rub3Factory by default
+
+rub3 fetch 0x1234...abcd                  # download from contentURI, verify hash on-chain (§3.1)
+
+rub3 register --name myapp --contract 0x1234...abcd
 ```
 
-### 2.3 — rub3 SDK crate
-- `rub3::heartbeat()` — panics if wrapper not alive (Unix socket / named pipe)
-- `rub3::session()` — returns `SessionInfo`
-  ```rust
-  pub struct SessionInfo {
-      pub app_id:     String,
-      pub token_id:   u64,
-      pub user_id:    String,        // stable identity: TBA (account) or wallet (access)
-      pub wallet:     String,        // current signing wallet
-      pub identity:   IdentityModel, // Access | Account
-      pub expires_at: DateTime<Utc>,
-  }
-  ```
-- Application code should key all persistent data on `user_id`, never on `wallet`
-- Socket path passed as env var by wrapper
-- Minimal dependency footprint — no `alloy` or `wry`
+- `pack`: single distributable binary (wrapper + embedded app + config); `--headless` selects the no-webview build; cross-platform targets.
+- `deploy`: factory-mediated; `--identity` sets `identityModel`; `--price-usdc` configures the EIP-3009 path.
+- `fetch`: the agent-side half of distribution (§3.1).
+- `register`: registry entry (§3.2).
 
-### 2.4 — ENS + rub3 registry
-- Deploy `Rub3Registry` on Base
-- `register(appName, contractAddress)` — proves ownership, sets `appName.rub3.eth` subdomain
-- CLI: `rub3 register --name myapp --contract 0x...`
-- Wrapper shows "verified on rub3.eth" badge when registry entry resolves
-
-### 2.5 — Activation UI refactor to Preact `[not started]`
-
-The current `assets/activation.html` is a single 700-line file of vanilla JS
-with hand-rolled DOM manipulation and module-scoped `pending*Ctx` state
-variables. Each screen added (§1.7's purchase screen is the 7th) makes the
-state flow harder to follow.
-
-Goals
-- Replace DOM id lookups with a component tree driven by a single reducer
-  (`phase`, `ctx`) — one reducer action per inbound IPC callback.
-- Keep the asset pipeline build-free: commit `preact.mjs` + `htm.mjs` under
-  `assets/vendor/`, switch the webview from `WebViewBuilder::with_html` to a
-  `with_custom_protocol` handler that serves files from
-  `include_dir!("assets")`. No Node / no bundler in CI.
-- No behavioral changes — the Preact version must drive the same IPC
-  surface, screens, and error paths as today's vanilla version.
-
-Out of scope here (dedicated sub-issues)
-- ENS lookups on the purchase screen (not present today either).
-- USD price conversion.
-
-**Deliverable:** `activation.html` becomes a ~30-line shell; each screen is a
-component in `assets/app/screens/`. No change to Rust-side IPC types.
+**Phase 2 deliverable:** `rub3 deploy` → fund a fresh key → `rub3-wrapper --headless` completes purchase → activation → launch with no human present, and the deployed contract carries the fee split and ownership invariants.
 
 ---
 
-**Phase 2 deliverable:** Developer can deploy, pack, register, and distribute a wallet-gated app with a handful of CLI commands.
+## Phase 3: Distribution & Discovery
+
+Goal: close the loop — discover → pay → fetch → verify → run — so the contract is a complete, self-describing distribution record, and machines doing integration research find rub3 first.
+
+### 3.1 — Content-addressed distribution `[not started]`
+
+- Contract gains `contentURI` (IPFS/Arweave) next to the wrapper hash set — the on-chain record now says *where* the binary lives and *what* it must hash to.
+- `rub3 fetch <contract>` downloads from `contentURI`, verifies against the hash set (rejecting `Revoked`), and reports which release it got.
+- `rub3 pack --publish` pins the artifact and writes `contentURI` + hash in one step.
+- Hosted pinning is an optional paid convenience (off the enforcement path); any pinning service works.
+
+### 3.2 — Registry `[not started]` *(replaces old §2.4)*
+
+- Deploy `Rub3Registry` on Base: `register(appName, contract)` requires `factory.isDeployed(contract)` **and** contract ownership — only canonical deploys are listable.
+- **Discovery, never validity:** delisting removes the badge and the listing; it cannot invalidate a token or a session. This invariant is documented and tested.
+- Each entry doubles as an ERC-8004-style agent card: contract address, price(s), payment methods, `contentURI`, hash set, identity model — machine-readable, so agent spend policies can allowlist "verified rub3 contracts" and audit the §2.4 invariants before buying.
+- Wrapper ENS handling softens accordingly: resolution to a *different* address → hard fail (attack signature); failure to resolve (lapsed name, dead registry, offline) → warn and proceed. The embedded contract address is the root of trust after purchase.
+
+### 3.3 — Agent-facing surface `[not started]`
+
+Distribution to the machines doing the integration research.
+
+- `llms.txt` + docs served as clean Markdown (the repo's docs are already agent-legible; formalize it).
+- Docs MCP server so Claude Code / Cursor pull real method signatures and contract ABIs instead of hallucinating them.
+- One-shot quickstart: a single self-contained prompt/script — "paste this into your coding agent and your binary is wallet-gated on Base Sepolia in minutes" — deterministic, testnet-safe, verifiable. Market that fact explicitly.
+- Listings: blockchain/MCP server directories, x402-adjacent catalogs (once §2.2 lands), ERC-8004 registries.
+- **Beachhead:** wallet-gated MCP servers — ship the example (`examples/hello-mcp/`) and target paid-MCP developers as design partners.
+
+### 3.4 — Concurrent seats `[not started]`
+
+Fleet licensing — the tier the agent economy actually wants.
+
+- Generalize tier 3's single `activeSessionId` into an on-chain semaphore: `maxConcurrentSessions[tokenId] = K` (set at purchase tier / deploy), `activate()` admits up to K live session ids per token, `release()` (or TTL lapse) frees a seat.
+- One license NFT = K concurrent fleet instances; buy another token to scale. Cooldown still rate-limits churn.
+- Wrapper: seat-aware activation + a clear "fleet exhausted, N seats in use" error for orchestrators.
+
+### 3.5 — rub3 SDK crate `[not started]` *(moved from old §2.3)*
+
+- `rub3::heartbeat()` — panics if wrapper is not alive (Unix socket / named pipe)
+- `rub3::session()` — returns `SessionInfo { app_id, token_id, user_id, wallet, identity, expires_at }`
+- Application code keys all persistent data on `user_id`, never on `wallet`
+- Socket path passed as env var by wrapper; minimal dependency footprint — no `alloy` or `wry`
+- Needed early for the MCP-server beachhead (a wrapped server checks its session/heartbeat).
+
+**Phase 3 deliverable:** an agent that has never heard of rub3 can find a wrapped app via the registry/docs surface, buy it in USDC, fetch and verify the binary, and run it — headlessly, end to end.
 
 ---
 
-## Phase 3: Tauri Integration
+## Phase 4: Machine Economy
 
-### 3.1 — Tauri plugin (`tauri-plugin-rub3`)
-- Auto-heartbeat in Tauri event loop
-- Session renewal flow rendered inside the app's own webview — no separate window
-- Frontend JS API:
-  ```js
-  const session = await invoke('plugin:rub3|session');
-  // { token_id, wallet, expires_at }
-  ```
-- Emits `rub3://session-renewed` event when TTL is refreshed in background
+Goal: the payment flows only rub3 can host.
 
-### 3.2 — Tauri starter template
-- `create-rub3-app` scaffold
-- Pre-configured with `tauri-plugin-rub3`, contract config placeholders, wallet connection UI component
-- Works out of the box against Base Sepolia
+### 4.1 — Metered billing (`Rub3Metered`) `[not started]`
 
-**Phase 3 deliverable:** Tauri developers add wallet-gated access with a plugin and a few lines of config.
+- Third billing model: the launch gate requires a micropayment — per launch, per session-hour, or per N launches — settled in USDC (EIP-3009 authorizations batched/settled on-chain).
+- The structural moat: x402 meters API calls because the server is a choke point; the wrapper is the only viable choke point for *locally executed* software. Same protocol fee, much higher-frequency flow.
+- Pilot with one or two paid-MCP-server design partners before generalizing.
+
+### 4.2 — Facilitator `[not started]`
+
+- Hosted relay that submits EIP-3009 purchase/renew/meter authorizations and fronts gas for buyers holding only stablecoins.
+- Bundled into the protocol fee rather than separately priced — its function is making the fee-carrying path also the lowest-friction path.
+- Self-hosting the facilitator remains possible (it's a thin relay); the hosted one is a convenience, not a chokehold.
+
+### 4.3 — License marketplace `[trigger-gated]`
+
+- **Do not build speculatively.** Trigger: organic `Transfer` volume on factory contracts (all on-chain — query for the moment resale behavior emerges).
+- Purpose-built venue for license resale: queryable by agents, filtered to registry-verified contracts, priced in USDC. 1–2% marketplace fee + ERC-2981 royalty split with the developer.
+- This is what makes "licenses as liquid capital assets" real: agents buy for a workload, resell when the job ends.
+
+**Phase 4 deliverable:** revenue flows from all three billing models plus secondary trades, entirely on-chain, with no invoicing and no accounts receivable.
 
 ---
 
-## Phase 4: Polish and Hardening
+## Phase 5: Human Surface *(demoted, not dropped)*
 
-### 4.1 — Background session renewal
-- Wrapper monitors `expires_at` and triggers renewal in the background N hours before expiry
-- User prompted via OS notification: "Your session expires soon — reconnect wallet to continue"
-- App continues running during renewal; suspension only if renewal is declined or fails
+The interactive path stays fully supported — manual tx-hash paste is the floor today and remains reachable forever. Polish lands after the agent path.
 
-### 4.2 — Windows support
-- Named pipes instead of Unix domain sockets for heartbeat IPC
-- MSVC build target for wrapper
-- WalletConnect webview (§1.10b) tested on Windows WebView2
+### 5.1 — Frictionless tx confirmation *(spec in §1.10 / §1.10a / §1.10b)*
+- Auto-detect and WalletConnect tabs on the purchase/cooldown screens, manual paste as the always-available floor. The detailed specs in §1.10a/§1.10b apply unchanged.
 
-### 4.3 — Subscription renewal UI
-- In-wrapper subscription management: view expiry, renew from the tray/menu
-- `rub3::session().expires_at` exposed to app for in-app renewal prompts
+### 5.2 — Activation UI refactor to Preact *(was old §2.5)*
+- Single reducer over `(phase, ctx)`; vendored `preact.mjs` + `htm.mjs` under `assets/vendor/`; `include_dir!` custom-protocol handler; no Node/bundler. No behavioral changes.
 
-### 4.4 — Multi-wallet support
-- User can associate multiple wallets with a session (e.g. hardware wallet for ownership, hot wallet for daily use)
-- Pattern: hot wallet signs sessions, ownership wallet proves NFT ownership once — requires a delegation mechanism (EIP-7702 or a simple delegation registry)
-- Phase 4 exploration — not required for core functionality
+### 5.3 — Tauri integration *(was old Phase 3)*
+- `tauri-plugin-rub3`: auto-heartbeat, session renewal in the app's own webview, `invoke('plugin:rub3|session')` JS API, `rub3://session-renewed` event.
+- `create-rub3-app` starter template preconfigured against Base Sepolia.
 
-### 4.5 — Binary obfuscation (optional)
-- UPX-style compression to raise the bar for casual extraction
-- Documented as a deterrent, not a guarantee
+### 5.4 — Polish *(was old Phase 4, minus deferred items)*
+- Background session renewal with OS notification before expiry
+- Windows support: named pipes for heartbeat IPC, MSVC target, WebView2 testing
+- Subscription renewal UI (view expiry, renew from tray/menu)
+- Multi-wallet delegation (hardware wallet owns, hot wallet signs sessions — EIP-7702 or delegation registry; exploratory)
+
+---
+
+## Deferred
+
+Cut from the active roadmap with rationale; scaffolds are retained.
+
+- **Tier 4 device binding** (`activateDevice`, `registeredDevice`, Secure Enclave/TPM storage) — device binding treats fleet cloning as an attack, but agent fleets clone VMs as a legitimate pattern; seats (§3.4) are the right concurrency primitive. Human anti-sharing pressure also shrinks when the customer is an agent with a wallet and a spend policy. `device.rs` scaffold stays behind the `device-key` feature.
+- **Binary encryption** (AES-256-GCM unwrap, in-memory exec) — large engineering surface against a threat model the agent thesis dissolves; extraction-resistance was never a goal (see ideation.md, "Not DRM"). `decrypt.rs` scaffold stays behind `binary-encryption`.
+- **Binary obfuscation** (UPX-style) — same rationale.
 
 ---
 
@@ -411,10 +490,13 @@ component in `assets/app/screens/`. No change to Rust-side IPC types.
 | Wrapper runtime | Rust |
 | Crypto (secp256k1) | `k256` crate |
 | Ethereum RPC | `alloy` crate |
-| Webview (wallet connection) | `wry` crate |
+| Webview (interactive fallback) | `wry` crate — excluded from `headless` builds |
 | IPC (wrapper ↔ app) | Unix domain sockets / named pipes |
 | Smart contracts | Solidity, OpenZeppelin, Foundry |
 | Target chain | Base (primary). Config-abstracted for other EVM L2s |
+| Machine payments | USDC via EIP-3009 `transferWithAuthorization` |
+| Distribution | Content-addressed storage (IPFS/Arweave), hash + URI on-chain |
+| Agent surface | `llms.txt`, Markdown docs, docs MCP server |
 | CLI | `clap` crate |
 | Packaging | `include_bytes!` embedding or custom bundler |
 
@@ -432,40 +514,29 @@ rub3/
 │       │   ├── main.rs               # CLI entry point, app constants
 │       │   ├── lib.rs                # Public module re-exports (feature-gated)
 │       │   ├── license.rs            # Proof schema, activation message, ECDSA verification
+│       │   ├── identity.rs           # Identity models, ERC-6551 TBA derivation
 │       │   ├── store.rs              # Proof persistence (RUB3_LICENSE_DIR override)
 │       │   ├── activation.rs         # Activation flow orchestration
-│       │   ├── rpc.rs                # On-chain queries (ownerOf, price) via alloy
+│       │   ├── rpc.rs                # On-chain queries (ownerOf, price, cooldown, purchase) via alloy
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC
 │       │   ├── supervisor.rs         # Child process lifecycle, signal forwarding
-│       │   ├── session.rs            # [feature = "session"] session schema, message, verify_local, is_expired
+│       │   ├── session.rs            # [feature = "session"] session schema, message, verify_local
 │       │   ├── session_store.rs      # [feature = "session"] load/save/load_latest_session
-│       │   ├── device.rs             # [scaffold, feature = "device-key"] device keypair mgmt (tier 4)
-│       │   └── decrypt.rs            # [scaffold, feature = "binary-encryption"] AES-256-GCM binary unwrap
+│       │   ├── device.rs             # [scaffold, deferred] device keypair mgmt
+│       │   └── decrypt.rs            # [scaffold, deferred] AES-256-GCM binary unwrap
 │       ├── assets/
 │       │   └── activation.html       # Activation UI
 │       └── tests/
-│           ├── helpers/mod.rs        # Wallet gen, signing, license creation
-│           ├── integration.rs        # Wrapper binary tests
-│           └── license_e2e.rs        # Static + dynamic license verification tests
-├── contracts/                        # Foundry project (§1.5)
+├── contracts/                        # Foundry project (§1.5, §1.6)
 │   ├── src/
-│   │   ├── Rub3License.sol           # Abstract base: ERC-721 + Enumerable + Ownable, metadata, mint helper
+│   │   ├── Rub3License.sol           # Abstract base: ERC-721 + Enumerable + Ownable, activation
 │   │   ├── Rub3Access.sol            # One-time purchase license
 │   │   └── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
 │   ├── test/
-│   │   ├── Rub3Access.t.sol
-│   │   └── Rub3Subscription.t.sol
-│   ├── script/
-│   │   └── Deploy.s.sol              # Deploys either contract from env vars; supports Anvil + Base Sepolia
-│   ├── lib/                          # Git submodules: openzeppelin-contracts@v5.1.0, forge-std
-│   ├── foundry.toml
-│   ├── remappings.txt
-│   ├── .env.example                  # Template for RPC URLs, keys, deploy params
-│   └── contracts.md                  # Local (Anvil) + on-chain (Base Sepolia) setup guide
-├── licenses/
-│   └── com.rub3.example.json         # Valid example license proof
+│   ├── script/Deploy.s.sol
+│   └── contracts.md
+├── licenses/com.rub3.example.json
 ├── scripts/
-│   └── test-e2e.sh                   # Runs cargo test
 ├── architecture.md
 ├── implementation.md
 ├── ideation.md
@@ -476,14 +547,17 @@ Planned (not yet created):
 
 ```
 ├── crates/
-│   ├── rub3-sdk/            # Crate apps link against (heartbeat, session info)
-│   ├── rub3-cli/            # Developer tooling (pack, deploy, register)
-│   └── tauri-plugin-rub3/   # Tauri integration
-├── contracts/
-│   └── src/
-│       └── Rub3Registry.sol # §2.4 — ENS subdomain registry
+│   ├── rub3-sdk/                # §3.5 — heartbeat, session info
+│   ├── rub3-cli/                # §2.5 — pack, deploy, fetch, register
+│   └── tauri-plugin-rub3/       # §5.3
+├── contracts/src/
+│   ├── Rub3Factory.sol          # §2.3 — fee-stamping deploys
+│   ├── Rub3Metered.sol          # §4.1 — per-launch billing
+│   └── Rub3Registry.sol         # §3.2 — discovery + agent cards
+├── llms.txt                     # §3.3
+├── docs-mcp/                    # §3.3 — docs MCP server
 └── examples/
+    ├── hello-mcp/               # §3.3 beachhead — wallet-gated MCP server
     ├── hello-rust/
-    ├── hello-subscription/
-    └── hello-tauri/
+    └── hello-subscription/
 ```

@@ -1,5 +1,28 @@
 # rub3 — Architecture
 
+## North Star
+
+rub3 exists to let machines buy, verify, and resell software without asking anyone's permission. The unit of adoption is one closed loop an agent can complete end to end:
+
+```
+discover → pay → fetch → verify → run → (resell)
+```
+
+Three commitments shape every design decision below:
+
+**Two front doors, one rail.** All session crypto (signing, calldata encoding, receipt polling) is native Rust. Headless activation — signer in, session out — is the primary path and needs no webview; the interactive webview flow is the human fallback floor. Everything below the front door (RPC, session model, persistence, supervision) is shared.
+
+**The token is the invariant; everything else is versioned.** License contracts are immutable — no proxies, no upgrade hooks, no revocation surface. Evolution only ever changes what is *offered* going forward (price, supply, successor contracts, registry listings), never what was *granted* (held tokens, their validation logic, their renewal terms).
+
+| | Can never change | Can change (affects future only) |
+|---|---|---|
+| **Developer** | validity of issued tokens; transfer rights; per-token renewal terms | price for new sales; supply; wrapper hash set (append/flag); successor pointer; registry listing |
+| **rub3** | fee on any deployed contract; validation logic | factory versions; registry curation; marketplace; facilitator |
+
+**Open rails, owned network.** The wrapper, SDK, CLI, and contract templates are open source and free. Revenue lives where network effects live: an immutable 2–3% protocol fee stamped into factory-deployed contracts, metered per-launch billing only the wrapper can enforce, and (once volume exists) marketplace fees on secondary license trades. x402 can meter API calls because the server is a choke point; the wrapper is that choke point for locally executed software.
+
+---
+
 ## Chain
 
 **Base (Ethereum L2)** is the primary target chain.
@@ -21,6 +44,10 @@ name = "base"
 rpc  = "https://mainnet.base.org"
 chain_id = 8453
 ```
+
+### Money
+
+Native ETH pricing works today. The default for the machine economy is **USDC via EIP-3009** (`transferWithAuthorization` — the primitive x402 uses): the buyer signs a payment authorization off-chain, and anyone — the developer, a facilitator, or the buyer itself — submits it on-chain. Gasless for the buyer; an agent holding only stablecoins can purchase without ever owning ETH. Planned in implementation.md §2.2; ETH remains supported as a parallel path.
 
 ---
 
@@ -96,6 +123,8 @@ If the developer wants the TBA to actually hold assets or execute transactions o
 
 The developer chooses a security tier when packaging their app. Each tier is a coherent bundle of verification behaviors — higher tiers add on-chain enforcement and device binding to prevent license sharing.
 
+**Agent-consumer note.** The ladder above tier 2 is calibrated to *human* piracy economics (signing oracles, license sharing). Agent customers change the calculus: agents don't pirate — paying cents in USDC is cheaper than engineering theft, and their operators impose spend policy and compliance. Meanwhile agent fleets legitimately clone VMs and scale horizontally, which device binding treats as an attack. In practice: tiers 0–2 cover most agent-consumed software; tier 3's session counter generalizes to **concurrent seats** (`maxConcurrentSessions[tokenId] = K` — an on-chain semaphore licensing K fleet instances per token; implementation.md §3.4); and tier 4 plus binary encryption are **deferred** (implementation.md §Deferred).
+
 ```toml
 [license]
 tier = "cooldown"           # offline | cached | verified | cooldown | hardened
@@ -166,7 +195,7 @@ Adds on-chain activation with a cooldown and session revocation counter. At acti
 - **Verification**: Signature + expiry + `ownerOf()` + `activeSessionId()` view call. If session_id doesn't match on-chain value, the session has been superseded.
 - **Sharing risk**: Holder can generate 1 session per cooldown window. Creating a session for a pirate kills the holder's own session. The holder must choose: keep access or give it away. Cannot scale to multiple pirates.
 
-### Tier 4: `hardened`
+### Tier 4: `hardened` *(deferred — see implementation.md §Deferred)*
 
 Adds a device-bound ephemeral keypair. At activation, the wrapper generates a fresh secp256k1 keypair (the "device key"). The public key is registered on-chain alongside the session. At every launch, the wrapper signs the current block hash with its device key and verifies the signature matches the on-chain registered public key.
 
@@ -324,10 +353,11 @@ Session files are keyed on both app_id and token_id: `~/.rub3/sessions/<app_id>/
 
 ## Transaction Confirmation
 
-Tiers 3-4 require the user to send at least one on-chain tx (purchase and/or activate) during the activation flow. The wrapper never holds keys and never broadcasts txs itself — it encodes calldata, surfaces it to the user, and waits for the tx to confirm. How that "wait" happens is an orthogonal concern with three implementations, rendered side-by-side as tabs on the purchase and cooldown screens:
+Tiers 3-4 require at least one on-chain tx (purchase and/or activate) during the activation flow. In **interactive mode** the wrapper never holds keys and never broadcasts txs itself — it encodes calldata, surfaces it to the user, and waits for the tx to confirm. In **headless mode** (planned, implementation.md §2.1) the operator supplies a signer explicitly — env key, keystore, or KMS-backed `Signer` impl — and the wrapper signs and broadcasts directly; there is no confirmation UI because there is no user round-trip. For interactive builds, how the "wait" happens is an orthogonal concern with three implementations, rendered side-by-side as tabs on the purchase and cooldown screens:
 
 | Mode | Reliance | Tolerant of offline activation | JS bundle |
 |---|---|---|---|
+| **Headless** *(planned — agent default)* | operator-supplied signer + chain RPC | n/a — no user round-trip | none |
 | **WalletConnect** | Reown relay + chain RPC | no | ~255 KB vendored |
 | **Auto-detect** | Chain RPC (filter `eth_getLogs` / read `lastActivationBlock`) | no | none |
 | **Manual** | User copies a tx hash back into the wrapper | yes (paste later) | none |
@@ -431,18 +461,54 @@ Key behaviors:
 - **Device binding (tier 4)**: `registeredDevice` stores the public key of the device that activated. The wrapper signs each launch's block hash with its device private key and verifies against this on-chain value.
 - **Single active session**: Creating a new session (for a pirate) immediately invalidates the holder's own session. The holder must choose between keeping access or giving it away.
 
-#### Rub3Registry
+#### Rub3Factory *(planned — implementation.md §2.3)*
 
-Permissionless registry under `rub3.eth`:
+All canonical deployments go through a factory that stamps the protocol's economics and invariants:
+
+```solidity
+contract Rub3Factory {
+    uint16  public immutable feeBps;    // 200–300; frozen per factory version
+    address public immutable treasury;  // rub3 fee recipient
+    mapping(address => bool) public isDeployed;  // registry + marketplace trust only these
+
+    function deployAccess(...) external returns (address);
+    function deploySubscription(...) external returns (address);
+}
+```
+
+The fee split executes on-chain inside `purchase()` / `renew()`: `feeBps` to `treasury`, remainder to the developer. **Immutable per contract** — a developer's economics can never change after deploy; rub3 changes its take only by shipping a new factory version, which affects future deploys only. Direct (non-factory) deployment of the open-source contracts is always possible — it just isn't listable in the registry or marketplace. The fee buys distribution, verification, and liquidity, priced so routing around it costs more than paying it.
+
+#### Rub3Metered *(planned — implementation.md §4.1)*
+
+A third billing model unique to runtime enforcement: the launch gate requires a micropayment (per launch, per session-hour, or per N launches) settled in USDC. Same protocol fee, much higher-frequency flow than one-time sales.
+
+#### Ownership invariants (all license contracts)
+
+Enforced by construction in the factory templates, machine-verifiable by any buyer before purchase:
+
+- **No revocation surface.** No burn, no admin transfer, no pause on `ownerOf` / `isValid` / `activate` for issued tokens. Not policy — absent from the bytecode.
+- **No proxies.** Contract code, and therefore license terms, are frozen at deploy.
+- **Renewal terms frozen per token.** `renewPrice[tokenId]` snapshots at mint (planned change to `Rub3Subscription`); a developer cannot reprice a held subscription.
+- **Append-only wrapper hash set.** Replaces the single rotatable `wrapperHash` slot — see Binary Protection.
+- **Successor pattern for migrations.** Owner-settable `successor()` pointer; the old contract validates its tokens forever; migration (snapshot-claim or burn-to-mint) is holder-initiated, never forced. Covers contract bugs, paid major versions, and chain migration.
+
+Developers can deprecate *offerings* — stop selling, stop updating, sunset a version. They cannot deprecate *entitlements*.
+
+#### Rub3Registry *(planned — implementation.md §3.2)*
+
+Discovery and verification, **never validity** — delisting removes the badge and the listing; it cannot invalidate a token or a session.
 
 ```solidity
 contract Rub3Registry {
     function register(string calldata appName, address licenseContract) external {
+        require(factory.isDeployed(licenseContract), "not canonical");
         require(IOwnable(licenseContract).owner() == msg.sender, "not contract owner");
-        // sets appName.rub3.eth → licenseContract
+        // sets appName.rub3.eth → licenseContract + agent card
     }
 }
 ```
+
+Only factory deploys are listable. Each entry doubles as an ERC-8004-style agent card — contract address, price(s), payment methods, content URI, hash set, identity model — so agent purchasing policies can allowlist "verified rub3 contracts" and machine-audit the invariants above before buying.
 
 ---
 
@@ -502,6 +568,8 @@ rub3-wrapper
     ├── Rust binary mode: exec embedded binary
     └── Tauri mode: launch Tauri app entry point
 ```
+
+**Headless mode (planned — implementation.md §2.1).** Everything in the tree above except the Wallet Connection webview is signer-agnostic. `activation::ensure_headless(signer)` runs the same pipeline — enumerate tokens, purchase if empty, cooldown check, activate, sign session, persist — with an operator-supplied signer (env key, keystore, or KMS-backed trait impl). The `headless` build excludes `wry`/`tao` entirely: smaller binary, no GUI dependencies, container-friendly. This is the primary path for agent-operated software; the webview is the human fallback.
 
 #### Source layout (current)
 
@@ -637,8 +705,9 @@ Wrapper config embeds:
 At session creation:
   1. Resolve ENS → address
   2. Compare to embedded contract address
-  3. Mismatch → refuse, warn user
-  4. Match → proceed
+  3. Resolves to a DIFFERENT address → hard fail (active-attack signature)
+  4. Fails to resolve (lapsed name, dead registry, offline) → warn and proceed
+  5. Match → proceed, show verified badge
 ```
 
 ### Two layers of trust
@@ -647,11 +716,15 @@ At session creation:
 
 **Layer 2 — rub3.eth subdomain** (`myapp.rub3.eth`) — permissionless, on-chain proof of contract ownership. Adds "verified" badge in UI.
 
+ENS and the registry are **purchase-time trust signals, not launch-time dependencies**. The embedded contract address is the root of trust after first purchase — a lapsed ENS registration or a registry edit must never brick re-activation for paid holders. Registry state affects discovery and badges only; validity comes from the license contract alone.
+
 ---
 
 ## Binary Protection
 
 ### Binary verification (all tiers)
+
+Current (single slot):
 
 ```solidity
 bytes32 public wrapperHash;
@@ -661,9 +734,23 @@ function setWrapperHash(bytes32 hash) external onlyOwner {
 }
 ```
 
-Trust chain: **ENS → contract → binary hash → running wrapper**
+Planned (append-only set — implementation.md §2.4). Rotating a single slot invalidates the verifiability of every previously downloaded binary, so the slot becomes a set:
 
-### Binary encryption (tiers 3-4, optional)
+```solidity
+enum HashStatus { Unknown, Valid, Revoked }
+mapping(bytes32 => HashStatus) public wrapperHashes;
+
+function addWrapperHash(bytes32 hash) external onlyOwner;                     // append a release
+function revokeWrapperHash(bytes32 hash, string calldata reason) external onlyOwner;  // flag a compromised build
+```
+
+Old binaries stay verifiable; a compromised release is flagged on-chain with a reason. Revoking a **binary hash** never touches **token validity** — the holder downloads a patched build and the same license just works. Honest limit: the hash set informs new downloads and activations; it cannot retroactively disable compromised binaries already running. A kill switch that could would be a revocation mechanism, and it must not exist.
+
+Planned alongside it: `contentURI` (IPFS/Arweave) recorded on the contract, making it a complete distribution record — `rub3 fetch <contract>` downloads the binary and verifies its hash on-chain (implementation.md §3.1).
+
+Trust chain: **ENS → contract → content URI → binary hash → running wrapper**
+
+### Binary encryption (tiers 3-4, optional) *(deferred — see implementation.md §Deferred)*
 
 Without encryption, the app binary is embedded in the wrapper as plaintext bytes — extractable with `binwalk`, a hex editor, or by reading the wrapper source to find the offset. Binary encryption makes the distributed file useless without a valid on-chain session.
 
@@ -989,7 +1076,7 @@ Session files stored at `~/.rub3/sessions/<app_id>/<token_id>.json` — one per 
 
 ### Wallet as trust boundary
 
-The wrapper never holds a wallet private key. Signing happens in the wallet via WalletConnect. Session signatures are free — no on-chain effect. The wrapper does hold a device private key (tier 4), but this is an ephemeral key used only for device binding — it cannot sign transactions or move funds.
+In interactive mode the wrapper never holds a wallet private key — signing happens in the user's wallet. In headless mode (planned, implementation.md §2.1) the operator explicitly supplies a signer (env key, keystore, or KMS-backed trait impl); key custody is the operator's policy decision, and serious agent deployments front it with spending limits and allowlists rather than granting an unconstrained wallet. Session signatures are free — no on-chain effect. The wrapper does hold a device private key (tier 4), but this is an ephemeral key used only for device binding — it cannot sign transactions or move funds.
 
 ### Threat model by tier
 
@@ -1035,7 +1122,8 @@ Runtime:       heartbeat IPC (app cannot run without wrapper)
 
 ## Scaling Considerations
 
-- Contract deployment: one per app, ~$1–5 on Base
+- Contract deployment: one per app, ~$1–5 on Base (via `Rub3Factory` once §2.3 lands — deploys are never charged by rub3)
+- Protocol fee: 2–3% split executed inside `purchase()`/`renew()` on factory deploys — no additional infrastructure; settlement is continuous and on-chain
 - RPC read calls: varies by tier. Tier 0: zero. Tiers 1-2: one per renewal. Tiers 3-4: one per launch (`activeSessionId` + `ownerOf`). Public RPC or Alchemy free tier sufficient.
 - RPC write calls: tiers 3-4 only. One `activate()`/`activateDevice()` tx per session creation. ~$0.001 on Base.
 - Session files: ~500 bytes each, one per token per device. Negligible storage.

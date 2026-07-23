@@ -1,8 +1,8 @@
 # rub3
 
-Wallet-native software licensing. NFT-gated access for native desktop applications, without a browser.
+Wallet-native software licensing for the machine economy. NFT-gated access for locally executed software — CLI tools, MCP servers, desktop apps — without a browser or a backend.
 
-rub3 replaces username/password with wallet connect for native apps. The NFT is the access credential — owned by a wallet, verifiable on-chain, transferrable, composable. The wrapper is the runtime that enforces this on the user's machine.
+rub3 lets machines (and humans) buy, verify, run, and resell software without asking anyone's permission. The NFT is the access credential — owned by a wallet, verifiable on-chain, transferrable, composable — which also makes it a liquid asset: buy a license for a workload, resell it when the job ends. The wrapper is the runtime that enforces this on the machine where the software runs.
 
 ## How it works
 
@@ -15,6 +15,8 @@ rub3 replaces username/password with wallet connect for native apps. The NFT is 
 
 There is no backend. The chain is the source of truth. The wallet is the identity.
 
+The flow above is the interactive (human) path that exists today. The top roadmap item is headless activation — signer in, session out, no webview — so an agent can complete the same loop programmatically. See [implementation.md](implementation.md) Phase 2.
+
 ## Project structure
 
 ```
@@ -25,6 +27,7 @@ rub3/
 │       │   ├── main.rs               # CLI entry point (clap), app constants
 │       │   ├── lib.rs                # Public module re-exports (feature-gated)
 │       │   ├── license.rs            # License proof schema, activation message, ECDSA verification
+│       │   ├── identity.rs           # Identity models (access/account), ERC-6551 TBA derivation
 │       │   ├── store.rs              # Proof persistence (~/.rub3/licenses/ or RUB3_LICENSE_DIR)
 │       │   ├── activation.rs         # Activation flow orchestration (load proof → verify → webview)
 │       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner) via alloy
@@ -140,10 +143,22 @@ See [implementation.md](implementation.md) for the full roadmap.
 - Session model (tier 1-4): schema, `session_message()` hash, `verify_local()`, `is_expired()`, `new_nonce()`, full persistence with `load_latest_session()`
 - Tier-3 activation flow (cooldown feature): cooldown screen → user-submitted `activate()` tx → receipt polling (10 × 3s) → `activeSessionId` read → session-sign screen → `verify_local` → session persisted. Fast path tries session first, falls back to legacy `LicenseProof` for zero-contract builds.
 - Tier-3 on-chain re-verification: `session::verify_onchain` confirms tx status/contract/block hash; `try_session_fast_path` re-verifies ~1 in 5 cold starts (offline errors fall open, verdict-contradicting errors fall closed). Covered by an anvil-gated E2E test (`tests/session_onchain_e2e.rs`)
-- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 30 forge tests
+- Identity models: `identityModel` + `tbaImplementation` on-chain, local ERC-6551 TBA derivation (`identity.rs`), identity fields signed into the session preimage
+- Purchase UI: in-wrapper purchase flow for tier 3+ (price/supply reads, calldata encoding, receipt polling, minted-token recovery)
+- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 33 forge tests
 - Deploy script: `forge script` deploys either contract to any EVM chain from env vars
 
-**Not yet implemented:** WalletConnect integration, cooldown extension in contracts, ENS verification, identity models (TBA derivation), purchase UI, session wiring into activation flow, CLI tooling, SDK, Tauri plugin.
+**Not yet implemented (agent-first roadmap):** headless activation (signer in, session out — no webview), USDC purchases via EIP-3009, `Rub3Factory` with immutable protocol fee split, ownership-invariant hardening (append-only wrapper hash set, successor pointer, per-token renewal snapshot), CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
+
+## Direction
+
+The plan is agent-first (July 2026 revision — see [implementation.md](implementation.md)):
+
+- **Let machines buy, verify, and resell software without asking anyone's permission.** The adoption unit is one closed loop an agent completes end to end: discover → pay → fetch → verify → run → resell.
+- **Open-source the rails; own the factory, registry, and marketplace.** Revenue is a 2–3% fee on a payment flow only the wrapper can meter — priced low enough that no agent bothers to route around it. No token.
+- **The token is the invariant; everything else is versioned.** Evolution only ever changes what is offered going forward (price, supply, successors, listings), never what was granted (held tokens, their validation, their renewal terms). No proxies, no revocation surface — structurally, not by promise.
+
+First target market: wallet-gated MCP servers — paid MCP servers have no licensing primitive today, and agents are their natural customers.
 
 ## Design documents
 
