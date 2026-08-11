@@ -8,15 +8,31 @@ name = "rub3-wrapper"
 path = "src/main.rs"
 
 [features]
-# Default: tier 2 matches the current runtime behaviour (signature + TTL + on-chain ownership check).
-default = ["tier-2"]
+# Default: tier 2 + the interactive webview — matches the historical runtime
+# behaviour (signature + TTL + on-chain ownership check, human activation UI).
+default = ["tier-2", "webview"]
 
 # ── Tier bundles (pick exactly one at pack time) ──────────────────────────────
+#
+# Tier bundles are pure capability sets. They deliberately do NOT pull in a
+# front door: compose them with `webview` (human) and/or `headless` (agent).
 tier-0 = []
 tier-1 = ["session"]
 tier-2 = ["session", "onchain-read"]
 tier-3 = ["session", "onchain-read", "onchain-write", "cooldown"]
 tier-4 = ["tier-3", "device-key"]
+
+# ── Front doors (pick at least one; they compose) ─────────────────────────────
+# `webview`  — native activation window (wry/tao). The human fallback floor.
+# `headless` — signer-in / session-out activation. No GUI dependency at all;
+#              a `headless`-only build links neither `wry` nor `tao`.
+webview  = ["dep:wry", "dep:tao"]
+headless = [
+    "session", "onchain-read", "onchain-write", "cooldown",
+    "dep:zeroize",
+    "alloy/signer-local",
+    "alloy/signer-keystore",
+]
 
 # ── Composable capability flags (enabled by tier bundles) ─────────────────────
 session         = ["dep:rand"]
@@ -38,14 +54,15 @@ dirs = "5"
 alloy = { version = "1", features = ["providers", "transport-http", "contract"] }
 url = "2"
 tokio = { version = "1", features = ["rt"] }
-wry = "0.43"
-tao = "0.30"
 chrono = { version = "0.4", features = ["serde"] }
 
-# Optional — pulled in by the capability flags above.
-rand = { version = "0.8", optional = true }
+# Optional — pulled in by the capability / front-door flags above.
+wry     = { version = "0.43", optional = true }
+tao     = { version = "0.30", optional = true }
+rand    = { version = "0.8", optional = true }
 keyring = { version = "2", optional = true }
 aes-gcm = { version = "0.10", optional = true }
+zeroize = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }

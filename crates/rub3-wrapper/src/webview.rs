@@ -15,12 +15,6 @@ use crate::session::Session;
 
 const ACTIVATION_HTML: &str = include_str!("../assets/activation.html");
 
-/// Tx receipt polling — attempts × interval = total timeout.
-#[cfg(feature = "cooldown")]
-const TX_POLL_ATTEMPTS:     u32 = 10;
-#[cfg(feature = "cooldown")]
-const TX_POLL_INTERVAL_SECS: u64 = 3;
-
 // ── Public types ──────────────────────────────────────────────────────────────
 
 pub struct ActivationContext {
@@ -462,7 +456,7 @@ impl IpcState {
                 serde_json::json!("Waiting for purchase() tx to land…")
             ));
 
-            let receipt = match poll_receipt(&state.rpc_url, &tx_hash) {
+            let receipt = match crate::rpc::wait_for_receipt(&state.rpc_url, &tx_hash) {
                 Ok(r) => r,
                 Err(e) => {
                     state.eval_err(&format!("tx polling failed: {e}"));
@@ -525,7 +519,7 @@ impl IpcState {
                 serde_json::json!("Waiting for activate() tx to land…")
             ));
 
-            let receipt = match poll_receipt(&state.rpc_url, &tx_hash) {
+            let receipt = match crate::rpc::wait_for_receipt(&state.rpc_url, &tx_hash) {
                 Ok(r) => r,
                 Err(e) => {
                     state.eval_err(&format!("tx polling failed: {e}"));
@@ -556,34 +550,6 @@ impl IpcState {
                 }
             };
 
-            let session_id = match crate::rpc::active_session_id(
-                &state.rpc_url, contract_addr, token_id,
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    state.eval_err(&format!("failed to read activeSessionId: {e}"));
-                    return;
-                }
-            };
-
-            // ── Identity model + TBA derivation ─────────────────────────────
-            // Read identityModel once; for account-model deploys, read the
-            // tbaImplementation and derive the TBA locally (pure CREATE2).
-            let model_u8 = match crate::rpc::identity_model(&state.rpc_url, contract_addr) {
-                Ok(m) => m,
-                Err(e) => {
-                    state.eval_err(&format!("failed to read identityModel: {e}"));
-                    return;
-                }
-            };
-            let model = match crate::identity::IdentityModel::from_u8(model_u8) {
-                Some(m) => m,
-                None => {
-                    state.eval_err(&format!("contract returned unknown identityModel = {model_u8}"));
-                    return;
-                }
-            };
-
             let wallet_addr: alloy::primitives::Address = match owner_address.parse() {
                 Ok(a) => a,
                 Err(_) => {
@@ -592,60 +558,42 @@ impl IpcState {
                 }
             };
 
-            let tba_addr_opt: Option<alloy::primitives::Address> = match model {
-                crate::identity::IdentityModel::Access => None,
-                crate::identity::IdentityModel::Account => {
-                    let impl_addr = match crate::rpc::tba_implementation(
-                        &state.rpc_url, contract_addr,
-                    ) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            state.eval_err(&format!("failed to read tbaImplementation: {e}"));
-                            return;
-                        }
-                    };
-                    Some(crate::identity::derive_tba(
-                        impl_addr, state.chain_id, contract_addr, token_id,
-                    ))
+            // Reads activeSessionId + the identity model, derives the TBA for
+            // account-model deploys, and builds the preimage. Shared with the
+            // headless door so both sign identical bytes for identical facts.
+            let draft = match crate::session::draft_from_activation(
+                &state.rpc_url,
+                contract_addr,
+                state.chain_id,
+                &state.app_id,
+                token_id,
+                wallet_addr,
+                &receipt.block_hash,
+                state.session_ttl_secs,
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    state.eval_err(&e);
+                    return;
                 }
             };
 
-            let user_id = crate::identity::resolve_user_id(model, wallet_addr, tba_addr_opt);
-            let tba_str = tba_addr_opt.map(crate::identity::format_addr);
-            let identity_str = model.as_str();
-
-            let nonce = crate::session::new_nonce();
-            let expires_at = (chrono::Utc::now()
-                + chrono::Duration::seconds(state.session_ttl_secs))
-            .to_rfc3339();
-
-            let session_msg = crate::session::session_message(
-                &state.app_id,
-                token_id,
-                identity_str,
-                &user_id,
-                &owner_address,
-                &nonce,
-                Some(&expires_at),
-                Some(&receipt.block_hash),
-                Some(session_id),
-                None,
-            );
-            let session_msg_hex = format!("0x{}", hex::encode(session_msg));
-
+            // `ownerAddress` echoes back the draft's normalised casing: the
+            // preimage commits to that exact string, so the value JS returns in
+            // `session_signed` has to be the one that was hashed.
             let payload = serde_json::json!({
                 "tokenId":             token_id,
-                "ownerAddress":        owner_address,
-                "identity":            identity_str,
-                "userId":              user_id,
-                "tba":                 tba_str,
+                "ownerAddress":        draft.wallet,
+                "identity":            draft.identity,
+                "userId":              draft.user_id,
+                "tba":                 draft.tba,
                 "txHash":              tx_hash,
                 "blockNumber":         receipt.block_number,
                 "blockHash":           receipt.block_hash,
-                "sessionId":           session_id,
-                "nonce":               nonce,
-                "expiresAt":           expires_at,
-                "sessionMessage":      session_msg_hex,
+                "sessionId":           draft.session_id,
+                "nonce":               draft.nonce,
+                "expiresAt":           draft.expires_at,
+                "sessionMessage":      draft.message_hex(),
             });
             state.eval(format!("window.rub3.onTxConfirmed({})", payload));
         });
@@ -714,22 +662,3 @@ struct FinalizeArgs {
     activation_block_hash: String,
 }
 
-/// Poll `get_tx_receipt` until mined or timeout. Returns the receipt on
-/// success, or an error string on timeout/malformed hash.
-#[cfg(feature = "cooldown")]
-fn poll_receipt(rpc_url: &str, tx_hash: &str) -> Result<crate::rpc::TxReceipt, String> {
-    for attempt in 0..TX_POLL_ATTEMPTS {
-        match crate::rpc::get_tx_receipt(rpc_url, tx_hash) {
-            Ok(Some(r)) => return Ok(r),
-            Ok(None)    => {}
-            Err(e)      => return Err(e.to_string()),
-        }
-        if attempt + 1 < TX_POLL_ATTEMPTS {
-            std::thread::sleep(std::time::Duration::from_secs(TX_POLL_INTERVAL_SECS));
-        }
-    }
-    Err(format!(
-        "tx not confirmed within {}s",
-        TX_POLL_ATTEMPTS as u64 * TX_POLL_INTERVAL_SECS
-    ))
-}

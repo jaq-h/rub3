@@ -286,6 +286,119 @@ pub fn should_reverify() -> bool {
     rand::thread_rng().gen_range(0..5) == 0
 }
 
+// ── Tier-3 session drafting ───────────────────────────────────────────────────
+
+/// Everything a confirmed `activate()` transaction determines about the session
+/// that follows it — everything except the wallet signature.
+///
+/// Produced by [`draft_from_activation`] and consumed by both front doors: the
+/// webview serialises it to JS for the signing screen, headless signs `message`
+/// on the spot. Keeping one producer means the two doors can never drift into
+/// signing different preimages for the same on-chain facts.
+#[cfg(feature = "cooldown")]
+#[derive(Debug, Clone)]
+pub struct SessionDraft {
+    /// Wire string for the contract's identity model: "access" | "account".
+    pub identity: String,
+    /// The holder address, lower-cased. The preimage commits to this exact
+    /// string, so `Session.wallet` must be set from here rather than from
+    /// whatever casing the caller started with.
+    pub wallet: String,
+    /// Stable identity key the app sees: wallet (access) or TBA (account).
+    pub user_id: String,
+    /// Derived token-bound account — account model only.
+    pub tba: Option<String>,
+    pub nonce: String,
+    pub expires_at: String,
+    /// Session id the contract assigned to this activation.
+    pub session_id: u64,
+    /// The 32-byte preimage the wallet signs.
+    pub message: [u8; 32],
+}
+
+#[cfg(feature = "cooldown")]
+impl SessionDraft {
+    /// `message` as 0x-hex, for display and for IPC payloads.
+    pub fn message_hex(&self) -> String {
+        format!("0x{}", hex::encode(self.message))
+    }
+}
+
+/// Reads the on-chain facts a fresh tier-3 session binds to, and assembles the
+/// preimage the wallet must sign.
+///
+/// Given a landed `activate()` receipt, this reads `activeSessionId`, resolves
+/// the contract's identity model (deriving the ERC-6551 TBA locally for
+/// account-model deploys), mints a nonce, computes `expires_at` from the TTL,
+/// and builds the session message over all of it.
+///
+/// `block_hash` is the activation transaction's block hash, which binds the
+/// session to a specific point on the chain — `verify_onchain` re-checks it.
+///
+/// Errors are returned as display strings: the callers surface them to a UI or
+/// wrap them in their own error type, and none of them branch on the variant.
+#[cfg(feature = "cooldown")]
+#[allow(clippy::too_many_arguments)]
+pub fn draft_from_activation(
+    rpc_url: &str,
+    contract: alloy::primitives::Address,
+    chain_id: u64,
+    app_id: &str,
+    token_id: u64,
+    wallet: alloy::primitives::Address,
+    block_hash: &str,
+    session_ttl_secs: i64,
+) -> Result<SessionDraft, String> {
+    let session_id = crate::rpc::active_session_id(rpc_url, contract, token_id)
+        .map_err(|e| format!("failed to read activeSessionId: {e}"))?;
+
+    // Identity model + TBA derivation. The TBA is pure CREATE2 — no RPC beyond
+    // reading the implementation address the contract was deployed with.
+    let model_u8 = crate::rpc::identity_model(rpc_url, contract)
+        .map_err(|e| format!("failed to read identityModel: {e}"))?;
+    let model = crate::identity::IdentityModel::from_u8(model_u8)
+        .ok_or_else(|| format!("contract returned unknown identityModel = {model_u8}"))?;
+
+    let tba = match model {
+        crate::identity::IdentityModel::Access => None,
+        crate::identity::IdentityModel::Account => {
+            let implementation = crate::rpc::tba_implementation(rpc_url, contract)
+                .map_err(|e| format!("failed to read tbaImplementation: {e}"))?;
+            Some(crate::identity::derive_tba(implementation, chain_id, contract, token_id))
+        }
+    };
+
+    let user_id = crate::identity::resolve_user_id(model, wallet, tba);
+    let wallet_str = crate::identity::format_addr(wallet);
+    let nonce = new_nonce();
+    let expires_at =
+        (chrono::Utc::now() + chrono::Duration::seconds(session_ttl_secs)).to_rfc3339();
+
+    let message = session_message(
+        app_id,
+        token_id,
+        model.as_str(),
+        &user_id,
+        &wallet_str,
+        &nonce,
+        Some(&expires_at),
+        Some(block_hash),
+        Some(session_id),
+        None,
+    );
+
+    Ok(SessionDraft {
+        identity: model.as_str().to_string(),
+        wallet: wallet_str,
+        user_id,
+        tba: tba.map(crate::identity::format_addr),
+        nonce,
+        expires_at,
+        session_id,
+        message,
+    })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

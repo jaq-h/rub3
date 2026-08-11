@@ -278,6 +278,38 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
     })
 }
 
+/// Tx receipt polling budget — attempts × interval = total wait.
+///
+/// 30s covers Base's ~2s soft finality with a wide margin; it is also the
+/// budget the interactive flow has always used, kept identical here so the
+/// human and agent front doors behave the same when a chain is congested.
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+pub const RECEIPT_POLL_ATTEMPTS: u32 = 10;
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+pub const RECEIPT_POLL_INTERVAL_SECS: u64 = 3;
+
+/// Polls `get_tx_receipt` until the transaction is mined or the budget runs out.
+///
+/// Shared by both front doors: the webview poller thread and the headless
+/// flow call this rather than each keeping their own loop.
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+pub fn wait_for_receipt(rpc_url: &str, tx_hash: &str) -> Result<TxReceipt, String> {
+    for attempt in 0..RECEIPT_POLL_ATTEMPTS {
+        match get_tx_receipt(rpc_url, tx_hash) {
+            Ok(Some(r)) => return Ok(r),
+            Ok(None) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+        if attempt + 1 < RECEIPT_POLL_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_secs(RECEIPT_POLL_INTERVAL_SECS));
+        }
+    }
+    Err(format!(
+        "tx not confirmed within {}s",
+        RECEIPT_POLL_ATTEMPTS as u64 * RECEIPT_POLL_INTERVAL_SECS
+    ))
+}
+
 // ── Identity model ────────────────────────────────────────────────────────────
 
 /// Reads the contract's `identityModel()` getter. Returns the raw `uint8`:
@@ -309,6 +341,22 @@ pub fn tba_implementation(rpc_url: &str, contract: Address) -> Result<Address, R
             .await
             .map_err(|e| RpcError::Contract(e.to_string()))?;
         Ok(r)
+    })
+}
+
+/// Returns the chain id the RPC endpoint is serving.
+///
+/// Headless activation compares this against the chain id the binary was
+/// packed for, before it signs anything: a wrapper pointed at the wrong
+/// endpoint would otherwise produce a perfectly valid transaction for the
+/// wrong network.
+pub fn chain_id(rpc_url: &str) -> Result<u64, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        provider
+            .get_chain_id()
+            .await
+            .map_err(|e| RpcError::Transport(e.to_string()))
     })
 }
 
@@ -496,6 +544,12 @@ mod tests {
     #[test]
     fn get_tx_receipt_invalid_hash_returns_transport_error() {
         let err = get_tx_receipt(VALID_RPC, "not-a-hash").unwrap_err();
+        assert!(matches!(err, RpcError::Transport(_)));
+    }
+
+    #[test]
+    fn chain_id_invalid_url_returns_transport_error() {
+        let err = chain_id("not-a-url").unwrap_err();
         assert!(matches!(err, RpcError::Transport(_)));
     }
 
