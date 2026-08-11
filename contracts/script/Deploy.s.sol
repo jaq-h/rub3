@@ -12,7 +12,6 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 ///   TOKEN_NAME         — ERC-721 name  (e.g. "My App License")
 ///   TOKEN_SYMBOL       — ERC-721 symbol (e.g. "MAL")
 ///   IDENTITY_MODEL     — 0 (access: user_id = wallet) | 1 (account: user_id = TBA)
-///   WRAPPER_HASH       — bytes32 hex of the distributed wrapper binary SHA-256
 ///   PRICE              — purchase price in wei
 ///
 /// Conditionally required:
@@ -21,10 +20,20 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 ///                        IDENTITY_MODEL=0 (access).
 ///
 /// Optional env vars:
+///   WRAPPER_HASHES  — comma-separated bytes32 SHA-256 hashes of the launch
+///                     release's wrapper binaries (one per platform). Seeds the
+///                     append-only hash set; later builds are added on-chain with
+///                     `addWrapperHash(bytes32)`. Empty = deploy with no hashes yet.
+///   WRAPPER_HASH    — single-hash shorthand for WRAPPER_HASHES. Ignored when
+///                     WRAPPER_HASHES is set; a zero hash is treated as "none".
 ///   SUPPLY_CAP      — max mintable tokens; 0 = uncapped (default: 0)
 ///   OWNER           — contract owner address; defaults to the broadcaster
 ///   COOLDOWN_BLOCKS — blocks between activations per token (default: 1800, ~1hr on Base;
 ///                     floor is 15 ≈ 30s, enforced in the contract)
+///   PREDECESSOR     — address of a license contract whose holders may migrate onto
+///                     this one via `claimFromPredecessor` (default: 0x0 = no
+///                     migrations accepted). Frozen at deploy. The predecessor's
+///                     owner must also point its `successor` here for claims to work.
 ///   PERIOD          — subscription length in seconds (required for "subscription")
 ///
 /// Usage — dry run (no broadcast):
@@ -43,7 +52,6 @@ contract Deploy is Script {
         string  memory name_         = vm.envString("TOKEN_NAME");
         string  memory symbol_       = vm.envString("TOKEN_SYMBOL");
         uint8          identityModel = uint8(vm.envUint("IDENTITY_MODEL"));
-        bytes32        wrapperHash   = vm.envBytes32("WRAPPER_HASH");
         uint256        price         = vm.envUint("PRICE");
 
         // ── Optional params ───────────────────────────────────────────────────
@@ -54,6 +62,10 @@ contract Deploy is Script {
         uint256 period         = _eq(contractType, "subscription") ? vm.envUint("PERIOD") : 0;
         // TBA implementation — required for account model, forbidden for access model.
         address tbaImpl        = vm.envOr("TBA_IMPLEMENTATION", address(0));
+        // Contract whose holders may migrate onto this one. Immutable once deployed.
+        address predecessor    = vm.envOr("PREDECESSOR", address(0));
+        // Launch release binary hashes. The set is append-only from here on.
+        bytes32[] memory wrapperHashes = _wrapperHashes();
 
         // ── Deploy ────────────────────────────────────────────────────────────
         vm.startBroadcast();
@@ -62,13 +74,13 @@ contract Deploy is Script {
 
         if (_eq(contractType, "access")) {
             deployed = address(new Rub3Access(
-                name_, symbol_, identityModel, tbaImpl, wrapperHash,
-                price, supplyCap, cooldownBlocks, owner_
+                name_, symbol_, identityModel, tbaImpl, wrapperHashes,
+                price, supplyCap, cooldownBlocks, predecessor, owner_
             ));
         } else if (_eq(contractType, "subscription")) {
             deployed = address(new Rub3Subscription(
-                name_, symbol_, identityModel, tbaImpl, wrapperHash,
-                price, supplyCap, period, cooldownBlocks, owner_
+                name_, symbol_, identityModel, tbaImpl, wrapperHashes,
+                price, supplyCap, period, cooldownBlocks, predecessor, owner_
             ));
         } else {
             revert(string.concat("Deploy: unknown CONTRACT_TYPE '", contractType, "' (expected 'access' or 'subscription')"));
@@ -93,11 +105,38 @@ contract Deploy is Script {
         console.log("  price:         %d wei", price);
         console.log("  supplyCap:     %d  (%s)", supplyCap, supplyCap == 0 ? "uncapped" : "capped");
         console.log("  cooldown:      %d blocks (~%d sec on Base)", cooldownBlocks, cooldownBlocks * 2);
+        console.log("  wrapperHashes: %d seeded%s",
+            wrapperHashes.length,
+            wrapperHashes.length == 0 ? "  (add later with addWrapperHash)" : ""
+        );
+        for (uint256 i = 0; i < wrapperHashes.length; i++) {
+            console.log("                 %s", vm.toString(wrapperHashes[i]));
+        }
+        console.log("  predecessor:   %s%s",
+            predecessor,
+            predecessor == address(0) ? "  (no migrations accepted)" : ""
+        );
         console.log("  owner:         %s", owner_);
         if (_eq(contractType, "subscription")) {
             console.log("  period:        %d sec", period);
             console.log("                 (~%d days)", period / 86400);
         }
+    }
+
+    /// Reads the launch release's wrapper hashes: `WRAPPER_HASHES` (comma-separated)
+    /// wins, `WRAPPER_HASH` is the single-hash shorthand, and a zero or absent hash
+    /// deploys with an empty set — the contract rejects `bytes32(0)` as a member
+    /// because it is the `Unknown` sentinel.
+    function _wrapperHashes() internal view returns (bytes32[] memory) {
+        bytes32[] memory many = vm.envOr("WRAPPER_HASHES", ",", new bytes32[](0));
+        if (many.length != 0) return many;
+
+        bytes32 one = vm.envOr("WRAPPER_HASH", bytes32(0));
+        if (one == bytes32(0)) return new bytes32[](0);
+
+        bytes32[] memory single = new bytes32[](1);
+        single[0] = one;
+        return single;
     }
 
     function _eq(string memory a, string memory b) internal pure returns (bool) {

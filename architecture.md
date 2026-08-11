@@ -12,12 +12,14 @@ Three commitments shape every design decision below:
 
 **Two front doors, one rail.** All session crypto (signing, calldata encoding, receipt polling) is native Rust. Headless activation — signer in, session out — is the primary path and needs no webview; the interactive webview flow is the human fallback floor. Everything below the front door (RPC, session model, persistence, supervision) is shared.
 
-**The token is the invariant; everything else is versioned.** License contracts are immutable — no proxies, no upgrade hooks, no revocation surface. Evolution only ever changes what is *offered* going forward (price, supply, successor contracts, registry listings), never what was *granted* (held tokens, their validation logic, their renewal terms).
+**The token is the invariant; everything else is versioned.** License contracts are immutable — no proxies, no upgrade hooks, no revocation surface. Evolution only ever changes what is *offered* going forward (price, successor contracts, registry listings), never what was *granted* (held tokens, their validation logic, their renewal terms).
 
 | | Can never change | Can change (affects future only) |
 |---|---|---|
-| **Developer** | validity of issued tokens; transfer rights; per-token renewal terms | price for new sales; supply; wrapper hash set (append/flag); successor pointer; registry listing |
+| **Developer** | validity of issued tokens; transfer rights; per-token renewal terms (`renewPrice`, `period`); supply cap; identity model; TBA implementation; cooldown; predecessor link | price for new sales; wrapper hash set (append + flag only); successor pointer; registry listing |
 | **rub3** | fee on any deployed contract; validation logic | factory versions; registry curation; marketplace; facilitator |
+
+Every "can never change" cell in the developer row is enforced by bytecode today and checkable before purchase — see [Ownership invariants](#ownership-invariants-all-license-contracts) for the audit procedure and for the shorter list of properties that are still convention rather than proof.
 
 **Open rails, owned network.** The wrapper, SDK, CLI, and contract templates are open source and free. Revenue lives where network effects live: an immutable 2–3% protocol fee stamped into factory-deployed contracts, metered per-launch billing only the wrapper can enforce, and (once volume exists) marketplace fees on secondary license trades. x402 can meter API calls because the server is a choke point; the wrapper is that choke point for locally executed software.
 
@@ -385,9 +387,9 @@ The wrapper picks the most capable available tab as the default and lets the use
 #### Rub3Access (one-time purchase)
 
 ERC-721 + ERC-721Enumerable with payable `purchase(address recipient)`:
-- Price per token, optional supply cap
+- Price per token, optional supply cap (immutable)
 - `recipient == address(0)` defaults to `msg.sender`
-- `bytes32 wrapperHash` — SHA-256 of distributed binary
+- `mapping(bytes32 => HashStatus) wrapperHashes` — append-only set of distributed-binary SHA-256s (see [Binary verification](#binary-verification-all-tiers))
 - `uint8 identityModel` — `0 = access`, `1 = account` — readable by wrapper
 
 On-chain check: `ownerOf(tokenId) == walletAddress`
@@ -396,8 +398,10 @@ On-chain check: `ownerOf(tokenId) == walletAddress`
 
 ERC-721 + ERC-721Enumerable extended with time-based validity:
 - `mapping(uint256 => uint256) public expiresAt`
-- `purchase()` sets `expiresAt[tokenId] = block.timestamp + period`
-- `renew(uint256 tokenId)` payable, extends by one period
+- `mapping(uint256 => uint256) public renewPrice` — the token's renewal price, snapshotted from `price` at mint and written once
+- `purchase()` sets `expiresAt[tokenId] = block.timestamp + period` and `renewPrice[tokenId] = price`
+- `renew(uint256 tokenId)` payable, extends by one period at `renewPrice[tokenId]` — never the current `price`
+- `uint256 immutable period` — the other half of "renewal terms are frozen per token"
 - `uint8 identityModel` — same flag as above
 
 On-chain check: `ownerOf(tokenId) == walletAddress && block.timestamp < expiresAt[tokenId]`
@@ -484,15 +488,63 @@ A third billing model unique to runtime enforcement: the launch gate requires a 
 
 #### Ownership invariants (all license contracts)
 
-Enforced by construction in the factory templates, machine-verifiable by any buyer before purchase:
+Live in `Rub3License` (implementation.md §2.4). Enforced by construction, machine-verifiable by any buyer before purchase:
 
 - **No revocation surface.** No burn, no admin transfer, no pause on `ownerOf` / `isValid` / `activate` for issued tokens. Not policy — absent from the bytecode.
-- **No proxies.** Contract code, and therefore license terms, are frozen at deploy.
-- **Renewal terms frozen per token.** `renewPrice[tokenId]` snapshots at mint (planned change to `Rub3Subscription`); a developer cannot reprice a held subscription.
-- **Append-only wrapper hash set.** Replaces the single rotatable `wrapperHash` slot — see Binary Protection.
-- **Successor pattern for migrations.** Owner-settable `successor()` pointer; the old contract validates its tokens forever; migration (snapshot-claim or burn-to-mint) is holder-initiated, never forced. Covers contract bugs, paid major versions, and chain migration.
+- **No proxies.** Contract code, and therefore license terms, are frozen at deploy. No upgrade hook, no delegatecall, no initializer.
+- **Renewal terms frozen per token.** `renewPrice[tokenId]` snapshots at mint and is written once; `period` is immutable. `renew()` charges the snapshot. A developer cannot reprice a held subscription — and there is no function that could.
+- **Append-only wrapper hash set.** Replaces the single rotatable `wrapperHash` slot — see [Binary verification](#binary-verification-all-tiers).
+- **Successor pattern for migrations.** See below.
 
 Developers can deprecate *offerings* — stop selling, stop updating, sunset a version. They cannot deprecate *entitlements*.
+
+##### Successor pattern
+
+```solidity
+address public immutable predecessor;   // whose holders this contract honors; frozen at deploy
+address public successor;               // where this contract's holders may go; owner-settable
+
+function setSuccessor(address newSuccessor) external onlyOwner;
+function claimFromPredecessor(uint256 predecessorTokenId) external returns (uint256 tokenId);
+function honorsContract(address configuredContract, uint256 tokenId) external view returns (bool);
+```
+
+Covers contract bugs, paid major versions, and chain migration. Three hard guarantees, each with a dedicated test in `contracts/test/Rub3Invariants.t.sol` that fails if the guarantee is removed:
+
+1. **The old contract validates its tokens forever, regardless.** `successor` is a signpost, not a switch: nothing in `ownerOf`, `activate`, `cooldownReady`, or `isValid` reads it. Setting, repointing, or clearing it changes nothing about an issued token, and neither does the holder migrating — or the owner renouncing ownership entirely.
+
+2. **Migration is holder-initiated, never forced.** Only the *current holder* of a predecessor token can call `claimFromPredecessor`, and only on the successor. Neither contract's owner can push a migration; there is no `forceMigrate` selector to call.
+
+   It is a **snapshot-claim, not burn-to-mint** — necessarily so. Burn-to-mint would require the predecessor to expose a burn, which is exactly the revocation surface that must not exist. The old token is neither destroyed nor moved; the holder ends up with both. Subscriptions carry their frozen terms across: remaining time *and* snapshotted `renewPrice`, so migration is never a repricing event.
+
+   Both sides opt in, explicitly: the successor names its `predecessor` at deploy (immutable), and the predecessor's owner points `successor` at it. A v2 deployed *without* a predecessor accepts no claims — that is how a paid major version is shipped while still signposting where it lives.
+
+3. **The wrapper's trust rule: "contract X, or X's successor holding a token claimed from X."** `honorsContract(X, tokenId)` evaluates exactly that in one `eth_call`. A token *bought* on the successor is not a claim, so a wrapper pinned to X does not accept it. The predecessor's opt-in is checked once, at claim time, and recorded permanently — a later `setSuccessor` cannot retroactively unmake a claim that already happened, because a claim already made is a grant.
+
+##### What is enforced by bytecode, and what is convention
+
+The distinction matters because an agent can verify the first list before buying and can only trust the second.
+
+**Bytecode** — check these against the deployed runtime code; `contracts/test/Rub3Invariants.t.sol` runs exactly this audit:
+
+| Property | How an agent checks it |
+|---|---|
+| No burn, admin transfer, seizure, or pause | The selectors are absent from the runtime bytecode, and a raw call carrying one reverts (there is no fallback). Scan for `burn(uint256)`, `adminTransfer(address,address,uint256)`, `forceTransfer(address,address,uint256)`, `seize(uint256)`, `pause()`, `setPaused(bool)`, `revoke(uint256)`, `invalidate(uint256)`, `setExpiresAt(uint256,uint256)`, `setRenewPrice(uint256,uint256)`, `forceMigrate(uint256,address)` |
+| No proxy, no upgrade hook | `upgradeTo(address)`, `upgradeToAndCall(address,bytes)`, `initialize()` absent; contract code hashes stable across blocks |
+| Hash set is append-only | `setWrapperHash(bytes32)`, `removeWrapperHash(bytes32)`, `unrevokeWrapperHash(bytes32)` absent; `wrapperHashList()` only ever grows |
+| Renewal terms frozen per token | `renewPrice(tokenId)` is non-zero and does not move after mint; no setter exists; `period` is `immutable` |
+| Deploy-time parameters frozen | `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` are `immutable` — no `setPredecessor(address)` selector |
+| Migration cannot be forced | `claimFromPredecessor` is the only mint path outside `purchase`, and it checks `ownerOf(...) == msg.sender` on the predecessor |
+
+**Convention** — real commitments, but not provable from the bytecode:
+
+| Property | Why it isn't bytecode |
+|---|---|
+| Registry delisting never invalidates a token | `Rub3Registry` is not built yet (§3.2). Today it is a design commitment; once built, the property holds because the registry has no call into the license contract at all |
+| The protocol fee is immutable per deploy | `Rub3Factory` is not built yet (§2.3). Until then, contracts deployed directly carry no fee |
+| These invariants hold for *this* contract | Only factory-stamped deploys are guaranteed. Anyone may deploy the open-source templates directly, or a modified copy — which is why the audit is a bytecode check, not a source claim |
+| A revoked binary already running keeps running | Deliberate. The hash set informs new downloads and activations; a switch that could stop a running binary would be a revocation surface |
+| The developer keeps publishing builds and hashes | Unenforceable by anyone. It is also the failure mode the invariants are designed to survive: an abandoned contract keeps validating forever, so vendor death depreciates a license rather than confiscating it |
 
 #### Rub3Registry *(planned — implementation.md §3.2)*
 
@@ -732,27 +784,29 @@ ENS and the registry are **purchase-time trust signals, not launch-time dependen
 
 ### Binary verification (all tiers)
 
-Current (single slot):
-
-```solidity
-bytes32 public wrapperHash;
-
-function setWrapperHash(bytes32 hash) external onlyOwner {
-    wrapperHash = hash;
-}
-```
-
-Planned (append-only set — implementation.md §2.4). Rotating a single slot invalidates the verifiability of every previously downloaded binary, so the slot becomes a set:
+Rotating a single hash slot would invalidate the verifiability of every binary already downloaded, so the slot is an append-only set (implementation.md §2.4):
 
 ```solidity
 enum HashStatus { Unknown, Valid, Revoked }
 mapping(bytes32 => HashStatus) public wrapperHashes;
+mapping(bytes32 => string)     public revocationReason;
 
-function addWrapperHash(bytes32 hash) external onlyOwner;                     // append a release
+function addWrapperHash(bytes32 hash) external onlyOwner;                             // append a release
 function revokeWrapperHash(bytes32 hash, string calldata reason) external onlyOwner;  // flag a compromised build
+
+function isWrapperHashValid(bytes32 hash) external view returns (bool);
+function wrapperHashCount() external view returns (uint256);
+function wrapperHashAt(uint256 index) external view returns (bytes32);
+function wrapperHashList() external view returns (bytes32[] memory);   // full set, for pre-purchase audit
 ```
 
-Old binaries stay verifiable; a compromised release is flagged on-chain with a reason. Revoking a **binary hash** never touches **token validity** — the holder downloads a patched build and the same license just works. Honest limit: the hash set informs new downloads and activations; it cannot retroactively disable compromised binaries already running. A kill switch that could would be a revocation mechanism, and it must not exist.
+The constructor seeds the set from a `bytes32[]` — one release ships several binaries, one per platform — and every later build is appended on-chain.
+
+Status is monotone: `Unknown → Valid → Revoked`, terminal. A hash already in the set is rejected by `addWrapperHash` whether it is valid *or* revoked, so the set can never be rewritten; a mistaken revocation is corrected by publishing a fresh build, not by editing history. Revocation requires a non-empty reason — a compromised build is flagged on-chain *with the reason stated*, not silently.
+
+Old binaries stay verifiable; a compromised release is flagged with a reason. Revoking a **binary hash** never touches **token validity** — the holder downloads a patched build and the same license just works. This is structural, not a promise: `ownerOf`, `isValid`, and `activate` never read `wrapperHashes`, and `contracts/test/Rub3Invariants.t.sol` revokes every hash in the set and asserts all three are unaffected.
+
+Honest limit: the hash set informs new downloads and activations; it cannot retroactively disable compromised binaries already running. A kill switch that could would be a revocation mechanism, and it must not exist.
 
 Planned alongside it: `contentURI` (IPFS/Arweave) recorded on the contract, making it a complete distribution record — `rub3 fetch <contract>` downloads the binary and verifies its hash on-chain (implementation.md §3.1).
 

@@ -5,22 +5,27 @@ import {Rub3License} from "./Rub3License.sol";
 
 /// @notice One-time-purchase access license. The NFT grants permanent access to
 ///         the wrapped application for its owner.
+///
+/// Paid once, so there are no ongoing terms to freeze — `ownerOf` is the whole
+/// entitlement, and nothing in this contract or its base can take it away. See
+/// {Rub3License} for the ownership invariants that hold across both models.
 contract Rub3Access is Rub3License {
     event Purchased(uint256 indexed tokenId, address indexed recipient, address indexed payer);
 
     constructor(
-        string memory name_,
-        string memory symbol_,
-        uint8         identityModel_,
-        address       tbaImplementation_,
-        bytes32       wrapperHash_,
-        uint256       price_,
-        uint256       supplyCap_,
-        uint256       cooldownBlocks_,
-        address       owner_
+        string    memory name_,
+        string    memory symbol_,
+        uint8            identityModel_,
+        address          tbaImplementation_,
+        bytes32[] memory wrapperHashes_,
+        uint256          price_,
+        uint256          supplyCap_,
+        uint256          cooldownBlocks_,
+        address          predecessor_,
+        address          owner_
     ) Rub3License(
-        name_, symbol_, identityModel_, tbaImplementation_, wrapperHash_,
-        price_, supplyCap_, cooldownBlocks_, owner_
+        name_, symbol_, identityModel_, tbaImplementation_, wrapperHashes_,
+        price_, supplyCap_, cooldownBlocks_, predecessor_, owner_
     ) {}
 
     /// @notice Mint a fresh license token to `recipient`.
