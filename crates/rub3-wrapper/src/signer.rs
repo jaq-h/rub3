@@ -2,14 +2,14 @@
 //!
 //! Every interactive flow in the wrapper is built on a hard rule: *the wrapper
 //! never holds keys.* It encodes calldata, shows it to a human, and the human's
-//! wallet broadcasts. Headless mode cannot honour that literally — an agent
+//! wallet broadcasts. Headless mode cannot honour that literally - an agent
 //! holding only a funded key needs the wrapper to sign and broadcast on its
 //! behalf. This module is where that capability is contained, and the
 //! containment is the design:
 //!
 //!   * The capability exists only behind the `headless` Cargo feature. A build
 //!     without it cannot sign a transaction at all.
-//!   * Callers see [`Signer`] — an object-safe trait whose only primitive is
+//!   * Callers see [`Signer`] - an object-safe trait whose only primitive is
 //!     "sign this 32-byte digest". A KMS, HSM, or enclave-backed operator
 //!     implements it without any raw key ever entering this process.
 //!   * The *only* type in the crate that holds raw key material is
@@ -30,7 +30,7 @@
 //!
 //! | Order | Source | Selected by |
 //! |---|---|---|
-//! | 1 | `RUB3_AGENT_KEY` — raw hex private key | env var set (dev / CI only) |
+//! | 1 | `RUB3_AGENT_KEY` - raw hex private key | env var set (dev / CI only) |
 //! | 2 | Encrypted keystore file (Web3 Secret Storage V3) | `RUB3_AGENT_KEYSTORE` set, or the default path exists |
 //! | 3 | Anything else | caller supplies its own `impl Signer` |
 //!
@@ -47,7 +47,7 @@ use zeroize::Zeroize;
 
 // ── Env / path constants ──────────────────────────────────────────────────────
 
-/// Raw hex private key. Highest precedence. Dev and CI only — an env var is
+/// Raw hex private key. Highest precedence. Dev and CI only - an env var is
 /// readable by anything sharing the process environment.
 pub const ENV_AGENT_KEY: &str = "RUB3_AGENT_KEY";
 
@@ -58,7 +58,7 @@ pub const ENV_AGENT_KEYSTORE: &str = "RUB3_AGENT_KEYSTORE";
 pub const ENV_AGENT_KEYSTORE_PASSWORD: &str = "RUB3_AGENT_KEYSTORE_PASSWORD";
 
 /// Path to a file whose contents are the keystore password. Preferred over
-/// [`ENV_AGENT_KEYSTORE_PASSWORD`] — a file can be mode 0600, an env var cannot.
+/// [`ENV_AGENT_KEYSTORE_PASSWORD`] - a file can be mode 0600, an env var cannot.
 pub const ENV_AGENT_KEYSTORE_PASSWORD_FILE: &str = "RUB3_AGENT_KEYSTORE_PASSWORD_FILE";
 
 /// Default keystore location when `RUB3_AGENT_KEYSTORE` is unset:
@@ -72,7 +72,7 @@ pub fn default_keystore_path() -> Option<PathBuf> {
 /// Why a signer could not be produced or could not sign.
 ///
 /// Every variant carries fixed text plus, at most, a source label or a
-/// filesystem path. No variant can carry key or password bytes — see the
+/// filesystem path. No variant can carry key or password bytes - see the
 /// module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignerError {
@@ -94,7 +94,7 @@ pub enum SignerError {
     /// The password file could not be read.
     KeystorePasswordUnreadable(PathBuf),
     /// The signing backend refused or failed. `String` is the backend's own
-    /// message — implementors must keep key material out of it.
+    /// message - implementors must keep key material out of it.
     Backend(String),
 }
 
@@ -140,8 +140,8 @@ impl std::error::Error for SignerError {}
 /// A source of secp256k1 signatures for one Ethereum address.
 ///
 /// One primitive: sign a 32-byte digest. That is the smallest operation every
-/// backend supports — a local key, an AWS KMS asymmetric key, a YubiHSM, a
-/// Nitro Enclave — so implementors never have to expose or move key material.
+/// backend supports - a local key, an AWS KMS asymmetric key, a YubiHSM, a
+/// Nitro Enclave - so implementors never have to expose or move key material.
 ///
 /// The wrapper builds every digest it needs from this one call:
 ///   * session messages, via [`personal_sign`] (applies the EIP-191 prefix);
@@ -195,7 +195,7 @@ pub fn personal_sign(signer: &dyn Signer, preimage: &[u8; 32]) -> Result<String,
     Ok(format!("0x{}", hex::encode(out)))
 }
 
-// ── Local signer — the only holder of raw key material ────────────────────────
+// ── Local signer - the only holder of raw key material ────────────────────────
 
 /// A signer backed by a secp256k1 private key held in this process.
 ///
@@ -241,7 +241,7 @@ impl LocalSigner {
             return Err(SignerError::MalformedKey);
         }
 
-        // `hex::decode`'s error names the offending character — never surface it.
+        // `hex::decode`'s error names the offending character - never surface it.
         let mut bytes = match hex::decode(trimmed) {
             Ok(b) => b,
             Err(_) => return Err(SignerError::MalformedKey),
@@ -257,7 +257,7 @@ impl LocalSigner {
     /// Builds a signer from `RUB3_AGENT_KEY`.
     ///
     /// Returns [`SignerError::NoSource`] when the variable is unset or empty.
-    /// The value read from the environment is zeroized after use — though note
+    /// The value read from the environment is zeroized after use - though note
     /// the OS copy in `environ` is outside our reach, which is why this source
     /// is documented as dev/CI only.
     pub fn from_env() -> Result<Self, SignerError> {
@@ -330,7 +330,7 @@ fn address_of(key: &SigningKey) -> Address {
 /// `RUB3_AGENT_KEY`, then an encrypted keystore file.
 ///
 /// Precedence is strict: when `RUB3_AGENT_KEY` is set, a keystore is never read
-/// — even if the key turns out to be malformed. An operator who sets both
+/// - even if the key turns out to be malformed. An operator who sets both
 /// should get a hard error about the one they set most recently, not a silent
 /// fall-through to the other identity.
 ///
@@ -368,10 +368,14 @@ fn read_keystore_password() -> Result<String, SignerError> {
         .filter(|p| !p.trim().is_empty())
     {
         let path = PathBuf::from(file);
-        let contents = std::fs::read_to_string(&path)
+        let mut contents = std::fs::read_to_string(&path)
             .map_err(|_| SignerError::KeystorePasswordUnreadable(path))?;
         // Trailing newline from `echo`/heredoc is not part of the password.
-        return Ok(contents.trim_end_matches(['\n', '\r']).to_string());
+        let password = contents.trim_end_matches(['\n', '\r']).to_string();
+        // The file buffer is a second plaintext copy; it dies here, not on a
+        // later allocator reuse.
+        contents.zeroize();
+        return Ok(password);
     }
 
     match std::env::var(ENV_AGENT_KEYSTORE_PASSWORD) {
@@ -387,7 +391,7 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard};
 
-    // Anvil account #0 — deterministic, documented, holds nothing real.
+    // Anvil account #0 - deterministic, documented, holds nothing real.
     const ANVIL_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     const ANVIL_ADDR: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
@@ -408,8 +412,8 @@ mod tests {
         guard
     }
 
-    /// `Box<dyn Signer>` is deliberately not `Debug` — the trait must stay
-    /// implementable by backends that would rather not describe themselves —
+    /// `Box<dyn Signer>` is deliberately not `Debug` - the trait must stay
+    /// implementable by backends that would rather not describe themselves -
     /// so `unwrap_err()` is unavailable here.
     fn resolve_err() -> SignerError {
         match resolve_signer() {
@@ -423,7 +427,7 @@ mod tests {
         let mut rng = OsRng;
         let key = SigningKey::random(&mut rng);
         let address = address_of(&key);
-        // `encrypt_keystore` returns the keystore's UUID, not its filename —
+        // `encrypt_keystore` returns the keystore's UUID, not its filename -
         // the file lands under the name we asked for.
         const NAME: &str = "agent-key.json";
         PrivateKeySigner::encrypt_keystore(dir, &mut rng, key.to_bytes(), password, Some(NAME))
@@ -521,7 +525,7 @@ mod tests {
 
     #[test]
     fn signing_is_deterministic() {
-        // RFC-6979 — same key, same digest, same signature. Guards against a
+        // RFC-6979 - same key, same digest, same signature. Guards against a
         // backend swap silently introducing randomness into the tx path.
         let signer = LocalSigner::from_hex(ANVIL_KEY).unwrap();
         let d = B256::from([9u8; 32]);
@@ -565,7 +569,7 @@ mod tests {
     }
 
     /// A malformed `RUB3_AGENT_KEY` must be a hard error, not a silent
-    /// fall-through to whatever keystore happens to be lying around — that
+    /// fall-through to whatever keystore happens to be lying around - that
     /// would activate under the wrong identity.
     #[test]
     fn resolve_does_not_fall_through_on_malformed_env_key() {

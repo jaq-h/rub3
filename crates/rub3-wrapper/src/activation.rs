@@ -1,11 +1,11 @@
-//! Activation orchestration — the two front doors and the fast paths they share.
+//! Activation orchestration - the two front doors and the fast paths they share.
 //!
 //! There are exactly two ways a launch acquires a session:
 //!
-//!   * [`ensure`] — the interactive door. Opens the native activation window
+//!   * [`ensure`] - the interactive door. Opens the native activation window
 //!     and waits for a human to connect a wallet, broadcast, and sign.
 //!     Compiled in with the `webview` feature.
-//!   * [`ensure_headless`] — the agent door. Takes a [`Signer`] and runs the
+//!   * [`ensure_headless`] - the agent door. Takes a [`Signer`] and runs the
 //!     same pipeline end to end with nothing to click. Compiled in with the
 //!     `headless` feature.
 //!
@@ -30,8 +30,8 @@ pub enum ActivationError {
     Cancelled,
     OwnershipMismatch,
     /// The build has no interactive front door: `webview` was not compiled in.
-    /// Such a build can still launch from a cached session, and — when
-    /// `headless` is compiled in — activate through [`ensure_headless`].
+    /// Such a build can still launch from a cached session, and - when
+    /// `headless` is compiled in - activate through [`ensure_headless`].
     NoInteractiveFrontDoor,
     Error(String),
 }
@@ -74,7 +74,7 @@ pub fn ensure(
 ) -> Result<(), ActivationError> {
     // ── Fast path 1: existing session (tier 3) ───────────────────────────────
     #[cfg(feature = "cooldown")]
-    if try_session_fast_path(app_id, rpc_url, None).is_some() {
+    if try_session_fast_path(app_id, rpc_url, None, None).is_some() {
         return Ok(());
     }
 
@@ -144,7 +144,7 @@ fn interactive_slow_path(
 /// carry fabricated tx hashes without paying network cost on every launch.
 ///
 /// An on-chain check that fails with a transport error (no network, bad URL)
-/// falls open — i.e. we still accept the session — so offline launches aren't
+/// falls open - i.e. we still accept the session - so offline launches aren't
 /// broken. A check that succeeds-and-contradicts (wrong contract, wrong block
 /// hash, reverted tx) falls closed and forces re-activation.
 ///
@@ -152,11 +152,18 @@ fn interactive_slow_path(
 /// address. The interactive door passes `None` (whoever last activated on this
 /// machine is the user). The headless door passes its signer's address, so an
 /// agent never launches on a session belonging to a different key.
+///
+/// `require_token` narrows it the same way to one specific token id. The
+/// interactive door passes `None`; the headless door passes `--token-id` when
+/// it was given, so an explicit token constrains cache reuse exactly as it
+/// constrains purchasing. A cached session for another token is a miss, not a
+/// substitute: the caller asked for one particular license.
 #[cfg(feature = "cooldown")]
 fn try_session_fast_path(
     app_id: &str,
     rpc_url: &str,
     require_wallet: Option<Address>,
+    require_token: Option<u64>,
 ) -> Option<crate::session::Session> {
     let session = crate::session_store::load_latest_session(app_id).ok()?;
 
@@ -167,6 +174,12 @@ fn try_session_fast_path(
     if let Some(wallet) = require_wallet {
         let expected = crate::identity::format_addr(wallet);
         if !session.wallet.eq_ignore_ascii_case(&expected) {
+            return None;
+        }
+    }
+
+    if let Some(token_id) = require_token {
+        if session.token_id != token_id {
             return None;
         }
     }
@@ -218,13 +231,13 @@ fn try_legacy_fast_path(app_id: &str, contract: &str, rpc_url: &str) -> bool {
 //
 // The machine-readable contract of `--headless`. Defined unconditionally so a
 // build without the `headless` feature can still report
-// `EXIT_HEADLESS_UNSUPPORTED` rather than a generic failure — an orchestrator
+// `EXIT_HEADLESS_UNSUPPORTED` rather than a generic failure - an orchestrator
 // that gets code 18 knows it picked the wrong build, not that activation broke.
 //
 // Reproduced in `rub3-wrapper --help` and in the README. Renumbering any of
 // these is a breaking change.
 
-/// Success — a valid session exists and the wrapped binary was launched.
+/// Success - a valid session exists and the wrapped binary was launched.
 pub const EXIT_OK: i32 = 0;
 /// Unclassified failure.
 pub const EXIT_GENERIC: i32 = 1;
@@ -255,14 +268,18 @@ pub const EXIT_TOKEN_NOT_OWNED: i32 = 20;
 /// The exit-code table rendered for `--help`, so the contract is discoverable
 /// from the binary itself and not only from the docs.
 pub const EXIT_CODE_HELP: &str = "\
-Headless exit codes (--headless):
-   0  success — session valid, wrapped binary launched
+Headless exit codes (--headless). These are emitted only when headless
+activation itself fails. Once the wrapped binary launches, its own exit status
+is passed through unchanged, so a code in this range coming from a launched
+child is the child's status and not an activation failure.
+
+   0  success - session valid, wrapped binary launched
    1  unclassified failure
    2  command-line usage error
   10  no usable signer (set RUB3_AGENT_KEY or RUB3_AGENT_KEYSTORE)
   11  insufficient funds for purchase + gas
   12  no token held and supply is sold out
-  13  cooldown active — stderr carries `blocks_remaining=N`
+  13  cooldown active - stderr carries `blocks_remaining=N`
   14  activation failed (tx reverted, or not confirmed in time)
   15  session verification failed
   16  chain RPC / transport failure
@@ -304,7 +321,7 @@ mod headless {
         pub token_id: Option<u64>,
     }
 
-    /// What a successful [`ensure_headless`] actually did — an orchestrator
+    /// What a successful [`ensure_headless`] actually did - an orchestrator
     /// reads this to tell "launched from cache" apart from "spent money".
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum HeadlessOutcome {
@@ -318,14 +335,16 @@ mod headless {
 
     /// Everything that can stop a headless activation, in a shape an
     /// orchestrator can branch on. Each variant maps to a distinct process exit
-    /// code — see [`HeadlessError::exit_code`].
+    /// code - see [`HeadlessError::exit_code`].
     #[derive(Debug)]
     pub enum HeadlessError {
         /// No usable signer: nothing configured, or what was configured is
         /// malformed. Never carries key material.
         Signer(crate::signer::SignerError),
-        /// The wallet cannot cover the purchase price plus gas.
-        InsufficientFunds { required: String, available: String },
+        /// The wallet cannot cover the purchase price plus gas. `shortfall`
+        /// carries the amounts only when the wrapper measured them itself; a
+        /// node that rejected the transaction reports no parseable numbers.
+        InsufficientFunds { shortfall: Option<crate::tx::Shortfall> },
         /// The signer holds no token and the contract has minted its cap.
         SoldOut { supply_cap: u64, minted: u64 },
         /// `activate()` is rate-limited for this token for another N blocks.
@@ -345,7 +364,7 @@ mod headless {
         /// `--token-id N` names a token this signer does not hold.
         TokenNotOwned { token_id: u64, wallet: String },
         /// Headless activation needs a real license contract; this build points
-        /// at the zero address.
+        /// at the zero address, or at something that is not an address at all.
         NoContract,
     }
 
@@ -353,9 +372,15 @@ mod headless {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 HeadlessError::Signer(e) => write!(f, "{e}"),
-                HeadlessError::InsufficientFunds { required, available } => write!(
+                HeadlessError::InsufficientFunds { shortfall: Some(s) } => write!(
                     f,
-                    "insufficient funds: need {required} wei (price + gas), wallet holds {available} wei"
+                    "insufficient funds: need {} wei (price + gas), wallet holds {} wei",
+                    s.required, s.available
+                ),
+                HeadlessError::InsufficientFunds { shortfall: None } => write!(
+                    f,
+                    "insufficient funds: the node rejected the transaction for lack of \
+                     balance, without reporting the amounts"
                 ),
                 HeadlessError::SoldOut { supply_cap, minted } => write!(
                     f,
@@ -380,7 +405,7 @@ mod headless {
                 }
                 HeadlessError::NoContract => write!(
                     f,
-                    "headless activation requires a license contract, but this build has none configured"
+                    "headless activation requires a usable license contract, but this build has none configured"
                 ),
             }
         }
@@ -391,7 +416,7 @@ mod headless {
     impl HeadlessError {
         /// The process exit code for this failure.
         ///
-        /// Stable, documented, and machine-readable — an orchestrator branches
+        /// Stable, documented, and machine-readable - an orchestrator branches
         /// on it instead of parsing stderr. The table is reproduced in
         /// `rub3-wrapper --help` and in the README.
         pub fn exit_code(&self) -> i32 {
@@ -414,14 +439,18 @@ mod headless {
         /// parameters without parsing prose. Emitted on stderr by the CLI.
         ///
         /// The cooldown case is the one that matters most: `blocks_remaining`
-        /// tells a scheduler exactly how long to back off.
+        /// tells a scheduler exactly how long to back off. A failure whose
+        /// parameters are unknown emits no line at all rather than a line of
+        /// placeholder zeroes.
         pub fn machine_detail(&self) -> Option<String> {
             match self {
                 HeadlessError::CooldownActive { token_id, blocks_remaining } => {
                     Some(format!("token_id={token_id} blocks_remaining={blocks_remaining}"))
                 }
-                HeadlessError::InsufficientFunds { required, available } => {
-                    Some(format!("required_wei={required} available_wei={available}"))
+                // Only when the amounts are real: an orchestrator that read
+                // `required_wei=0` would top the wallet up by nothing.
+                HeadlessError::InsufficientFunds { shortfall: Some(s) } => {
+                    Some(format!("required_wei={} available_wei={}", s.required, s.available))
                 }
                 HeadlessError::SoldOut { supply_cap, minted } => {
                     Some(format!("supply_cap={supply_cap} minted={minted}"))
@@ -440,11 +469,8 @@ mod headless {
     impl From<TxError> for HeadlessError {
         fn from(e: TxError) -> Self {
             match e {
-                TxError::InsufficientFunds { required, available } => {
-                    HeadlessError::InsufficientFunds {
-                        required: required.to_string(),
-                        available: available.to_string(),
-                    }
+                TxError::InsufficientFunds(shortfall) => {
+                    HeadlessError::InsufficientFunds { shortfall }
                 }
                 TxError::Signer(s) => HeadlessError::Signer(s),
                 TxError::Rpc(m) => HeadlessError::Rpc(m),
@@ -473,7 +499,7 @@ mod headless {
     ///   sign the session message locally ─▶ verify_local ─▶ persist
     /// ```
     ///
-    /// Every step below the front door is the same code the webview drives —
+    /// Every step below the front door is the same code the webview drives -
     /// `rpc` for reads and calldata, [`crate::session::draft_from_activation`]
     /// for the preimage, [`crate::session_store`] for persistence.
     ///
@@ -486,14 +512,16 @@ mod headless {
         let wallet = signer.address();
 
         // ── Fast path: a session this signer already owns ────────────────────
-        if let Some(session) = try_session_fast_path(&ctx.app_id, &ctx.rpc_url, Some(wallet)) {
+        if let Some(session) =
+            try_session_fast_path(&ctx.app_id, &ctx.rpc_url, Some(wallet), ctx.token_id)
+        {
             return Ok((session, HeadlessOutcome::Reused));
         }
 
-        let contract: Address = ctx
-            .contract
-            .parse()
-            .map_err(|_| HeadlessError::Rpc(format!("malformed contract address: {}", ctx.contract)))?;
+        // An unparseable address and the zero address mean the same thing: this
+        // build carries no usable contract. Both are build-time constants, so
+        // neither is worth a retry.
+        let contract: Address = ctx.contract.parse().map_err(|_| HeadlessError::NoContract)?;
         if contract.is_zero() {
             return Err(HeadlessError::NoContract);
         }
@@ -616,9 +644,9 @@ mod headless {
 
     /// Buys a token for `wallet` and returns `(token_id, price_wei)`.
     ///
-    /// Mirrors the interactive purchase flow (§1.7) exactly — same supply
+    /// Mirrors the interactive purchase flow (§1.7) exactly - same supply
     /// check, same calldata, same `Transfer` log parse to recover the minted id
-    /// — with the broadcast done by the signer instead of a human's wallet.
+    /// - with the broadcast done by the signer instead of a human's wallet.
     fn purchase(
         signer: &dyn Signer,
         ctx: &HeadlessContext,
@@ -679,11 +707,14 @@ mod tests {
             (HeadlessError::Signer(SignerError::NoSource), 10),
             (
                 HeadlessError::InsufficientFunds {
-                    required: "1".into(),
-                    available: "0".into(),
+                    shortfall: Some(crate::tx::Shortfall {
+                        required: alloy::primitives::U256::from(1u64),
+                        available: alloy::primitives::U256::ZERO,
+                    }),
                 },
                 11,
             ),
+            (HeadlessError::InsufficientFunds { shortfall: None }, 11),
             (HeadlessError::SoldOut { supply_cap: 10, minted: 10 }, 12),
             (HeadlessError::CooldownActive { token_id: 3, blocks_remaining: 42 }, 13),
             (HeadlessError::ActivationFailed("reverted".into()), 14),
@@ -726,7 +757,7 @@ mod tests {
         assert_eq!(sorted.len(), codes.len(), "duplicate exit code in the table");
         assert!(!codes.contains(&EXIT_OK));
         assert!(!codes.contains(&EXIT_GENERIC));
-        // clap exits 2 on usage errors — nothing of ours may collide with it.
+        // clap exits 2 on usage errors - nothing of ours may collide with it.
         assert!(!codes.contains(&2));
     }
 
@@ -743,12 +774,28 @@ mod tests {
     #[test]
     fn insufficient_funds_detail_reports_both_amounts() {
         let err = HeadlessError::InsufficientFunds {
-            required: "1000000".into(),
-            available: "12".into(),
+            shortfall: Some(crate::tx::Shortfall {
+                required: alloy::primitives::U256::from(1_000_000u64),
+                available: alloy::primitives::U256::from(12u64),
+            }),
         };
         let detail = err.machine_detail().unwrap();
         assert!(detail.contains("required_wei=1000000"), "{detail}");
         assert!(detail.contains("available_wei=12"), "{detail}");
+    }
+
+    /// A node that rejects the transaction for lack of balance reports no
+    /// parseable amounts. Emitting zeroes would tell an orchestrator the wallet
+    /// needs nothing, so the detail line is omitted instead.
+    #[test]
+    fn insufficient_funds_with_unknown_amounts_emits_no_detail_line() {
+        let err: HeadlessError =
+            crate::tx::TxError::InsufficientFunds(None).into();
+        assert_eq!(err.exit_code(), EXIT_INSUFFICIENT_FUNDS);
+        assert!(err.machine_detail().is_none(), "{:?}", err.machine_detail());
+        let rendered = err.to_string();
+        assert!(rendered.contains("insufficient funds"), "{rendered}");
+        assert!(!rendered.contains('0'), "must not imply an amount: {rendered}");
     }
 
     #[test]
@@ -758,6 +805,31 @@ mod tests {
             .unwrap();
         assert!(detail.contains("supply_cap=100"), "{detail}");
         assert!(detail.contains("minted=100"), "{detail}");
+    }
+
+    /// A malformed `CONTRACT` constant is a build-time mistake: no retry can
+    /// make it parse, so it must not land on the retryable RPC code.
+    #[test]
+    fn malformed_contract_address_is_terminal() {
+        let ctx = HeadlessContext {
+            // Unique per test run so no cached session can satisfy the fast
+            // path before the address is parsed.
+            app_id: "com.rub3.test.malformed-contract".to_string(),
+            contract: "not-an-address".to_string(),
+            chain_id: 8453,
+            rpc_url: "http://127.0.0.1:1".to_string(),
+            session_ttl_secs: 60,
+            token_id: None,
+        };
+        let signer = crate::signer::LocalSigner::from_hex(
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+
+        let err = ensure_headless(&signer, &ctx).expect_err("a malformed contract cannot activate");
+        assert!(matches!(err, HeadlessError::NoContract), "got {err:?}");
+        assert_eq!(err.exit_code(), EXIT_GENERIC);
+        assert_ne!(err.exit_code(), EXIT_RPC, "an orchestrator would retry forever");
     }
 
     #[test]
@@ -780,8 +852,11 @@ mod tests {
         use crate::tx::TxError;
         use alloy::primitives::U256;
 
-        let mapped: HeadlessError =
-            TxError::InsufficientFunds { required: U256::from(5u64), available: U256::ZERO }.into();
+        let mapped: HeadlessError = TxError::InsufficientFunds(Some(crate::tx::Shortfall {
+            required: U256::from(5u64),
+            available: U256::ZERO,
+        }))
+        .into();
         assert_eq!(mapped.exit_code(), EXIT_INSUFFICIENT_FUNDS);
 
         let mapped: HeadlessError = TxError::Rpc("no route to host".into()).into();

@@ -85,7 +85,7 @@ fn main() {
         // and broadcasting on the operator's behalf should never happen because
         // a flag was forgotten.
         #[cfg(all(feature = "headless", not(feature = "webview")))]
-        eprintln!("hint: this build activates headlessly — re-run with --headless");
+        eprintln!("hint: this build activates headlessly - re-run with --headless");
         std::process::exit(activation::EXIT_GENERIC);
     }
 
@@ -118,7 +118,7 @@ fn run_headless(token_id: Option<u64>) -> Result<(), i32> {
 
     match ensure_headless(signer.as_ref(), &ctx) {
         Ok((session, outcome)) => {
-            // One line, parseable, no key material — the signer's address is
+            // One line, parseable, no key material - the signer's address is
             // public by construction.
             eprintln!(
                 "rub3: {outcome:?} token_id={} wallet={} signer={}",

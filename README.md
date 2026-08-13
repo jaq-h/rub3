@@ -16,7 +16,7 @@ rub3 lets machines (and humans) buy, verify, run, and resell software without as
 
 There is no backend. The chain is the source of truth. The wallet is the identity.
 
-The flow above is the interactive (human) path. Agents take the same loop through the **headless** door — signer in, session out, no webview:
+The flow above is the interactive (human) path. Agents take the same loop through the **headless** door - signer in, session out, no webview:
 
 ```bash
 RUB3_AGENT_KEY=0x<hex> rub3-wrapper --headless --binary /path/to/your/app
@@ -37,7 +37,7 @@ rub3/
 │       │   ├── identity.rs           # Identity models (access/account), ERC-6551 TBA derivation
 │       │   ├── store.rs              # Proof persistence (~/.rub3/licenses/ or RUB3_LICENSE_DIR)
 │       │   ├── activation.rs         # Activation orchestration: fast paths, `ensure` (webview), `ensure_headless` (agent), exit codes
-│       │   ├── signer.rs             # `Signer` trait + `LocalSigner` — the only holder of raw key material (feature `headless`)
+│       │   ├── signer.rs             # `Signer` trait + `LocalSigner` - the only holder of raw key material (feature `headless`)
 │       │   ├── tx.rs                 # EIP-1559 build / sign / broadcast for headless (feature `headless`)
 │       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner, chainId) via alloy
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC message handling (feature `webview`)
@@ -107,8 +107,8 @@ door**. Front doors are independent features and compose:
 
 | Feature | Pulls | Use |
 |---|---|---|
-| `webview` | `wry`, `tao` | Native activation window — the human path |
-| `headless` | no GUI deps at all | Signer in, session out — the agent path |
+| `webview` | `wry`, `tao` | Native activation window - the human path |
+| `headless` | no GUI deps at all | Signer in, session out - the agent path |
 
 ```bash
 cargo build -p rub3-wrapper --no-default-features --features tier-3,webview    # human
@@ -117,7 +117,7 @@ cargo build -p rub3-wrapper --no-default-features --features tier-3,webview,head
 ```
 
 A `headless` build links neither `wry` nor `tao`, nor any of the GUI crates the
-webview build pulls — no WebKit, no AppKit, no ObjC runtime. Verify with:
+webview build pulls - no WebKit, no AppKit, no ObjC runtime. Verify with:
 
 ```bash
 cargo tree -p rub3-wrapper --no-default-features --features tier-3,headless | grep -E 'wry|tao'
@@ -143,7 +143,7 @@ cargo test -p rub3-wrapper -- --ignored
 
 **Integration tests** (`tests/`): wrapper binary exit codes, argument passing, SIGTERM forwarding, static + dynamic license E2E
 
-**Anvil-gated E2E** — needs the Foundry toolchain (`anvil`, `forge`, `cast`) on
+**Anvil-gated E2E** - needs the Foundry toolchain (`anvil`, `forge`, `cast`) on
 PATH; each test prints `SKIP:` and passes when it is missing:
 
 ```bash
@@ -153,7 +153,7 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3 \
 
 # Headless: fresh key → funded → purchase → activate → persist → fast path
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
-    -- --ignored --test-threads=1 headless
+    -- --ignored headless
 ```
 
 ### Contracts
@@ -186,7 +186,7 @@ RUB3_LICENSE_DIR=/tmp/rub3-test cargo run -p rub3-wrapper -- --binary /path/to/y
 `--headless` runs the whole activation pipeline with no window and no human:
 enumerate the signer's tokens, purchase one if it holds none, check the
 cooldown, send `activate()`, sign the session message locally, verify it, and
-persist it — then launch the wrapped binary.
+persist it - then launch the wrapped binary.
 
 ```bash
 RUB3_AGENT_KEY=0x<64 hex chars>   rub3-wrapper --headless --binary /path/to/your/app
@@ -204,32 +204,37 @@ silent fall-through to a keystore.
 
 | Variable | Meaning |
 |---|---|
-| `RUB3_AGENT_KEY` | Raw hex private key. **Dev / CI only** — an env var is readable by anything sharing the process environment |
+| `RUB3_AGENT_KEY` | Raw hex private key. **Dev / CI only** - an env var is readable by anything sharing the process environment |
 | `RUB3_AGENT_KEYSTORE` | Path to an encrypted Web3 Secret Storage (V3) keystore. Defaults to `~/.rub3/agent-key.json` when that file exists |
-| `RUB3_AGENT_KEYSTORE_PASSWORD_FILE` | File holding the keystore password — preferred, because a file can be mode 0600 |
+| `RUB3_AGENT_KEYSTORE_PASSWORD_FILE` | File holding the keystore password - preferred, because a file can be mode 0600 |
 | `RUB3_AGENT_KEYSTORE_PASSWORD` | Keystore password, inline |
 
 For KMS, HSM, or enclave-backed keys, implement the `Signer` trait and pass it
 to `activation::ensure_headless` directly. Its only primitive is "sign this
 32-byte digest", so no key material ever enters the wrapper's process. Exactly
-one type in the crate — `signer::LocalSigner` — holds a raw key at all.
+one type in the crate - `signer::LocalSigner` - holds a raw key at all.
 
 ### Exit codes
 
 Stable and machine-readable, so an orchestrator branches on the code instead of
 parsing stderr. Also printed by `rub3-wrapper --help`.
 
+These codes are emitted only when headless activation itself fails. Once the
+wrapped binary launches, its own exit status is passed through unchanged, so a
+code in this range coming from a launched child is the child's status and not an
+activation failure.
+
 | Code | Meaning | What an orchestrator should do |
 |---|---|---|
-| 0 | Success — session valid, binary launched | — |
+| 0 | Success - session valid, binary launched | - |
 | 1 | Unclassified failure | Inspect stderr |
 | 2 | Command-line usage error (clap) | Fix the invocation |
 | 10 | No usable signer | Configure `RUB3_AGENT_KEY` or a keystore |
 | 11 | Insufficient funds for purchase + gas | Top up the wallet |
-| 12 | No token held and supply sold out | Terminal — try another contract |
+| 12 | No token held and supply sold out | Terminal - try another contract |
 | 13 | Cooldown active | Back off `blocks_remaining` blocks, then retry |
 | 14 | Activation failed (reverted, or not confirmed in time) | Retry |
-| 15 | Session verification failed | Signer/config bug — do not retry blindly |
+| 15 | Session verification failed | Signer/config bug - do not retry blindly |
 | 16 | Chain RPC / transport failure | Retry, or switch endpoint |
 | 17 | Session could not be persisted | Check the session dir is writable |
 | 18 | Headless not compiled into this build | Use a `headless` build |
@@ -243,8 +248,13 @@ error: cooldown active on token 0: retry in 12 blocks
 rub3-detail: token_id=0 blocks_remaining=12
 ```
 
+The line carries only parameters the wrapper actually measured. Code 11 prints
+`required_wei` / `available_wei` when the wrapper's own balance check found the
+shortfall, and no `rub3-detail:` line at all when the node rejected the
+transaction without reporting amounts - never a placeholder zero.
+
 `RUB3_SESSION_DIR` overrides where sessions are cached (default
-`~/.rub3/sessions/<app_id>/<token_id>.json`) — useful for containers with a
+`~/.rub3/sessions/<app_id>/<token_id>.json`) - useful for containers with a
 mounted volume.
 
 ## Current status

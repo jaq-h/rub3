@@ -5,7 +5,7 @@
 //! fills in nonce/gas/fees, hands the EIP-1559 sighash to a [`Signer`], and
 //! pushes the signed envelope out via `eth_sendRawTransaction`.
 //!
-//! No key material passes through here — the only signing operation is
+//! No key material passes through here - the only signing operation is
 //! [`Signer::sign_prehash`], which a KMS or enclave backend serves without
 //! releasing a key. Calldata construction stays in [`crate::rpc`]; this module
 //! only wraps it in an envelope.
@@ -29,14 +29,26 @@ const GAS_LIMIT_BUFFER_PCT: u64 = 125;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
+/// A measured funding gap: what the transaction costs, and what the wallet has.
+///
+/// Only ever constructed from numbers the wrapper read itself. A node that
+/// rejects a transaction for lack of balance does not report either amount, and
+/// that case carries no `Shortfall` rather than a pair of zeroes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shortfall {
+    pub required: U256,
+    pub available: U256,
+}
+
 #[derive(Debug)]
 pub enum TxError {
     /// URL parse, connection, or JSON-RPC transport failure.
     Rpc(String),
     /// The signing backend refused.
     Signer(SignerError),
-    /// The sender cannot cover `value + gas_limit × max_fee_per_gas`.
-    InsufficientFunds { required: U256, available: U256 },
+    /// The sender cannot cover `value + gas_limit × max_fee_per_gas`. `None`
+    /// when the node reported the shortfall and the amounts are unknown.
+    InsufficientFunds(Option<Shortfall>),
     /// The node rejected the transaction (revert on estimation, nonce clash,
     /// underpriced, …).
     Rejected(String),
@@ -47,9 +59,15 @@ impl std::fmt::Display for TxError {
         match self {
             TxError::Rpc(e) => write!(f, "rpc error: {e}"),
             TxError::Signer(e) => write!(f, "{e}"),
-            TxError::InsufficientFunds { required, available } => write!(
+            TxError::InsufficientFunds(Some(s)) => write!(
                 f,
-                "insufficient funds: need {required} wei (value + gas), wallet holds {available} wei"
+                "insufficient funds: need {} wei (value + gas), wallet holds {} wei",
+                s.required, s.available
+            ),
+            TxError::InsufficientFunds(None) => write!(
+                f,
+                "insufficient funds: the node rejected the transaction for lack of \
+                 balance, without reporting the amounts"
             ),
             TxError::Rejected(e) => write!(f, "transaction rejected: {e}"),
         }
@@ -68,9 +86,10 @@ impl From<SignerError> for TxError {
 fn classify(msg: String) -> TxError {
     if msg.to_lowercase().contains("insufficient funds") {
         // The node knows the shortfall but does not report it in a parseable
-        // form; the caller's pre-flight balance check reports the numbers when
-        // it can, so zeroes here mean "the node said no, amounts unknown".
-        return TxError::InsufficientFunds { required: U256::ZERO, available: U256::ZERO };
+        // form. The pre-flight balance check below carries the real numbers
+        // when it fires; here there are none, and inventing zeroes would tell
+        // an orchestrator the wallet needs nothing.
+        return TxError::InsufficientFunds(None);
     }
     TxError::Rejected(msg)
 }
@@ -90,7 +109,7 @@ pub struct TxPlan {
 
 /// Signs and broadcasts `plan`, returning the 0x-prefixed transaction hash.
 ///
-/// Returns as soon as the node accepts the transaction — it does not wait for
+/// Returns as soon as the node accepts the transaction - it does not wait for
 /// inclusion. Callers pair this with [`crate::rpc::wait_for_receipt`], which is
 /// the same poller the webview flow uses.
 ///
@@ -121,7 +140,10 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
         let balance =
             provider.get_balance(from).await.map_err(|e| TxError::Rpc(e.to_string()))?;
         if balance < plan.value {
-            return Err(TxError::InsufficientFunds { required: plan.value, available: balance });
+            return Err(TxError::InsufficientFunds(Some(Shortfall {
+                required: plan.value,
+                available: balance,
+            })));
         }
 
         let request = TransactionRequest::default()
@@ -139,7 +161,10 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
         let max_cost = plan.value
             + U256::from(gas_limit).saturating_mul(U256::from(fees.max_fee_per_gas));
         if balance < max_cost {
-            return Err(TxError::InsufficientFunds { required: max_cost, available: balance });
+            return Err(TxError::InsufficientFunds(Some(Shortfall {
+                required: max_cost,
+                available: balance,
+            })));
         }
 
         Ok(Prepared {
@@ -220,16 +245,18 @@ mod tests {
         assert!(matches!(err, TxError::Rpc(_)), "got {err:?}");
     }
 
+    /// The classifier only pattern-matched a string, so it must not claim to
+    /// know the amounts: a fabricated zero would read as "top up nothing".
     #[test]
-    fn classify_maps_node_insufficient_funds() {
+    fn classify_maps_node_insufficient_funds_without_amounts() {
         let err = classify("err: insufficient funds for gas * price + value".into());
-        assert!(matches!(err, TxError::InsufficientFunds { .. }), "got {err:?}");
+        assert!(matches!(err, TxError::InsufficientFunds(None)), "got {err:?}");
     }
 
     #[test]
     fn classify_is_case_insensitive() {
         let err = classify("Insufficient Funds".into());
-        assert!(matches!(err, TxError::InsufficientFunds { .. }), "got {err:?}");
+        assert!(matches!(err, TxError::InsufficientFunds(None)), "got {err:?}");
     }
 
     #[test]
@@ -243,12 +270,21 @@ mod tests {
 
     #[test]
     fn insufficient_funds_message_reports_both_amounts() {
-        let err = TxError::InsufficientFunds {
+        let err = TxError::InsufficientFunds(Some(Shortfall {
             required: U256::from(1_000u64),
             available: U256::from(7u64),
-        };
+        }));
         let rendered = err.to_string();
         assert!(rendered.contains("1000"), "{rendered}");
         assert!(rendered.contains('7'), "{rendered}");
+    }
+
+    /// With no measured amounts the message says so, rather than rendering a
+    /// shortfall of zero.
+    #[test]
+    fn insufficient_funds_message_without_amounts_states_no_figures() {
+        let rendered = TxError::InsufficientFunds(None).to_string();
+        assert!(rendered.contains("insufficient funds"), "{rendered}");
+        assert!(!rendered.contains('0'), "{rendered}");
     }
 }

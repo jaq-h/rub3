@@ -3,14 +3,17 @@
 //! The agent path, exactly as an orchestrator would run it: a freshly generated
 //! private key, funded from anvil, drives
 //! `purchase() → activate() → sign → verify → persist` with **no webview
-//! anywhere in the process** — this test binary links neither `wry` nor `tao`,
+//! anywhere in the process** - this test binary links neither `wry` nor `tao`,
 //! because `--features tier-3,headless` excludes them.
 //!
 //! Requires the Foundry toolchain (`anvil`, `forge`, `cast`) on PATH.
-//! Ignored by default — run with:
+//! Ignored by default - run with:
 //!
 //!     cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
-//!         -- --ignored --test-threads=1 headless
+//!         -- --ignored headless
+//!
+//! The tests share one anvil port and set process-global env vars, so they
+//! serialise themselves through [`serial_guard`]. No `--test-threads=1` needed.
 //!
 //! Each test prints `SKIP: ...` and returns Ok when the toolchain is missing,
 //! so it is safe to run in any environment.
@@ -22,6 +25,7 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use alloy::primitives::Address;
@@ -30,13 +34,27 @@ use rub3_wrapper::rpc;
 use rub3_wrapper::signer::{resolve_signer, Signer, ENV_AGENT_KEY};
 use rub3_wrapper::{session, session_store};
 
-// Anvil's built-in account #0 — deterministic, documented, holds nothing real.
+// Anvil's built-in account #0 - deterministic, documented, holds nothing real.
 // Used only as the deployer / faucet; the agent under test uses a fresh key.
 const DEPLOYER_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const DEPLOYER_ADDR: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
 /// Distinct from `session_onchain_e2e.rs` (8547) so both suites can run at once.
 const PORT: u16 = 8549;
+
+/// Every test in this file binds `PORT` and sets `RUB3_AGENT_KEY` +
+/// `RUB3_SESSION_DIR`, both of which are process-global. Held for the whole
+/// test body so the anvil instance, the key and the session dir belong to one
+/// test at a time, rather than depending on the caller passing
+/// `--test-threads=1`.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+/// Takes the whole-file lock. A panicking test poisons it; that test has
+/// already failed, and the next one starts from a fresh anvil and a fresh key,
+/// so the poison is cleared rather than cascading.
+fn serial_guard() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 const APP_ID: &str = "com.rub3.headless-test";
 const CHAIN_ID: u64 = 31337; // anvil's default
@@ -214,7 +232,7 @@ fn mine(n: u32) {
 /// One isolated agent run: a fresh key in `RUB3_AGENT_KEY` and a tmpdir for
 /// `RUB3_SESSION_DIR`, both torn down on drop.
 ///
-/// A fresh key per test is the point of the exercise — it proves the flow needs
+/// A fresh key per test is the point of the exercise - it proves the flow needs
 /// nothing but a funded keypair, with no pre-existing token, session, or state.
 struct Agent {
     signer: Box<dyn Signer>,
@@ -269,6 +287,7 @@ fn ctx(contract: &str, token_id: Option<u64>) -> HeadlessContext {
 #[test]
 #[ignore = "requires anvil + forge + cast on PATH"]
 fn headless_purchase_activate_persist_e2e() {
+    let _serial = serial_guard();
     if !toolchain_ready() {
         return;
     }
@@ -323,7 +342,7 @@ fn headless_purchase_activate_persist_e2e() {
     assert!(session.activation_tx.is_some());
     assert!(session.activation_block.is_some());
 
-    // Locally verifiable — signed by the agent's own key, no wallet involved.
+    // Locally verifiable - signed by the agent's own key, no wallet involved.
     session::verify_local(&session).expect("locally signed session must verify");
     // And it matches the chain: right tx, right contract, right block.
     session::verify_onchain(&session, &rpc_url()).expect("session must verify on-chain");
@@ -354,6 +373,7 @@ fn headless_purchase_activate_persist_e2e() {
 #[test]
 #[ignore = "requires anvil + forge + cast on PATH"]
 fn headless_insufficient_funds_e2e() {
+    let _serial = serial_guard();
     if !toolchain_ready() {
         return;
     }
@@ -377,6 +397,7 @@ fn headless_insufficient_funds_e2e() {
 #[test]
 #[ignore = "requires anvil + forge + cast on PATH"]
 fn headless_sold_out_e2e() {
+    let _serial = serial_guard();
     if !toolchain_ready() {
         return;
     }
@@ -417,11 +438,12 @@ fn headless_sold_out_e2e() {
 }
 
 /// Re-activating inside the cooldown window must report the remaining blocks so
-/// a scheduler knows exactly how long to back off — and must succeed once the
+/// a scheduler knows exactly how long to back off - and must succeed once the
 /// window has passed.
 #[test]
 #[ignore = "requires anvil + forge + cast on PATH"]
 fn headless_cooldown_active_then_ready_e2e() {
+    let _serial = serial_guard();
     if !toolchain_ready() {
         return;
     }
@@ -459,7 +481,7 @@ fn headless_cooldown_active_then_ready_e2e() {
     let (second, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
         .expect("activation should succeed once the cooldown elapses");
 
-    assert_eq!(outcome, HeadlessOutcome::Activated, "token already held — no purchase");
+    assert_eq!(outcome, HeadlessOutcome::Activated, "token already held - no purchase");
     assert_eq!(second.token_id, first.token_id);
     assert_eq!(second.session_id, Some(2), "a second activate() bumps the session id");
     assert_ne!(second.nonce, first.nonce, "a re-activation mints a fresh session");
@@ -472,6 +494,7 @@ fn headless_cooldown_active_then_ready_e2e() {
 #[test]
 #[ignore = "requires anvil + forge + cast on PATH"]
 fn headless_explicit_token_not_owned_e2e() {
+    let _serial = serial_guard();
     if !toolchain_ready() {
         return;
     }
@@ -497,12 +520,52 @@ fn headless_explicit_token_not_owned_e2e() {
     );
 }
 
+/// A cached session is not a substitute for the license that was asked for.
+/// After a plain run has cached a session for token 0, `--token-id 7` must
+/// still reach the ownership check and fail, not launch on token 0's session.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_explicit_token_id_does_not_reuse_another_tokens_session_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let contract = deploy_access("0", "0", "15");
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    // Run 1: no explicit token, so the flow buys token 0 and caches a session.
+    let (cached, _) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("first activation");
+    assert_eq!(cached.token_id, 0);
+
+    // Run 2: a different token is requested. The cached session for token 0
+    // must be a miss, and the run must end on the ownership check.
+    let err = ensure_headless(agent.signer.as_ref(), &ctx(&contract, Some(7)))
+        .expect_err("a session for token 0 must not satisfy a request for token 7");
+
+    match &err {
+        HeadlessError::TokenNotOwned { token_id, .. } => assert_eq!(*token_id, 7),
+        other => panic!("expected TokenNotOwned, got {other:?}"),
+    }
+    assert_eq!(err.exit_code(), 20);
+
+    // And the token the caller did ask for by name still reuses its own cache.
+    let (reused, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, Some(0)))
+        .expect("token 0 is held and cached");
+    assert_eq!(outcome, HeadlessOutcome::Reused);
+    assert_eq!(reused.nonce, cached.nonce);
+}
+
 /// A wrapper packed for Base and pointed at some other chain must refuse before
 /// it signs anything, rather than broadcasting a valid transaction to the wrong
 /// network.
 #[test]
 #[ignore = "requires anvil + forge + cast on PATH"]
 fn headless_chain_id_mismatch_e2e() {
+    let _serial = serial_guard();
     if !toolchain_ready() {
         return;
     }

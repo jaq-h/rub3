@@ -8,7 +8,7 @@ name = "rub3-wrapper"
 path = "src/main.rs"
 
 [features]
-# Default: tier 2 + the interactive webview — matches the historical runtime
+# Default: tier 2 + the interactive webview - matches the historical runtime
 # behaviour (signature + TTL + on-chain ownership check, human activation UI).
 default = ["tier-2", "webview"]
 
@@ -23,8 +23,8 @@ tier-3 = ["session", "onchain-read", "onchain-write", "cooldown"]
 tier-4 = ["tier-3", "device-key"]
 
 # ── Front doors (pick at least one; they compose) ─────────────────────────────
-# `webview`  — native activation window (wry/tao). The human fallback floor.
-# `headless` — signer-in / session-out activation. No GUI dependency at all;
+# `webview`  - native activation window (wry/tao). The human fallback floor.
+# `headless` - signer-in / session-out activation. No GUI dependency at all;
 #              a `headless`-only build links neither `wry` nor `tao`.
 webview  = ["dep:wry", "dep:tao"]
 headless = [
@@ -56,7 +56,7 @@ url = "2"
 tokio = { version = "1", features = ["rt"] }
 chrono = { version = "0.4", features = ["serde"] }
 
-# Optional — pulled in by the capability / front-door flags above.
+# Optional - pulled in by the capability / front-door flags above.
 wry     = { version = "0.43", optional = true }
 tao     = { version = "0.30", optional = true }
 rand    = { version = "0.8", optional = true }

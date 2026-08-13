@@ -307,22 +307,22 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 
 Goal: an agent holding only a funded wallet key can purchase, activate, and launch a wrapped binary in one programmatic pass — and every contract deployed from here on carries the protocol's economics and ownership invariants.
 
-### 2.1 — Headless activation `[complete]`
+### 2.1 - Headless activation `[complete]`
 
 The agent path: signer in, session out. No webview, no IPC round-trips, no human.
 `ensure_headless` runs the whole pipeline in one call and reuses every module
-below the front door unchanged — the webview really was the only human-shaped
+below the front door unchanged - the webview really was the only human-shaped
 piece.
 
 **The design tension, and how it is resolved.** Every Phase 1 flow rests on "the
-wrapper never holds keys — it encodes calldata and the user broadcasts."
+wrapper never holds keys - it encodes calldata and the user broadcasts."
 Headless necessarily signs and broadcasts. The capability is contained rather
 than spread: it exists only behind the `headless` feature, callers see an
 object-safe `Signer` trait whose single primitive is "sign this 32-byte digest"
 (so a KMS/enclave backend serves it without releasing a key), and exactly one
-type in the crate — `signer::LocalSigner` — ever touches raw key material.
+type in the crate - `signer::LocalSigner` - ever touches raw key material.
 
-**Front doors are now features** — `webview` and `headless`, composable
+**Front doors are now features** - `webview` and `headless`, composable
 
 `wry`/`tao` were unconditional dependencies, so every tier bundle dragged in the
 GUI stack. They are now `optional`, pulled only by the new `webview` feature;
@@ -332,7 +332,7 @@ the GUI rather than merely not using it.
 
 | Feature | Pulls | Purpose |
 |---|---|---|
-| `webview` | `wry`, `tao` | Native activation window — the human fallback floor |
+| `webview` | `wry`, `tao` | Native activation window - the human fallback floor |
 | `headless` | `session` + `onchain-read` + `onchain-write` + `cooldown`, `zeroize`, `alloy/signer-local`, `alloy/signer-keystore` | Signer-in / session-out activation |
 
 `default = ["tier-2", "webview"]` preserves the historical default build.
@@ -340,45 +340,46 @@ the GUI rather than merely not using it.
 without `activate()` + cooldown + purchase), so `--features headless` and
 `--features tier-3,headless` are the same build.
 
-**`signer.rs` (new, gated on `headless`)** — the one auditable place for key material
-- `trait Signer: Send + Sync` — `address()`, `sign_prehash(B256)`, `source()`. Object-safe; the flow takes `&dyn Signer`. One signing primitive is the smallest operation every backend supports, so KMS/HSM/enclave impls need expose nothing else
-- `personal_sign(signer, preimage)` — applies the EIP-191 prefix and emits `r || s || v` hex with `v ∈ {27,28}`, the exact shape `session::verify_local` already expects, so headless sessions verify through the same code path as webview ones
-- `LocalSigner` — holds a `k256::ecdsa::SigningKey`. Constructors: `from_hex` (crate-private), `from_env` (`RUB3_AGENT_KEY`), `from_keystore` (Web3 Secret Storage V3 via `alloy/signer-keystore`)
-- `resolve_signer()` — precedence is strict: `RUB3_AGENT_KEY`, then keystore (`RUB3_AGENT_KEYSTORE`, else `~/.rub3/agent-key.json` if present) with the password from `RUB3_AGENT_KEYSTORE_PASSWORD_FILE` (preferred) or `RUB3_AGENT_KEYSTORE_PASSWORD`. A **malformed** env key is a hard error, never a silent fall-through to a keystore — falling through would activate under a different identity
-- Leak containment: hand-written `Debug` prints address + source and `<redacted>`; no `Display`, no `Serialize`; `SignerError` variants carry only fixed strings and at most a path — the underlying hex/keystore errors are dropped, not forwarded, because `hex::decode` names the offending character and keystore errors can distinguish a wrong password; no `unwrap`/`expect`/`panic!` anywhere on the production load path; decoded key bytes and the password buffer are zeroized after use
+**`signer.rs` (new, gated on `headless`)** - the one auditable place for key material
+- `trait Signer: Send + Sync` - `address()`, `sign_prehash(B256)`, `source()`. Object-safe; the flow takes `&dyn Signer`. One signing primitive is the smallest operation every backend supports, so KMS/HSM/enclave impls need expose nothing else
+- `personal_sign(signer, preimage)` - applies the EIP-191 prefix and emits `r || s || v` hex with `v ∈ {27,28}`, the exact shape `session::verify_local` already expects, so headless sessions verify through the same code path as webview ones
+- `LocalSigner` - holds a `k256::ecdsa::SigningKey`. Constructors: `from_hex` (crate-private), `from_env` (`RUB3_AGENT_KEY`), `from_keystore` (Web3 Secret Storage V3 via `alloy/signer-keystore`)
+- `resolve_signer()` - precedence is strict: `RUB3_AGENT_KEY`, then keystore (`RUB3_AGENT_KEYSTORE`, else `~/.rub3/agent-key.json` if present) with the password from `RUB3_AGENT_KEYSTORE_PASSWORD_FILE` (preferred) or `RUB3_AGENT_KEYSTORE_PASSWORD`. A **malformed** env key is a hard error, never a silent fall-through to a keystore - falling through would activate under a different identity
+- Leak containment: hand-written `Debug` prints address + source and `<redacted>`; no `Display`, no `Serialize`; `SignerError` variants carry only fixed strings and at most a path - the underlying hex/keystore errors are dropped, not forwarded, because `hex::decode` names the offending character and keystore errors can distinguish a wrong password; no `unwrap`/`expect`/`panic!` anywhere on the production load path; decoded key bytes and the password buffer are zeroized after use
 
-**`tx.rs` (new, gated on `headless`)** — calldata → broadcast, no key material
+**`tx.rs` (new, gated on `headless`)** - calldata → broadcast, no key material
 - `TxPlan { to, value, input }` and `send(rpc_url, signer, plan) -> tx_hash`: reads nonce + chain id + `estimate_eip1559_fees`, estimates gas with a 25% buffer, checks the balance covers `value + gas_limit × max_fee_per_gas`, signs the `TxEip1559` sighash via `Signer::sign_prehash`, and submits the 2718-encoded envelope with `eth_sendRawTransaction`
-- `TxError::InsufficientFunds` is raised both from the pre-flight balance check (which knows the numbers) and by recognising the node's own "insufficient funds" wording (which does not) — so the CLI can return the dedicated exit code either way
+- `TxError::InsufficientFunds(Option<Shortfall>)` is raised both from the pre-flight balance check (which knows the numbers, and carries them) and by recognising the node's own "insufficient funds" wording (which does not, and carries `None`) - so the CLI returns the dedicated exit code either way, and the `rub3-detail:` line is omitted rather than reporting a shortfall of zero
 
-**`activation.rs`** — `ensure_headless` plus the shared fast path
+**`activation.rs`** - `ensure_headless` plus the shared fast path
 - `pub mod activation` (was private) so `activation::ensure_headless` is the real path
 - `ensure_headless(&dyn Signer, &HeadlessContext) -> (Session, HeadlessOutcome)`: cached-session fast path → chain-id guard → `tokens_of_owner` → (empty → `purchase()`) → `cooldown_ready` → `activate()` → `wait_for_receipt` → `draft_from_activation` → `personal_sign` → `verify_local` → `save_session`
-- `HeadlessOutcome { Reused | Activated | PurchasedAndActivated { token_id, price_wei } }` — lets an orchestrator tell "launched from cache" from "spent money"
-- `try_session_fast_path` gained a `require_wallet` parameter and now returns the session rather than a bool. The interactive door passes `None` (whoever last activated on this machine is the user); headless passes its signer's address, so an agent never launches on a session belonging to a different key
-- `--token-id N` that the signer does not hold is a hard error, never a fallback purchase — buying a different token than the one asked for spends money the caller did not authorise
+- `HeadlessOutcome { Reused | Activated | PurchasedAndActivated { token_id, price_wei } }` - lets an orchestrator tell "launched from cache" from "spent money"
+- `try_session_fast_path` gained `require_wallet` + `require_token` parameters and now returns the session rather than a bool. The interactive door passes `None` for both (whoever last activated on this machine is the user); headless passes its signer's address, so an agent never launches on a session belonging to a different key, and passes `--token-id` when given, so an explicit token constrains cache reuse exactly as it constrains purchasing
+- `--token-id N` that the signer does not hold is a hard error, never a fallback purchase - buying a different token than the one asked for spends money the caller did not authorise. The same id also narrows the cached-session fast path, so a session for another token cannot stand in for the one that was asked for
+- A malformed `CONTRACT` constant routes to `NoContract` (exit 1), the same terminal classification as the zero address: both mean "no usable contract was compiled in", and neither is worth a retry
 - Chain-id guard: the node's `eth_chainId` is compared to the build's before anything is signed. A wrapper packed for Base and pointed elsewhere would otherwise broadcast a perfectly valid transaction to the wrong network
 - `ActivationError::NoInteractiveFrontDoor` for builds compiled without `webview`; `interactive_slow_path` is cfg-split so the webview types are referenced only when they exist
 
-**Shared, not forked** — the two doors sit on identical machinery
+**Shared, not forked** - the two doors sit on identical machinery
 - `rpc::wait_for_receipt` (+ `RECEIPT_POLL_ATTEMPTS`/`RECEIPT_POLL_INTERVAL_SECS`) replaces the private `poll_receipt` that lived in `webview.rs`; both doors now use the same 30s budget
 - `session::draft_from_activation(...) -> SessionDraft` lifts the whole post-activation block out of `webview.rs::spawn_tx_poller`: reads `activeSessionId`, resolves the identity model, derives the ERC-6551 TBA for account-model deploys, mints the nonce, computes `expires_at`, and builds the preimage. One producer means the doors can never drift into signing different bytes for the same on-chain facts. The draft also carries the **normalised lower-case wallet string** the preimage commits to, and the webview echoes that back through `onTxConfirmed` so JS returns the exact value that was hashed
-- `rpc::chain_id()` — new reader for the pre-signing guard
+- `rpc::chain_id()` - new reader for the pre-signing guard
 
-**CLI (`main.rs`)** — `rub3-wrapper --headless [--token-id N]`
+**CLI (`main.rs`)** - `rub3-wrapper --headless [--token-id N]`
 - `--headless` parses on every build; a build without the feature exits **18** rather than a clap usage error, so an orchestrator that picked the wrong binary learns that specifically
 - `activation::EXIT_CODE_HELP` is rendered into `--help`, so the contract is discoverable from the binary and not only from the docs. Exit codes are defined unconditionally in `activation.rs` (not inside the gated module) precisely so code 18 exists in non-headless builds
-- Failures print one human line plus, when structured, one `rub3-detail: key=value` line — `blocks_remaining=N` for cooldown, `required_wei`/`available_wei` for funds, `supply_cap`/`minted` for sold out
+- Failures print one human line plus, when structured, one `rub3-detail: key=value` line - `blocks_remaining=N` for cooldown, `required_wei`/`available_wei` for funds, `supply_cap`/`minted` for sold out
 
 | Code | Meaning |
 |---|---|
-| 0 | success — session valid, wrapped binary launched |
+| 0 | success - session valid, wrapped binary launched |
 | 1 | unclassified failure |
 | 2 | command-line usage error (clap; reserved, nothing of ours collides) |
 | 10 | no usable signer |
 | 11 | insufficient funds for purchase + gas |
 | 12 | no token held and supply sold out |
-| 13 | cooldown active — `blocks_remaining=N` on stderr |
+| 13 | cooldown active - `blocks_remaining=N` on stderr |
 | 14 | activation failed (tx reverted, or not confirmed in time) |
 | 15 | session verification failed |
 | 16 | chain RPC / transport failure |
@@ -388,19 +389,19 @@ without `activate()` + cooldown + purchase), so `--features headless` and
 | 20 | `--token-id` names a token this signer does not hold |
 
 **Tests**
-- `signer.rs`: 20 tests — hex accepted bare/prefixed/whitespace-padded, rejected for wrong length, non-hex, and out-of-range scalars (zero and above the curve order); `Debug` redaction and error messages asserted **not** to echo the input; `personal_sign` round-trips through `license::recover_address`; `sign_prehash` recovers the signer address; RFC-6979 determinism; env-over-keystore precedence; no fall-through on a malformed env key; keystore decrypt via a keystore written in-test; password-file preferred over the inline var, trailing newline stripped; wrong password opaque and not echoed; missing file/password reported
-- `tx.rs`: 5 tests — invalid-URL transport error, the `insufficient funds` classifier (match, case-insensitive, pass-through), and the amounts appearing in the message
-- `activation.rs`: 8 tests — the full exit-code table asserted value-by-value, all classified codes distinct and disjoint from 0/1/2, `machine_detail` contents for cooldown/funds/sold-out, no detail line for unclassified failures, and `TxError → HeadlessError` code mapping
+- `signer.rs`: 20 tests - hex accepted bare/prefixed/whitespace-padded, rejected for wrong length, non-hex, and out-of-range scalars (zero and above the curve order); `Debug` redaction and error messages asserted **not** to echo the input; `personal_sign` round-trips through `license::recover_address`; `sign_prehash` recovers the signer address; RFC-6979 determinism; env-over-keystore precedence; no fall-through on a malformed env key; keystore decrypt via a keystore written in-test; password-file preferred over the inline var, trailing newline stripped; wrong password opaque and not echoed; missing file/password reported
+- `tx.rs`: 6 tests - invalid-URL transport error, the `insufficient funds` classifier (match, case-insensitive, pass-through, and carrying no amounts because it only matched a string), and the amounts appearing in the message when they are known
+- `activation.rs`: 10 tests - the full exit-code table asserted value-by-value, all classified codes distinct and disjoint from 0/1/2, `machine_detail` contents for cooldown/funds/sold-out, no detail line for unclassified failures or for a node-reported shortfall with unknown amounts, a malformed contract classified as terminal rather than retryable, and `TxError → HeadlessError` code mapping
 - `rpc.rs`: 1 new transport-error test for `chain_id()`
-- `tests/headless_e2e.rs` (new, anvil-gated, `#[ignore]`, zero webview involvement — the test binary links neither `wry` nor `tao`): 6 tests, each on a **freshly generated key** resolved through the real `RUB3_AGENT_KEY` path with an isolated `RUB3_SESSION_DIR`. Happy path funds the key, purchases at a non-zero price (0.01 ETH, so the value-transfer and balance paths are actually exercised), activates, and asserts ownership, `nextTokenId`, every session field, `verify_local`, `verify_onchain`, on-disk persistence, then **relaunches and asserts `Reused` with no new mint**. Plus: insufficient funds (11), sold out against a supply cap of 1 (12), cooldown active reporting `blocks_remaining` then succeeding after `anvil_mine` with `session_id` bumped to 2 (13), explicit `--token-id` not owned minting nothing (20), and chain-id mismatch refused before signing (19). Skips gracefully when Foundry is absent, matching `session_onchain_e2e.rs`. Runs on port 8549 so both suites can run side by side; `session_onchain_e2e.rs` was not modified
+- `tests/headless_e2e.rs` (new, anvil-gated, `#[ignore]`, zero webview involvement - the test binary links neither `wry` nor `tao`): 7 tests, each on a **freshly generated key** resolved through the real `RUB3_AGENT_KEY` path with an isolated `RUB3_SESSION_DIR`. Happy path funds the key, purchases at a non-zero price (0.01 ETH, so the value-transfer and balance paths are actually exercised), activates, and asserts ownership, `nextTokenId`, every session field, `verify_local`, `verify_onchain`, on-disk persistence, then **relaunches and asserts `Reused` with no new mint**. Plus: insufficient funds (11), sold out against a supply cap of 1 (12), cooldown active reporting `blocks_remaining` then succeeding after `anvil_mine` with `session_id` bumped to 2 (13), explicit `--token-id` not owned minting nothing (20), explicit `--token-id` refusing to reuse a cached session minted for a different token (20), and chain-id mismatch refused before signing (19). Skips gracefully when Foundry is absent, matching `session_onchain_e2e.rs`. Runs on port 8549 so both suites can run side by side, and serialises its own tests through a file-level mutex covering the port and the process-global env vars, so no `--test-threads=1` is required; `session_onchain_e2e.rs` was not modified
 
 **Verification**
 - `cargo test -p rub3-wrapper --lib` (default tier-2 + webview): 58 pass (up from 57)
 - `cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib`: 62 pass (up from 61)
-- `cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib`: 95 pass
+- `cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib`: 98 pass
 - All five tier bundles (`tier-0`/`1`/`2`/`3`/`4`) compile clean, plus `headless` alone and `tier-3,headless`
-- **No GUI in a headless build**: `cargo tree --no-default-features --features tier-3,headless` contains neither `wry` nor `tao`, nor any of the 20 GUI crates the webview build pulls (`cocoa`, `core-graphics`, `objc`, `dpi`, `raw-window-handle`, …). On macOS the release binary links no WebKit, AppKit, QuartzCore, or `libobjc` — only `Security`, `CoreFoundation`, `libiconv`, `libSystem`
-- Anvil-gated headless e2e: 6 pass. Existing `session_verify_onchain_e2e` still passes untouched
+- **No GUI in a headless build**: `cargo tree --no-default-features --features tier-3,headless` contains neither `wry` nor `tao`, nor any of the 20 GUI crates the webview build pulls (`cocoa`, `core-graphics`, `objc`, `dpi`, `raw-window-handle`, …). On macOS the release binary links no WebKit, AppKit, QuartzCore, or `libobjc` - only `Security`, `CoreFoundation`, `libiconv`, `libSystem`
+- Anvil-gated headless e2e: 7 pass, run without `--test-threads=1`. Existing `session_verify_onchain_e2e` still passes untouched
 - No new clippy warnings in any changed or added file
 
 **Deferred to §2.2**

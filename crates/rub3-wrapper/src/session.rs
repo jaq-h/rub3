@@ -289,7 +289,7 @@ pub fn should_reverify() -> bool {
 // ── Tier-3 session drafting ───────────────────────────────────────────────────
 
 /// Everything a confirmed `activate()` transaction determines about the session
-/// that follows it — everything except the wallet signature.
+/// that follows it - everything except the wallet signature.
 ///
 /// Produced by [`draft_from_activation`] and consumed by both front doors: the
 /// webview serialises it to JS for the signing screen, headless signs `message`
@@ -306,7 +306,7 @@ pub struct SessionDraft {
     pub wallet: String,
     /// Stable identity key the app sees: wallet (access) or TBA (account).
     pub user_id: String,
-    /// Derived token-bound account — account model only.
+    /// Derived token-bound account - account model only.
     pub tba: Option<String>,
     pub nonce: String,
     pub expires_at: String,
@@ -333,7 +333,7 @@ impl SessionDraft {
 /// and builds the session message over all of it.
 ///
 /// `block_hash` is the activation transaction's block hash, which binds the
-/// session to a specific point on the chain — `verify_onchain` re-checks it.
+/// session to a specific point on the chain - `verify_onchain` re-checks it.
 ///
 /// Errors are returned as display strings: the callers surface them to a UI or
 /// wrap them in their own error type, and none of them branch on the variant.
@@ -352,7 +352,7 @@ pub fn draft_from_activation(
     let session_id = crate::rpc::active_session_id(rpc_url, contract, token_id)
         .map_err(|e| format!("failed to read activeSessionId: {e}"))?;
 
-    // Identity model + TBA derivation. The TBA is pure CREATE2 — no RPC beyond
+    // Identity model + TBA derivation. The TBA is pure CREATE2 - no RPC beyond
     // reading the implementation address the contract was deployed with.
     let model_u8 = crate::rpc::identity_model(rpc_url, contract)
         .map_err(|e| format!("failed to read identityModel: {e}"))?;

@@ -25,11 +25,11 @@ cd contracts && forge test                # in-process EVM: no network, no .env
 
 `forge` resolves `contracts/foundry.toml`, so it must run from `contracts/`; it fails at the repo root. OpenZeppelin and forge-std are git submodules, and `forge test` clones them at the pinned revisions on first run, so `git submodule update --init --recursive` is optional.
 
-There is no CI workflow in this repo: every check here is the contributor's job.
+CI runs on every PR and on pushes to `main` (`.github/workflows/ci.yml`): the wrapper feature matrix, `forge test`, and the anvil-gated on-chain e2e. The fmt/clippy job is deliberately non-blocking, so formatting and lint are still the contributor's job.
 
 ## Tier feature bundles (read before touching the wrapper)
 
-`crates/rub3-wrapper/Cargo.toml` defines five tier bundles over six composable capability flags. Exactly one bundle is selected at pack time; `binary-encryption` is an orthogonal add-on that composes with tier-3+.
+`crates/rub3-wrapper/Cargo.toml` defines five tier bundles over composable capability flags, plus two front-door features. A build selects exactly one tier bundle at pack time AND at least one front door: `webview` (native activation window, pulls `wry`/`tao`) or `headless` (signer in, session out, no GUI dependency at all). Tier bundles name no front door, so `--no-default-features --features tier-3` alone builds a binary whose interactive activation always fails with `NoInteractiveFrontDoor`. `binary-encryption` is an orthogonal add-on that composes with tier-3+.
 
 | Bundle | Capability flags |
 |---|---|
@@ -43,11 +43,12 @@ Consequences that catch people out:
 
 - **Whole modules are `#[cfg]`-gated out.** `src/lib.rs` is the authority. Under `tier-0` the `session`, `identity`, and `session_store` modules do not exist at all, so the set of compiled tests changes with the bundle. Code that builds and passes under the default proves nothing about `tier-0` or `tier-3`.
 - **Cargo features are additive, so `--no-default-features` is mandatory.** `--features tier-0` on its own leaves the `tier-2` default enabled and silently tests tier-2 instead. Always pass `--no-default-features --features <bundle>`.
-- **Run the matrix before claiming a wrapper change works.** All six must pass. The last entry is the only one that compiles `src/decrypt.rs`, since no tier bundle enables `binary-encryption`:
+- **Run the matrix before claiming a wrapper change works.** All eight must pass. `tier-3,binary-encryption` is the only entry that compiles `src/decrypt.rs`, since no tier bundle enables `binary-encryption`; the last two are the only ones that compile a front door, `src/webview.rs` and the headless door respectively:
 
 ```bash
 fail=0
-for t in tier-0 tier-1 tier-2 tier-3 tier-4 tier-3,binary-encryption; do
+for t in tier-0 tier-1 tier-2 tier-3 tier-4 tier-3,binary-encryption \
+         tier-2,webview tier-3,headless; do
   cargo test -p rub3-wrapper --no-default-features --features "$t" \
     && echo "$t ok" || { echo "$t FAILED"; fail=1; }
 done

@@ -1,11 +1,11 @@
 name: CI
 
-# Runners are macOS because the wrapper links `wry` + `tao` unconditionally
-# (src/webview.rs is not feature-gated). On Linux those need webkit2gtk/GTK
-# system packages installed via apt, and this workflow was verified end to end
-# on macOS only -- no step here is guessed. Once the `headless` feature lands
-# and makes the webview optional, a headless bundle can move to ubuntu-latest,
-# which is faster and cheaper.
+# Runners are macOS because any build with the `webview` feature links `wry` +
+# `tao`, and the default feature set enables it, so the lint job compiles them.
+# On Linux those need webkit2gtk/GTK system packages installed via apt, and this
+# workflow was verified end to end on macOS only -- no step here is guessed.
+# The tier and headless bundles below build with --no-default-features and link
+# neither, so they could move to ubuntu-latest once that is verified.
 
 on:
   pull_request:
@@ -50,10 +50,8 @@ jobs:
             features: tier-3
           - bundle: tier-4
             features: tier-4
-          # The `headless` feature does not exist on main yet. When it lands,
-          # uncomment these two lines to cover it composed with tier-3:
-          # - bundle: tier-3 + headless
-          #   features: tier-3,headless
+          - bundle: tier-3 + headless
+            features: tier-3,headless
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -64,7 +62,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           # Feature sets produce different artifacts; keep a cache per bundle
-          # so the five jobs do not evict each other.
+          # so the matrix jobs do not evict each other.
           key: ${{ matrix.bundle }}
 
       - name: Build (${{ matrix.bundle }})

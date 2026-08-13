@@ -278,7 +278,7 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
     })
 }
 
-/// Tx receipt polling budget — attempts × interval = total wait.
+/// Tx receipt polling budget - attempts × interval = total wait.
 ///
 /// 30s covers Base's ~2s soft finality with a wide margin; it is also the
 /// budget the interactive flow has always used, kept identical here so the
