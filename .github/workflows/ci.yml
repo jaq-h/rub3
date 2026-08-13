@@ -74,6 +74,55 @@ jobs:
         run: cargo test -p rub3-wrapper --no-default-features --features ${{ matrix.features }}
 
   # ---------------------------------------------------------------------------
+  # Formatting and lint. NON-BLOCKING on purpose: both fail on main today, so
+  # gating on them would block every unrelated PR.
+  #
+  # Measured on fee0124 (current origin/main), which this branch changes only
+  # under .github/, so these are main's numbers:
+  #
+  #   cargo fmt --all -- --check                 exit 1, 112 diff hunks across
+  #                                              11 files (hand-aligned struct
+  #                                              literals and match arms that
+  #                                              rustfmt wants to collapse)
+  #
+  #   cargo clippy --all-targets -- -D warnings  exit 101, 6 warnings:
+  #                                                too_many_arguments (10/7)
+  #                                                map_or can be simplified
+  #                                                immediately dereferencing a ref
+  #                                                function item cast to integer
+  #                                                unread field session_ttl_secs
+  #                                                unused fn generate_wallet
+  #
+  # Cleanup is deliberately deferred to its own task (rub3-fmt-clippy) rather
+  # than done here: this PR is CI configuration only, and a whole-repo reformat
+  # would conflict with every branch currently open against
+  # crates/rub3-wrapper/. When that task lands, delete the `continue-on-error`
+  # below and these become real gates.
+  #
+  # clippy runs with `-D warnings` on purpose: plain `cargo clippy` exits 0 even
+  # when it emits warnings, so a permissive clippy job would sit green forever
+  # and prove nothing.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: lint (non-blocking, failing on main today)
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: lint
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # always() so a fmt failure does not hide the clippy result.
+      - name: cargo clippy
+        if: always()
+        run: cargo clippy -p rub3-wrapper --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------------
   # Solidity. `forge test` MUST run from contracts/ -- remappings.txt uses paths
   # relative to that directory, so at the repo root it fails to resolve
   # forge-std/Test.sol. OpenZeppelin and forge-std are git submodules, hence
