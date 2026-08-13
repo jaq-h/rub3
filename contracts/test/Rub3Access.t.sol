@@ -179,7 +179,7 @@ contract Rub3AccessTest is Test {
         nft.addWrapperHash(newHash);
         assertEq(uint8(nft.wrapperHashes(newHash)), uint8(Rub3License.HashStatus.Valid));
 
-        // Appended, not replaced — the launch hash is still verifiable.
+        // Appended, not replaced - the launch hash is still verifiable.
         assertEq(uint8(nft.wrapperHashes(WRAPPER_HASH)), uint8(Rub3License.HashStatus.Valid));
         assertEq(nft.wrapperHashCount(), 2);
     }

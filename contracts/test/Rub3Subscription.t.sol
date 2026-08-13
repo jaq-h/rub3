@@ -106,7 +106,7 @@ contract Rub3SubscriptionTest is Test {
     // Renewal terms are the one thing a subscription carries past the sale, so
     // they are frozen per token at mint: `period` is immutable contract-wide and
     // `renewPrice[tokenId]` is written once, at mint, by `purchase`. `renew`
-    // charges that snapshot. A developer can move `price` freely — it reaches
+    // charges that snapshot. A developer can move `price` freely - it reaches
     // new buyers only.
 
     function test_renewPrice_snapshottedAtMint() public {
@@ -135,7 +135,7 @@ contract Rub3SubscriptionTest is Test {
         assertEq(nft.expiresAt(id), expiry + PERIOD);
     }
 
-    /// The snapshot is what `renew` reads, not `price` — proved from the other
+    /// The snapshot is what `renew` reads, not `price` - proved from the other
     /// direction: after a price *cut*, paying the new lower price is rejected
     /// against the token's own frozen price. Frozen terms are a fixed contract,
     /// not a best-price guarantee; a developer who wants to pass a cut on to
@@ -184,7 +184,7 @@ contract Rub3SubscriptionTest is Test {
         vm.stopPrank();
     }
 
-    /// Overpaying `price` at mint does not inflate the snapshot — it tracks the
+    /// Overpaying `price` at mint does not inflate the snapshot - it tracks the
     /// listed price, not what happened to be sent.
     function test_renewPrice_snapshotTracksListedPriceNotAmountPaid() public {
         vm.prank(alice);

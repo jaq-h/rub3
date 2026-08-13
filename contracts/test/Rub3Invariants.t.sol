@@ -11,12 +11,12 @@ import {Rub3License}      from "../src/Rub3License.sol";
 /// Every test here exists to fail loudly if somebody later reintroduces a way to
 /// take back something already granted. Three groups:
 ///
-///   1. **Append-only wrapper hash set** — old releases stay verifiable forever,
+///   1. **Append-only wrapper hash set** - old releases stay verifiable forever,
 ///      compromised builds are flagged with a stated reason, and hash status is
 ///      structurally unable to reach token validity.
-///   2. **Successor pattern** — the three hard guarantees, each with a test that
+///   2. **Successor pattern** - the three hard guarantees, each with a test that
 ///      fails if the guarantee is removed.
-///   3. **No-revocation audit** — the machine-checkable claim itself: the burn /
+///   3. **No-revocation audit** - the machine-checkable claim itself: the burn /
 ///      admin-transfer / pause selectors are absent from the deployed bytecode,
 ///      and the contract owner exercising every power it *does* have cannot
 ///      disturb an issued token.
@@ -189,7 +189,7 @@ contract Rub3InvariantsTest is Test {
         assertFalse(nft.isWrapperHashValid(HASH_V1));
         assertEq(nft.revocationReason(HASH_V1), reason);
 
-        // Still enumerable — revocation is a flag, never a deletion.
+        // Still enumerable - revocation is a flag, never a deletion.
         assertEq(nft.wrapperHashCount(), 2);
         assertEq(nft.wrapperHashAt(0), HASH_V1);
     }
@@ -222,7 +222,7 @@ contract Rub3InvariantsTest is Test {
 
     /// ── Acceptance criterion ──────────────────────────────────────────────────
     /// Revoking a *binary hash* must never touch *token validity*. Revoke every
-    /// hash in the set — including the one the holder bought under — and the
+    /// hash in the set - including the one the holder bought under - and the
     /// token is untouched: still owned, still activatable, still valid.
     function test_revokedHash_doesNotAffectIssuedToken() public {
         uint256 id = _mint(alice);
@@ -249,7 +249,7 @@ contract Rub3InvariantsTest is Test {
         uint256 secondSession = nft.activate(id);
         assertGt(secondSession, firstSession);
 
-        // transfer: still works — the entitlement remains a tradable asset.
+        // transfer: still works - the entitlement remains a tradable asset.
         vm.prank(alice);
         nft.transferFrom(alice, bob, id);
         assertEq(nft.ownerOf(id), bob);
@@ -272,7 +272,7 @@ contract Rub3InvariantsTest is Test {
     }
 
     /// A token can be purchased and activated on a contract whose entire hash
-    /// set is revoked — the chain never gates issuance or activation on binary
+    /// set is revoked - the chain never gates issuance or activation on binary
     /// trust. (Binary trust is the wrapper's job, and it fails closed locally.)
     function test_revokedHash_doesNotBlockNewPurchaseOrActivation() public {
         vm.startPrank(owner);
@@ -286,7 +286,7 @@ contract Rub3InvariantsTest is Test {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // 2. Successor pattern — three hard guarantees
+    // 2. Successor pattern - three hard guarantees
     // ══════════════════════════════════════════════════════════════════════════
 
     // ── Guarantee 1: the old contract validates its tokens forever ────────────
@@ -299,7 +299,7 @@ contract Rub3InvariantsTest is Test {
         vm.prank(owner);
         nft.setSuccessor(address(v2));
 
-        // Pointer set — nothing about the old token moved.
+        // Pointer set - nothing about the old token moved.
         assertEq(nft.successor(), address(v2));
         assertEq(nft.ownerOf(id), alice);
         assertTrue(nft.honorsContract(address(nft), id));
@@ -378,7 +378,7 @@ contract Rub3InvariantsTest is Test {
 
     function test_constructor_rejectsSelfPredecessor() public {
         // Predict the address this deploy will land at, then hand it to itself
-        // as `predecessor` — a cycle that would make `honorsContract` answer for
+        // as `predecessor` - a cycle that would make `honorsContract` answer for
         // a contract that is its own ancestor.
         address next = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
 
@@ -391,9 +391,9 @@ contract Rub3InvariantsTest is Test {
 
     // ── Guarantee 2: migration is holder-initiated, never forced ──────────────
 
-    /// Fails if anyone adds a push-migration path. Nobody but the holder — not
+    /// Fails if anyone adds a push-migration path. Nobody but the holder - not
     /// the old contract's owner, not the new contract's owner, not a third
-    /// party — can cause a claim.
+    /// party - can cause a claim.
     function test_migration_isHolderInitiatedOnly() public {
         uint256 id = _mint(alice);
         Rub3Access v2 = _deploySuccessor(address(nft));
@@ -410,7 +410,7 @@ contract Rub3InvariantsTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.NotTokenOwner.selector, attacker, alice));
         v2.claimFromPredecessor(id);
 
-        // Nor can the successor's owner (same address here — same rejection).
+        // Nor can the successor's owner (same address here - same rejection).
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(Rub3License.NotTokenOwner.selector, bob, alice));
         v2.claimFromPredecessor(id);
@@ -481,7 +481,7 @@ contract Rub3InvariantsTest is Test {
 
     function test_migration_requiresSuccessorToOptIn() public {
         uint256 id = _mint(alice);
-        // Deployed without declaring a predecessor — a paid major version, say.
+        // Deployed without declaring a predecessor - a paid major version, say.
         Rub3Access v2 = _deploySuccessor(address(0));
 
         vm.prank(owner);
@@ -528,7 +528,7 @@ contract Rub3InvariantsTest is Test {
         v2.claimFromPredecessor(id);
     }
 
-    /// Subscriptions migrate with their frozen terms intact — remaining time and
+    /// Subscriptions migrate with their frozen terms intact - remaining time and
     /// snapshotted renewal price both carry across. Migration is not a repricing
     /// event and not a reset.
     function test_migration_carriesFrozenSubscriptionTerms() public {
@@ -560,7 +560,7 @@ contract Rub3InvariantsTest is Test {
 
     // ── Guarantee 3: the wrapper's trust rule ─────────────────────────────────
 
-    /// "contract X, or X's successor holding a token claimed from X" — the whole
+    /// "contract X, or X's successor holding a token claimed from X" - the whole
     /// rule, evaluated on-chain in one call.
     function test_trustRule_honorsContract() public {
         uint256 id = _mint(alice);
@@ -594,7 +594,7 @@ contract Rub3InvariantsTest is Test {
     }
 
     /// A claim, once made, is a grant. Repointing the predecessor's successor
-    /// afterwards must not retroactively unmake it — which is why the successor
+    /// afterwards must not retroactively unmake it - which is why the successor
     /// records the check at claim time rather than re-reading it here.
     function test_trustRule_survivesSuccessorRepoint() public {
         uint256 id = _mint(alice);
@@ -678,17 +678,17 @@ contract Rub3InvariantsTest is Test {
         ];
 
         string[24] memory forbidden = [
-            // Burn — nothing may destroy an issued token.
+            // Burn - nothing may destroy an issued token.
             "burn(uint256)",
             "burn(address,uint256)",
             "burnFrom(address,uint256)",
-            // Admin transfer / seizure — nothing may move a token its holder did
+            // Admin transfer / seizure - nothing may move a token its holder did
             // not consent to move.
             "adminTransfer(address,address,uint256)",
             "forceTransfer(address,address,uint256)",
             "seize(uint256)",
             "clawback(uint256)",
-            // Pause — validation reads must never be switchable off.
+            // Pause - validation reads must never be switchable off.
             "pause()",
             "unpause()",
             "paused()",
@@ -699,7 +699,7 @@ contract Rub3InvariantsTest is Test {
             "invalidate(uint256)",
             "setExpiresAt(uint256,uint256)",
             "setRenewPrice(uint256,uint256)",
-            // Proxies / upgrade hooks — code is frozen at deploy.
+            // Proxies / upgrade hooks - code is frozen at deploy.
             "upgradeTo(address)",
             "upgradeToAndCall(address,bytes)",
             "initialize()",
@@ -740,7 +740,7 @@ contract Rub3InvariantsTest is Test {
     }
 
     /// The owner exercises every power it has, at once, as hostilely as the ABI
-    /// permits — and the issued token is untouched by all of it.
+    /// permits - and the issued token is untouched by all of it.
     function test_audit_ownerDoesItsWorst_tokenSurvives() public {
         uint256 id = _mint(alice);
         vm.prank(alice);
@@ -805,4 +805,135 @@ contract Rub3InvariantsTest is Test {
         vm.prank(alice);
         assertEq(sub.activate(id), 1);
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // 4. Mint ordering and predecessor typing
+    //
+    //    Both protect the same thing from a different side: a grant must be
+    //    whole the moment it exists, and a migration promised at deploy must
+    //    still be redeemable years later.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// `_safeMint` hands control to a contract recipient while the token already
+    /// exists. Its frozen terms must exist by then too, or the recipient can act
+    /// on a token that is not yet the thing it was sold.
+    function test_mintOrdering_subscriptionTermsExistBeforeRecipientCallback() public {
+        Rub3Subscription sub = _deploySubscription(address(0));
+        MintCallbackProbe probe = new MintCallbackProbe();
+        vm.deal(address(probe), 10 ether);
+        probe.watch(sub);
+
+        uint256 id = probe.buy(PRICE);
+
+        assertTrue(probe.fired(), "the recipient callback must have run");
+        assertEq(probe.seenRenewPrice(), PRICE, "renewal snapshot is frozen before the callback");
+        assertEq(probe.seenExpiresAt(), sub.expiresAt(id), "expiry is set before the callback");
+    }
+
+    /// Same guarantee on the claim path: a migrating holder's carried terms and
+    /// their `wasClaimed` provenance are both in place before the callback.
+    function test_mintOrdering_claimStateExistsBeforeRecipientCallback() public {
+        Rub3Subscription v1 = _deploySubscription(address(0));
+        MintCallbackProbe probe = new MintCallbackProbe();
+        vm.deal(address(probe), 10 ether);
+        probe.watch(v1);
+        uint256 id = probe.buy(PRICE);
+
+        Rub3Subscription v2 = _deploySubscription(address(v1));
+        vm.startPrank(owner);
+        v1.setSuccessor(address(v2));
+        v2.setPrice(PRICE * 10); // v2 sells dearer; the carried snapshot must win
+        vm.stopPrank();
+
+        uint256 newId = probe.claim(v2, id);
+
+        assertTrue(probe.seenWasClaimed(), "claim provenance is recorded before the callback");
+        assertEq(probe.seenRenewPrice(), PRICE, "the carried renewal price is set before the callback");
+        assertEq(v2.renewPrice(newId), PRICE);
+    }
+
+    /// `predecessor` is immutable, so a subscription pointed at a contract that
+    /// cannot answer `period()` would brick every holder's claim with no remedy
+    /// but redeployment. It fails at deploy instead, loudly and by name.
+    function test_predecessorProbe_rejectsNonSubscriptionPredecessor() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3Subscription.IncompatiblePredecessor.selector, address(nft))
+        );
+        new Rub3Subscription(
+            "Rub3 Sub", "R3S", 0, address(0),
+            _hashes(HASH_V1), PRICE, 0, PERIOD, COOLDOWN_BLOCKS,
+            address(nft), owner
+        );
+    }
+
+    /// A mistyped address with no code at all is rejected the same way.
+    function test_predecessorProbe_rejectsNonContractPredecessor() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3Subscription.IncompatiblePredecessor.selector, alice)
+        );
+        new Rub3Subscription(
+            "Rub3 Sub", "R3S", 0, address(0),
+            _hashes(HASH_V1), PRICE, 0, PERIOD, COOLDOWN_BLOCKS,
+            alice, owner
+        );
+    }
+
+    /// A well-typed predecessor deploys, and the claim path the probe guards
+    /// works end to end.
+    function test_predecessorProbe_acceptsSubscriptionPredecessor() public {
+        Rub3Subscription v1 = _deploySubscription(address(0));
+        Rub3Subscription v2 = _deploySubscription(address(v1));
+        assertEq(v2.predecessor(), address(v1));
+
+        vm.prank(alice);
+        uint256 id = v1.purchase{value: PRICE}(alice);
+        vm.prank(owner);
+        v1.setSuccessor(address(v2));
+
+        vm.prank(alice);
+        uint256 newId = v2.claimFromPredecessor(id);
+        assertEq(v2.ownerOf(newId), alice);
+        assertEq(v2.renewPrice(newId), PRICE);
+    }
+}
+
+/// @notice Records what a token looks like from inside `onERC721Received`, i.e.
+///         while the mint that created it is still executing. Any per-token
+///         state a mint path writes *after* `_safeMint` is invisible here.
+contract MintCallbackProbe {
+    Rub3Subscription public sub;
+
+    uint256 public seenRenewPrice;
+    uint256 public seenExpiresAt;
+    bool    public seenWasClaimed;
+    bool    public fired;
+
+    function watch(Rub3Subscription sub_) external {
+        sub = sub_;
+    }
+
+    function buy(uint256 value) external returns (uint256) {
+        return sub.purchase{value: value}(address(this));
+    }
+
+    function claim(Rub3Subscription successor_, uint256 predecessorTokenId)
+        external
+        returns (uint256)
+    {
+        sub = successor_;
+        return successor_.claimFromPredecessor(predecessorTokenId);
+    }
+
+    function onERC721Received(address, address, uint256 tokenId, bytes calldata)
+        external
+        returns (bytes4)
+    {
+        fired          = true;
+        seenRenewPrice = sub.renewPrice(tokenId);
+        seenExpiresAt  = sub.expiresAt(tokenId);
+        seenWasClaimed = sub.wasClaimed(tokenId);
+        return this.onERC721Received.selector;
+    }
+
+    receive() external payable {}
 }

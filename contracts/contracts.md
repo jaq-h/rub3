@@ -84,7 +84,7 @@ forge script script/Deploy.s.sol \
 
 The deployed address is printed in the script summary.
 
-`WRAPPER_HASHES` seeds the append-only hash set with the launch release's binaries — comma-separate one hash per platform. It is optional: omit it to deploy with an empty set and add hashes later with `addWrapperHash`. `WRAPPER_HASH` (singular) still works as the one-hash shorthand. The zero hash is *not* accepted as a member — it is the `Unknown` sentinel — so passing it deploys an empty set.
+`WRAPPER_HASHES` seeds the append-only hash set with the launch release's binaries - comma-separate one hash per platform. It is optional: omit it to deploy with an empty set and add hashes later with `addWrapperHash`. `WRAPPER_HASH` (singular) still works as the one-hash shorthand. The zero hash is *not* accepted as a member - it is the `Unknown` sentinel - so passing it deploys an empty set.
 
 ## On-chain setup (Base Sepolia)
 
@@ -159,7 +159,7 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 
 ## Managing the wrapper hash set after deployment
 
-The hash set is append-only. There is no `setWrapperHash` and no removal — shipping a new build adds to the set, it never invalidates what came before, so every binary a user already downloaded stays verifiable forever.
+The hash set is append-only. There is no `setWrapperHash` and no removal - shipping a new build adds to the set, it never invalidates what came before, so every binary a user already downloaded stays verifiable forever.
 
 Add a new release's binary hash:
 
@@ -181,7 +181,7 @@ cast send <CONTRACT_ADDRESS> \
   --private-key $DEPLOYER_KEY
 ```
 
-Revocation is terminal — a revoked hash can never be re-added, which is what makes the set auditable. Correct a mistaken revocation by publishing a fresh build and adding its hash.
+Revocation is terminal - a revoked hash can never be re-added, which is what makes the set auditable. Correct a mistaken revocation by publishing a fresh build and adding its hash.
 
 **Revoking a binary hash never affects token validity.** `ownerOf`, `isValid`, and `activate` do not read the hash set. The holder downloads a patched build and their same license works.
 
@@ -197,7 +197,7 @@ cast call <CONTRACT_ADDRESS> "revocationReason(bytes32)(string)" <H> --rpc-url $
 
 For contract bugs, paid major versions, and chain migration. Both sides opt in, and the holder does the moving.
 
-1. Deploy the successor with `PREDECESSOR=<OLD_CONTRACT>` (immutable — a contract deployed without it accepts no claims).
+1. Deploy the successor with `PREDECESSOR=<OLD_CONTRACT>` (immutable - a contract deployed without it accepts no claims).
 2. Point the old contract at it:
 
    ```bash
@@ -212,9 +212,11 @@ For contract bugs, paid major versions, and chain migration. Both sides opt in, 
      --rpc-url $RPC --private-key $HOLDER_KEY
    ```
 
-Nobody else can do step 3 — not the old contract's owner, not the new one's. The old token is not burned or moved (there is no way to do either); the holder ends up with both, and the old contract keeps validating its tokens forever. Subscriptions carry their remaining time and their snapshotted `renewPrice` across.
+Nobody else can do step 3 - not the old contract's owner, not the new one's. The old token is not burned or moved (there is no way to do either); the holder ends up with both, and the old contract keeps validating its tokens forever. Subscriptions carry their remaining time and their snapshotted `renewPrice` across.
 
-The wrapper's trust rule — "contract X, or X's successor holding a token claimed from X" — is one call:
+Because this is a snapshot-claim rather than burn-to-mint, **migration can duplicate a seat**, and that is accepted rather than fixed. The holder can claim onto v2, sell the v1 token, and both stay honored via `honorsContract`, so the number of concurrently honored seats is not bounded by either contract's `supplyCap`. Burn-to-mint would bound it, but only by making the predecessor expose a burn - the revocation surface that must not exist - so the no-revocation guarantee takes priority and nothing in the contracts bounds, tracks, or invalidates the duplicate. Size a successor's `SUPPLY_CAP` with that in mind, or deploy v2 with no `PREDECESSOR` at all (a paid major version), which accepts no claims.
+
+The wrapper's trust rule - "contract X, or X's successor holding a token claimed from X" - is one call:
 
 ```bash
 cast call <NEW_CONTRACT> "honorsContract(address,uint256)(bool)" <OLD_CONTRACT> <NEW_TOKEN_ID> --rpc-url $RPC
@@ -234,17 +236,20 @@ for SIG in "burn(uint256)" "adminTransfer(address,address,uint256)" \
            "setExpiresAt(uint256,uint256)" "setRenewPrice(uint256,uint256)" \
            "upgradeTo(address)" "upgradeToAndCall(address,bytes)" "initialize()" \
            "setWrapperHash(bytes32)" "removeWrapperHash(bytes32)" \
+           "unrevokeWrapperHash(bytes32)" \
            "forceMigrate(uint256,address)" "setPredecessor(address)"; do
   SEL=$(cast sig "$SIG" | sed 's/^0x//')
   case "$CODE" in *"$SEL"*) echo "PRESENT: $SIG";; esac
 done
 ```
 
-Silence means every revocation surface is absent from the contract's bytecode. Sanity-check the method itself against a selector that *is* there — `cast sig "activate(uint256)"` should be found.
+Silence means exactly one thing: none of those 18 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical template built from this repo at the same deploy configuration. That comparison is not set up yet.
+
+Sanity-check the method itself against a selector that *is* there - `cast sig "activate(uint256)"` should be found.
 
 ## Planned contract evolution
 
-The contracts above are the current, working set — including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot), which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following — all as **new deploys**, never in-place upgrades:
+The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot), which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
 
 - **`Rub3Factory`** (§2.3) — canonical deployment path; stamps an immutable 2–3% protocol fee split into `purchase()`/`renew()`; registry and marketplace list factory deploys only
 - **USDC purchases** (§2.2) — `purchaseWithAuthorization` via EIP-3009 `transferWithAuthorization`; gasless for the buyer

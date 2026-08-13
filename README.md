@@ -303,11 +303,12 @@ See [implementation.md](implementation.md) for the full roadmap.
 - Tier-3 on-chain re-verification: `session::verify_onchain` confirms tx status/contract/block hash; `try_session_fast_path` re-verifies ~1 in 5 cold starts (offline errors fall open, verdict-contradicting errors fall closed). Covered by an anvil-gated E2E test (`tests/session_onchain_e2e.rs`)
 - Identity models: `identityModel` + `tbaImplementation` on-chain, local ERC-6551 TBA derivation (`identity.rs`), identity fields signed into the session preimage
 - Purchase UI: in-wrapper purchase flow for tier 3+ (price/supply reads, calldata encoding, receipt polling, minted-token recovery)
-- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 33 forge tests
+- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 83 forge tests
+- Ownership invariants (§2.4): append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor` and the `honorsContract` trust rule, per-token `renewPrice` snapshot, and a no-revocation bytecode audit
 - Deploy script: `forge script` deploys either contract to any EVM chain from env vars
 - **Headless activation (the agent front door):** `activation::ensure_headless(signer, ctx)` runs `tokensOfOwner` → purchase if empty → cooldown check → `activate()` → local session signature → `verify_local` → persist, in one call. A `Signer` trait (env key / encrypted keystore / KMS-backed impl) keeps raw key handling in a single auditable type; `webview` and `headless` are independent Cargo features, and a headless build links no GUI dependency at all. `--headless [--token-id N]` with documented exit codes, covered by an anvil-gated E2E
 
-**Not yet implemented (agent-first roadmap):** USDC purchases via EIP-3009, `Rub3Factory` with immutable protocol fee split, ownership-invariant hardening (append-only wrapper hash set, successor pointer, per-token renewal snapshot), CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
+**Not yet implemented (agent-first roadmap):** USDC purchases via EIP-3009, `Rub3Factory` with immutable protocol fee split, CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
 
 ## Direction
 
@@ -315,7 +316,7 @@ The plan is agent-first (July 2026 revision — see [implementation.md](implemen
 
 - **Let machines buy, verify, and resell software without asking anyone's permission.** The adoption unit is one closed loop an agent completes end to end: discover → pay → fetch → verify → run → resell.
 - **Open-source the rails; own the factory, registry, and marketplace.** Revenue is a 2–3% fee on a payment flow only the wrapper can meter — priced low enough that no agent bothers to route around it. No token.
-- **The token is the invariant; everything else is versioned.** Evolution only ever changes what is offered going forward (price, supply, successors, listings), never what was granted (held tokens, their validation, their renewal terms). No proxies, no revocation surface — structurally, not by promise.
+- **The token is the invariant; everything else is versioned.** Evolution only ever changes what is offered going forward (price, successor contracts, registry listings), never what was granted (held tokens, their validation, their renewal terms). No proxies, no revocation surface - structurally, not by promise.
 
 First target market: wallet-gated MCP servers — paid MCP servers have no licensing primitive today, and agents are their natural customers.
 

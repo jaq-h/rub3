@@ -6,7 +6,7 @@ import {Rub3License} from "./Rub3License.sol";
 /// @notice One-time-purchase access license. The NFT grants permanent access to
 ///         the wrapped application for its owner.
 ///
-/// Paid once, so there are no ongoing terms to freeze — `ownerOf` is the whole
+/// Paid once, so there are no ongoing terms to freeze - `ownerOf` is the whole
 /// entitlement, and nothing in this contract or its base can take it away. See
 /// {Rub3License} for the ownership invariants that hold across both models.
 contract Rub3Access is Rub3License {

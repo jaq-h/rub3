@@ -25,7 +25,7 @@ cd contracts && forge test                # in-process EVM: no network, no .env
 
 `forge` resolves `contracts/foundry.toml`, so it must run from `contracts/`; it fails at the repo root. OpenZeppelin and forge-std are git submodules, and `forge test` clones them at the pinned revisions on first run, so `git submodule update --init --recursive` is optional.
 
-CI runs on every PR and on pushes to `main` (`.github/workflows/ci.yml`): the wrapper feature matrix, `forge test`, and the anvil-gated on-chain e2e. In the lint job `cargo clippy -- -D warnings` is a blocking gate; `cargo fmt --check` is advisory, because one pre-existing test file is deliberately left unformatted while a concurrent branch owns it. Run both before pushing.
+`.github/workflows/ci.yml` runs the same commands on every PR and on pushes to `main`: the wrapper matrix (`tier-0` through `tier-4` plus the `headless` and `webview` front doors), `forge test`, the anvil-gated e2e, and a lint job where `cargo clippy -- -D warnings` is a blocking gate and `cargo fmt --check` is advisory. Read it for the exact invocations. It is macOS-only and it is not a substitute for running the checks locally first.
 
 ## Tier feature bundles (read before touching the wrapper)
 

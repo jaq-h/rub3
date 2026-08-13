@@ -30,7 +30,7 @@ interface IRub3Predecessor {
 /// - **No revocation surface.** There is no burn, no admin transfer, no pause,
 ///   and no owner-callable function of any kind that can change `ownerOf`,
 ///   `isValid`, or the outcome of `activate` for an already-issued token. The
-///   selectors are absent from the bytecode — see `test/Rub3Invariants.t.sol`.
+///   selectors are absent from the bytecode - see `test/Rub3Invariants.t.sol`.
 /// - **No proxies.** Contract code, and therefore license terms, are frozen at
 ///   deploy. There is no upgrade hook, no delegatecall, no initializer.
 /// - **Append-only wrapper hash set.** Binary hashes are added, never replaced;
@@ -104,7 +104,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     address public immutable predecessor;
 
     /// @notice Where this contract's holders *may* migrate to. A signpost, not
-    ///         a switch — see {setSuccessor}.
+    ///         a switch - see {setSuccessor}.
     address public successor;
 
     /// @notice True for tokens minted by {claimFromPredecessor} rather than sold.
@@ -226,7 +226,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
 
     /// @notice Append a wrapper binary hash to the valid set.
     ///
-    /// Append-only: a hash already in the set — valid *or* revoked — is
+    /// Append-only: a hash already in the set - valid *or* revoked - is
     /// rejected. There is no removal and no un-revoke.
     function addWrapperHash(bytes32 hash) external onlyOwner {
         _addWrapperHash(hash);
@@ -235,7 +235,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     /// @notice Flag a previously valid build as compromised, with a reason.
     ///
     /// This is a statement about a *binary*, and nothing else. It cannot change
-    /// `ownerOf`, `isValid`, `activate`, or any other token state — none of them
+    /// `ownerOf`, `isValid`, `activate`, or any other token state - none of them
     /// read {wrapperHashes}. The holder downloads a patched build and their
     /// same license keeps working.
     ///
@@ -303,7 +303,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     ///   3. `msg.sender` currently holds `predecessorTokenId` on the predecessor.
     ///
     /// **Snapshot-claim, not burn-to-mint.** The predecessor token is neither
-    /// burned nor moved — the predecessor exposes no way to do either, which is
+    /// burned nor moved - the predecessor exposes no way to do either, which is
     /// precisely the no-revocation invariant. The holder ends up with both
     /// tokens, and the old contract keeps validating its own forever.
     ///
@@ -333,11 +333,13 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
         }
         predecessorTokenClaimed[predecessorTokenId] = true;
 
-        tokenId                     = _mintNext(msg.sender);
+        tokenId                     = _reserveNextId();
         wasClaimed[tokenId]         = true;
         claimedFromTokenId[tokenId] = predecessorTokenId;
 
         _afterClaim(tokenId, predecessorTokenId);
+
+        _safeMint(msg.sender, tokenId);
 
         emit Claimed(pred, predecessorTokenId, tokenId, msg.sender);
     }
@@ -351,7 +353,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     ///     `tokenId` was claimed from it by its holder.
     ///
     /// Note the second arm requires an actual claim. A successor that was
-    /// deployed without declaring a predecessor — a paid major version, say —
+    /// deployed without declaring a predecessor - a paid major version, say -
     /// mints no claimed tokens, so a wrapper pinned to the old contract will
     /// not accept its tokens. Both sides opt in explicitly, both at deploy.
     function honorsContract(address configuredContract, uint256 tokenId)
@@ -416,11 +418,26 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
         return recipient == address(0) ? msg.sender : recipient;
     }
 
-    /// @dev Mints the next sequential id to `to`. Reverts if supply is capped.
-    function _mintNext(address to) internal returns (uint256 tokenId) {
+    /// @dev Claims the next sequential id without minting it. Reverts if supply
+    ///      is capped.
+    ///
+    ///      `_safeMint` hands control to a contract recipient through
+    ///      `onERC721Received` while the token already exists, so every
+    ///      per-token mapping a mint path writes is written against the reserved
+    ///      id *before* {_safeMint} runs. A reentrant caller therefore sees
+    ///      either no token at all or a fully initialized one, never a token
+    ///      with default terms.
+    function _reserveNextId() internal returns (uint256 tokenId) {
         if (supplyCap != 0 && nextTokenId >= supplyCap) revert SoldOut();
         tokenId = nextTokenId;
         unchecked { nextTokenId = tokenId + 1; }
+    }
+
+    /// @dev Reserves and mints the next sequential id to `to`. Only for mint
+    ///      paths that write no per-token state; anything that does must use
+    ///      {_reserveNextId} and call `_safeMint` last.
+    function _mintNext(address to) internal returns (uint256 tokenId) {
+        tokenId = _reserveNextId();
         _safeMint(to, tokenId);
     }
 
@@ -436,8 +453,8 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     }
 
     /// @dev Hook for subclasses to carry a migrating holder's terms across from
-    ///      the predecessor token. Runs inside {claimFromPredecessor} after the
-    ///      new token is minted. Default: nothing to carry.
+    ///      the predecessor token. Runs inside {claimFromPredecessor} against the
+    ///      reserved id, before the token is minted. Default: nothing to carry.
     function _afterClaim(uint256 tokenId, uint256 predecessorTokenId) internal virtual {}
 
     // ── Required overrides (ERC721 + ERC721Enumerable) ────────────────────────

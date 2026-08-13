@@ -96,7 +96,7 @@ fn forge_create_rub3_access() -> String {
     //   price, supplyCap, cooldownBlocks, predecessor, owner
     //
     // `wrapperHashes` is the append-only hash set (contracts §2.4), seeded here
-    // with a single stand-in release hash — the zero hash is rejected on-chain
+    // with a single stand-in release hash - the zero hash is rejected on-chain
     // because it is the `Unknown` sentinel. `predecessor` is the contract whose
     // holders may migrate onto this one; zero means none.
     let wrapper_hashes =

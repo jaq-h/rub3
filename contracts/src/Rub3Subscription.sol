@@ -10,10 +10,10 @@ import {Rub3License} from "./Rub3License.sol";
 /// A subscription is the one billing model with terms that outlive the sale, so
 /// those terms are frozen per token: `period` is immutable for the whole
 /// contract and `renewPrice[tokenId]` is snapshotted at mint. {setPrice} moves
-/// the price for *new* buyers only — a developer cannot reprice a subscription
+/// the price for *new* buyers only - a developer cannot reprice a subscription
 /// somebody already holds, and there is no function that could.
 contract Rub3Subscription is Rub3License {
-    /// @notice Subscription length in seconds (e.g. 30 days). Immutable — the
+    /// @notice Subscription length in seconds (e.g. 30 days). Immutable - the
     ///         other half of "renewal terms are frozen per token".
     uint256 public immutable period;
 
@@ -21,7 +21,7 @@ contract Rub3Subscription is Rub3License {
     mapping(uint256 => uint256) public expiresAt;
 
     /// @notice Renewal price in wei, snapshotted from `price` when the token was
-    ///         minted. This — not the current `price` — is what {renew} charges.
+    ///         minted. This - not the current `price` - is what {renew} charges.
     ///
     ///         Write-once at mint. There is no setter, and nothing else in the
     ///         contract writes it after the token exists.
@@ -35,6 +35,10 @@ contract Rub3Subscription is Rub3License {
         uint256 renewPrice
     );
     event Renewed(uint256 indexed tokenId, uint256 expiresAt, uint256 pricePaid);
+
+    /// @notice The `predecessor` given at deploy is not a subscription contract,
+    ///         so its holders could never complete a claim onto this one.
+    error IncompatiblePredecessor(address predecessor);
 
     constructor(
         string    memory name_,
@@ -53,6 +57,16 @@ contract Rub3Subscription is Rub3License {
         price_, supplyCap_, cooldownBlocks_, predecessor_, owner_
     ) {
         period = period_;
+
+        // {_afterClaim} reads `expiresAt` and `renewPrice` off the predecessor,
+        // and `predecessor` is immutable. A predecessor that does not answer
+        // those selectors would make every holder's claim revert forever, with
+        // redeployment the only remedy, so reject it at deploy instead.
+        if (predecessor_ != address(0)) {
+            if (predecessor_.code.length == 0) revert IncompatiblePredecessor(predecessor_);
+            try Rub3Subscription(predecessor_).period() returns (uint256) {}
+            catch { revert IncompatiblePredecessor(predecessor_); }
+        }
     }
 
     /// @notice Mint a fresh subscription token to `recipient`, starting now.
@@ -63,11 +77,13 @@ contract Rub3Subscription is Rub3License {
         uint256 due = price;
         if (msg.value < due) revert InsufficientPayment(msg.value, due);
         address to = _resolveRecipient(recipient);
-        tokenId = _mintNext(to);
 
+        tokenId = _reserveNextId();
         uint256 newExpiry = block.timestamp + period;
         expiresAt[tokenId]  = newExpiry;
         renewPrice[tokenId] = due;
+
+        _safeMint(to, tokenId);
 
         emit Purchased(tokenId, to, msg.sender, newExpiry, due);
     }
@@ -78,7 +94,7 @@ contract Rub3Subscription is Rub3License {
     /// expiry. If it has already lapsed, the period starts from `block.timestamp`.
     /// Reverts if the token does not exist.
     ///
-    /// Charges `renewPrice[tokenId]`, never the current `price` — a holder's
+    /// Charges `renewPrice[tokenId]`, never the current `price` - a holder's
     /// cost to stay subscribed is fixed at the moment they bought.
     function renew(uint256 tokenId) external payable {
         _requireOwned(tokenId);

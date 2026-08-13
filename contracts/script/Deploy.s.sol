@@ -20,17 +20,17 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 ///                        IDENTITY_MODEL=0 (access).
 ///
 /// Optional env vars:
-///   WRAPPER_HASHES  — comma-separated bytes32 SHA-256 hashes of the launch
+///   WRAPPER_HASHES  - comma-separated bytes32 SHA-256 hashes of the launch
 ///                     release's wrapper binaries (one per platform). Seeds the
 ///                     append-only hash set; later builds are added on-chain with
 ///                     `addWrapperHash(bytes32)`. Empty = deploy with no hashes yet.
-///   WRAPPER_HASH    — single-hash shorthand for WRAPPER_HASHES. Ignored when
+///   WRAPPER_HASH    - single-hash shorthand for WRAPPER_HASHES. Ignored when
 ///                     WRAPPER_HASHES is set; a zero hash is treated as "none".
 ///   SUPPLY_CAP      — max mintable tokens; 0 = uncapped (default: 0)
 ///   OWNER           — contract owner address; defaults to the broadcaster
 ///   COOLDOWN_BLOCKS — blocks between activations per token (default: 1800, ~1hr on Base;
 ///                     floor is 15 ≈ 30s, enforced in the contract)
-///   PREDECESSOR     — address of a license contract whose holders may migrate onto
+///   PREDECESSOR     - address of a license contract whose holders may migrate onto
 ///                     this one via `claimFromPredecessor` (default: 0x0 = no
 ///                     migrations accepted). Frozen at deploy. The predecessor's
 ///                     owner must also point its `successor` here for claims to work.
@@ -125,7 +125,7 @@ contract Deploy is Script {
 
     /// Reads the launch release's wrapper hashes: `WRAPPER_HASHES` (comma-separated)
     /// wins, `WRAPPER_HASH` is the single-hash shorthand, and a zero or absent hash
-    /// deploys with an empty set — the contract rejects `bytes32(0)` as a member
+    /// deploys with an empty set - the contract rejects `bytes32(0)` as a member
     /// because it is the `Unknown` sentinel.
     function _wrapperHashes() internal view returns (bytes32[] memory) {
         bytes32[] memory many = vm.envOr("WRAPPER_HASHES", ",", new bytes32[](0));
