@@ -177,6 +177,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     error WrapperHashNotValid(bytes32 hash);
     error RevocationReasonRequired();
     error SelfReference();
+    error IncompatiblePredecessor(address predecessor);
     error NoPredecessor();
     error SuccessorNotDeclared(address declared);
     error PredecessorTokenAlreadyClaimed(uint256 predecessorTokenId);
@@ -205,6 +206,19 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
             revert TbaImplementationForbidden();
         }
         if (predecessor_ == address(this)) revert SelfReference();
+
+        // `predecessor` is immutable and {claimFromPredecessor} reads the
+        // {IRub3Predecessor} slice off it, so an address that cannot answer that
+        // slice would brick every holder's claim forever with redeployment the
+        // only remedy. Probe `successor()`, the rub3-specific view getter every
+        // Rub3License answers. Not `ownerOf`, which reverts for an unminted id
+        // on a perfectly good predecessor; and not the returned value, because
+        // the predecessor points its `successor` here only after this deploy.
+        if (predecessor_ != address(0)) {
+            if (predecessor_.code.length == 0) revert IncompatiblePredecessor(predecessor_);
+            try IRub3Predecessor(predecessor_).successor() returns (address) {}
+            catch { revert IncompatiblePredecessor(predecessor_); }
+        }
 
         identityModel     = identityModel_;
         tbaImplementation = tbaImplementation_;

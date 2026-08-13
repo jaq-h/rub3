@@ -36,10 +36,6 @@ contract Rub3Subscription is Rub3License {
     );
     event Renewed(uint256 indexed tokenId, uint256 expiresAt, uint256 pricePaid);
 
-    /// @notice The `predecessor` given at deploy is not a subscription contract,
-    ///         so its holders could never complete a claim onto this one.
-    error IncompatiblePredecessor(address predecessor);
-
     constructor(
         string    memory name_,
         string    memory symbol_,
@@ -58,12 +54,12 @@ contract Rub3Subscription is Rub3License {
     ) {
         period = period_;
 
-        // {_afterClaim} reads the {IRub3Predecessor} subscription getters off the
-        // predecessor, and `predecessor` is immutable. A predecessor that does
-        // not answer them would make every holder's claim revert forever, with
-        // redeployment the only remedy, so reject it at deploy instead.
+        // {Rub3License} has already established that a non-zero predecessor is a
+        // live contract answering the base read slice. A subscription carries
+        // more across in {_afterClaim}, so it additionally requires the
+        // subscription slice: a predecessor that cannot answer `period()` is
+        // rejected here rather than bricking every holder's claim forever.
         if (predecessor_ != address(0)) {
-            if (predecessor_.code.length == 0) revert IncompatiblePredecessor(predecessor_);
             try IRub3Predecessor(predecessor_).period() returns (uint256) {}
             catch { revert IncompatiblePredecessor(predecessor_); }
         }

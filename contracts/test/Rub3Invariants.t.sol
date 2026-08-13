@@ -528,9 +528,10 @@ contract Rub3InvariantsTest is Test {
         v2.claimFromPredecessor(id);
     }
 
-    /// Subscriptions migrate with their frozen terms intact - remaining time and
-    /// snapshotted renewal price both carry across. Migration is not a repricing
-    /// event and not a reset.
+    /// Remaining time and the snapshotted renewal price both carry across, so a
+    /// successor cannot reprice a held subscription by selling dearer. `period`
+    /// is a separate matter, pinned by
+    /// {test_migration_successorPeriodGovernsWhatTheCarriedPriceBuys}.
     function test_migration_carriesFrozenSubscriptionTerms() public {
         Rub3Subscription v1 = _deploySubscription(address(0));
         vm.prank(alice);
@@ -556,6 +557,46 @@ contract Rub3InvariantsTest is Test {
         vm.prank(alice);
         v2.renew{value: PRICE}(newId);
         assertEq(v2.expiresAt(newId), expiry + PERIOD);
+    }
+
+    /// `period` does *not* carry across: it is immutable per contract, so the
+    /// successor's own `period` decides what the carried price buys from then
+    /// on. A successor declaring a shorter period therefore raises the effective
+    /// rate without the price moving, which is why claiming is opt-in and why a
+    /// holder reads the successor's `period` and `price` first. The original
+    /// token keeps its original terms on v1 forever.
+    function test_migration_successorPeriodGovernsWhatTheCarriedPriceBuys() public {
+        Rub3Subscription v1 = _deploySubscription(address(0));
+        vm.prank(alice);
+        uint256 id = v1.purchase{value: PRICE}(alice);
+        uint256 expiry = v1.expiresAt(id);
+
+        uint256 shortPeriod = PERIOD / 30;
+        Rub3Subscription v2 = new Rub3Subscription(
+            "Rub3 Sub v2", "R3S2", 0, address(0),
+            _hashes(HASH_V3), PRICE, 0, shortPeriod, COOLDOWN_BLOCKS,
+            address(v1), owner
+        );
+        vm.prank(owner);
+        v1.setSuccessor(address(v2));
+
+        vm.prank(alice);
+        uint256 newId = v2.claimFromPredecessor(id);
+
+        assertEq(v2.expiresAt(newId),  expiry, "remaining time carries across unchanged");
+        assertEq(v2.renewPrice(newId), PRICE,  "the frozen renewal price carries across unchanged");
+        assertEq(v2.period(),          shortPeriod, "the successor keeps its own period");
+
+        // The carried price now buys the successor's period, not v1's.
+        vm.prank(alice);
+        v2.renew{value: PRICE}(newId);
+        assertEq(v2.expiresAt(newId), expiry + shortPeriod, "the successor's period governs the renewal");
+
+        // Nothing granted was taken: the original token renews on v1 at v1's
+        // period for the same price, forever.
+        vm.prank(alice);
+        v1.renew{value: PRICE}(id);
+        assertEq(v1.expiresAt(id), expiry + PERIOD, "the original token keeps its original terms");
     }
 
     // ── Guarantee 3: the wrapper's trust rule ─────────────────────────────────
@@ -857,7 +898,7 @@ contract Rub3InvariantsTest is Test {
     /// but redeployment. It fails at deploy instead, loudly and by name.
     function test_predecessorProbe_rejectsNonSubscriptionPredecessor() public {
         vm.expectRevert(
-            abi.encodeWithSelector(Rub3Subscription.IncompatiblePredecessor.selector, address(nft))
+            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, address(nft))
         );
         new Rub3Subscription(
             "Rub3 Sub", "R3S", 0, address(0),
@@ -869,13 +910,63 @@ contract Rub3InvariantsTest is Test {
     /// A mistyped address with no code at all is rejected the same way.
     function test_predecessorProbe_rejectsNonContractPredecessor() public {
         vm.expectRevert(
-            abi.encodeWithSelector(Rub3Subscription.IncompatiblePredecessor.selector, alice)
+            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, alice)
         );
         new Rub3Subscription(
             "Rub3 Sub", "R3S", 0, address(0),
             _hashes(HASH_V1), PRICE, 0, PERIOD, COOLDOWN_BLOCKS,
             alice, owner
         );
+    }
+
+    /// The probe lives on the base contract, so an access license is guarded
+    /// too: a `PREDECESSOR` typo pointing at an EOA or any codeless address is
+    /// rejected at deploy rather than bricking every holder's claim on an
+    /// immutable pointer.
+    function test_predecessorProbe_accessRejectsCodelessPredecessor() public {
+        assertEq(alice.code.length, 0);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, alice)
+        );
+        new Rub3Access(
+            "x", "x", 0, address(0),
+            _hashes(HASH_V3), PRICE, 0, COOLDOWN_BLOCKS, alice, owner
+        );
+    }
+
+    /// And a contract that has code but is not a license contract: it cannot
+    /// answer `successor()`, which is what {Rub3License-claimFromPredecessor}
+    /// reads.
+    function test_predecessorProbe_accessRejectsNonLicensePredecessor() public {
+        address notALicense = address(new MintCallbackProbe());
+
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, notALicense)
+        );
+        new Rub3Access(
+            "x", "x", 0, address(0),
+            _hashes(HASH_V3), PRICE, 0, COOLDOWN_BLOCKS, notALicense, owner
+        );
+    }
+
+    /// A well-typed access predecessor still deploys, and still completes a
+    /// claim end to end. The probe never reads the *value* of `successor()`,
+    /// because the predecessor points here only after this deploy.
+    function test_predecessorProbe_acceptsAccessPredecessor() public {
+        uint256 id = _mint(alice);
+
+        Rub3Access v2 = _deploySuccessor(address(nft));
+        assertEq(v2.predecessor(), address(nft));
+        assertEq(nft.successor(), address(0), "predecessor still points nowhere at deploy");
+
+        vm.prank(owner);
+        nft.setSuccessor(address(v2));
+
+        vm.prank(alice);
+        uint256 newId = v2.claimFromPredecessor(id);
+        assertEq(v2.ownerOf(newId), alice);
+        assertTrue(v2.wasClaimed(newId));
     }
 
     /// A well-typed predecessor deploys, and the claim path the probe guards
