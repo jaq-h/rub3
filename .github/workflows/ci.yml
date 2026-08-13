@@ -1,0 +1,132 @@
+name: CI
+
+# Runners are macOS because the wrapper links `wry` + `tao` unconditionally
+# (src/webview.rs is not feature-gated). On Linux those need webkit2gtk/GTK
+# system packages installed via apt, and this workflow was verified end to end
+# on macOS only -- no step here is guessed. Once the `headless` feature lands
+# and makes the webview optional, a headless bundle can move to ubuntu-latest,
+# which is faster and cheaper.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same branch supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Rust wrapper, one job per tier bundle.
+  #
+  # WHY --no-default-features IS NON-NEGOTIABLE:
+  #   Cargo features are additive. The crate sets `default = ["tier-2"]`, so
+  #   `--features tier-0` means tier-2 PLUS tier-0, not tier-0. Verified on this
+  #   repo: `cargo tree --features tier-0` still lists `rand` (the dependency
+  #   that only the `session` feature pulls in), and `cargo test --features
+  #   tier-0` runs 68 tests, exactly the tier-2 count, instead of tier-0's 38.
+  #   Without `--no-default-features` this matrix would test tier-2 five times
+  #   and look like coverage while proving nothing.
+  # ---------------------------------------------------------------------------
+  rust:
+    name: rust (${{ matrix.bundle }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bundle: tier-0
+            features: tier-0
+          - bundle: tier-1
+            features: tier-1
+          - bundle: tier-2
+            features: tier-2
+          - bundle: tier-3
+            features: tier-3
+          - bundle: tier-4
+            features: tier-4
+          # The `headless` feature does not exist on main yet. When it lands,
+          # uncomment these two lines to cover it composed with tier-3:
+          # - bundle: tier-3 + headless
+          #   features: tier-3,headless
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Show toolchain
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          # Feature sets produce different artifacts; keep a cache per bundle
+          # so the five jobs do not evict each other.
+          key: ${{ matrix.bundle }}
+
+      - name: Build (${{ matrix.bundle }})
+        run: cargo build -p rub3-wrapper --no-default-features --features ${{ matrix.features }} --all-targets
+
+      - name: Test (${{ matrix.bundle }})
+        run: cargo test -p rub3-wrapper --no-default-features --features ${{ matrix.features }}
+
+  # ---------------------------------------------------------------------------
+  # Solidity. `forge test` MUST run from contracts/ -- remappings.txt uses paths
+  # relative to that directory, so at the repo root it fails to resolve
+  # forge-std/Test.sol. OpenZeppelin and forge-std are git submodules, hence
+  # submodules: recursive.
+  # ---------------------------------------------------------------------------
+  contracts:
+    name: contracts (forge test)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1.9.1
+
+      - name: forge test
+        working-directory: contracts
+        run: forge test -vv
+
+  # ---------------------------------------------------------------------------
+  # Anvil-gated on-chain E2E (tests/session_onchain_e2e.rs, #[ignore]d).
+  # Spawns a local anvil, deploys Rub3Access with `forge create` from contracts/,
+  # runs purchase + activate, then asserts verify_onchain accepts the good
+  # session and rejects three tampered ones. Needs submodules (forge create
+  # compiles the contracts) and the Foundry toolchain.
+  #
+  # Kept in its own job rather than folded into the tier-3 matrix job so that an
+  # on-chain failure is distinguishable at a glance from a unit-test failure.
+  # ---------------------------------------------------------------------------
+  onchain-e2e:
+    name: on-chain e2e (tier-3 + anvil)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1.9.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: onchain-e2e
+
+      # The test self-skips with a SKIP: message and still exits 0 when anvil,
+      # forge or cast are missing. Without this guard a broken Foundry install
+      # would turn the whole job into a silent no-op that reports green.
+      - name: Require Foundry on PATH
+        run: |
+          for bin in anvil forge cast; do
+            command -v "$bin" >/dev/null 2>&1 || { echo "::error::$bin not found on PATH"; exit 1; }
+          done
+
+      - name: session_verify_onchain_e2e
+        run: |
+          cargo test -p rub3-wrapper --no-default-features --features tier-3 \
+            --test session_onchain_e2e -- --ignored --nocapture
