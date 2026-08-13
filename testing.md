@@ -14,7 +14,7 @@ cargo test -p rub3-wrapper
 
 This runs all unit tests, integration tests, and license e2e tests. No external tools required — wallet generation and signing are done natively in Rust via `k256`.
 
-To include network-dependent tests (requires internet):
+Network-dependent tests (requires internet). `--ignored` runs *only* the ignored tests, so this replaces the suite above rather than adding to it:
 
 ```bash
 cargo test -p rub3-wrapper -- --ignored
