@@ -99,7 +99,7 @@ cargo build -p rub3-wrapper
 # All tests (unit + integration + license e2e)
 cargo test -p rub3-wrapper
 
-# Include network-dependent tests
+# Only the network-dependent tests (--ignored filters out the suite above)
 cargo test -p rub3-wrapper -- --ignored
 ```
 
