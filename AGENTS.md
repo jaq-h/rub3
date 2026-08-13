@@ -18,7 +18,7 @@ Two halves, different toolchains:
 ```bash
 cargo build -p rub3-wrapper
 cargo test  -p rub3-wrapper               # default bundle = tier-2
-cargo test  -p rub3-wrapper -- --ignored  # adds a live Base mainnet RPC test
+cargo test  -p rub3-wrapper -- --ignored  # runs ONLY the ignored tests: a live Base mainnet RPC test
 
 cd contracts && forge test                # in-process EVM: no network, no .env
 ```
@@ -85,12 +85,12 @@ The wrapper's app identity (`APP_ID`, `CONTRACT`, `CHAIN_ID`, `RPC_URL`) is hard
 
 ## Ownership invariants: a hard constraint, not a preference
 
-"The token is the invariant; everything else is versioned." Encoded in bytecode, not policy:
+"The token is the invariant; everything else is versioned." The prohibitions are enforced by absence from the bytecode, not by policy; the paths that remain open are specified in the docs cited at the end of this section:
 
 - **No proxies, no upgradeable contracts.** Contract code, and therefore license terms, is frozen at deploy.
 - **No revocation surface.** No burn, no admin transfer, no pause affecting `ownerOf` / `isValid` / `activate` for issued tokens. Absent from the bytecode, not merely unused.
 - **Evolution changes what is *offered* going forward** (price, supply, successors, listings), **never what was *granted*** (held tokens, their validation, their renewal terms).
-- **Migration is a new deploy plus an opt-in `successor` pointer**, holder-initiated. The old contract validates its own tokens forever.
+- **Migration is a new deploy plus an opt-in `successor` pointer**, holder-initiated: the old contract validates its own tokens forever. This is the sanctioned migration path as specified; see `implementation.md` §2.4 for what is built.
 
 An upgrade hook, an admin escape hatch, or any path that invalidates an issued token is not a missing feature; it is a design this project has deliberately ruled out. Do not propose one. Where a problem appears to require it, the sanctioned answer is a new deploy behind the successor pattern.
 
