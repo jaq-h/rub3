@@ -12,6 +12,13 @@ import {Ownable}          from "@openzeppelin/contracts/access/Ownable.sol";
 interface IRub3Predecessor {
     function ownerOf(uint256 tokenId) external view returns (address);
     function successor() external view returns (address);
+
+    /// Subscription terms a successor carries across in `_afterClaim`. Absent on
+    /// a predecessor that is not a subscription, which is what the
+    /// {Rub3Subscription} constructor probe detects.
+    function period() external view returns (uint256);
+    function expiresAt(uint256 tokenId) external view returns (uint256);
+    function renewPrice(uint256 tokenId) external view returns (uint256);
 }
 
 /// @notice Abstract base shared by {Rub3Access} and {Rub3Subscription}.

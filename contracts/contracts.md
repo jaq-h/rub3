@@ -212,7 +212,14 @@ For contract bugs, paid major versions, and chain migration. Both sides opt in, 
      --rpc-url $RPC --private-key $HOLDER_KEY
    ```
 
-Nobody else can do step 3 - not the old contract's owner, not the new one's. The old token is not burned or moved (there is no way to do either); the holder ends up with both, and the old contract keeps validating its tokens forever. Subscriptions carry their remaining time and their snapshotted `renewPrice` across.
+   Subscription holders should read the successor's terms first, because the claim is the moment they accept them:
+
+   ```bash
+   cast call <NEW_CONTRACT> "period()(uint256)" --rpc-url $RPC
+   cast call <NEW_CONTRACT> "price()(uint256)"  --rpc-url $RPC
+   ```
+
+Nobody else can do step 3 - not the old contract's owner, not the new one's. The old token is not burned or moved (there is no way to do either); the holder ends up with both, and the old contract keeps validating its tokens forever. Subscriptions carry their remaining time and their snapshotted `renewPrice` across, but **not** `period`, which is immutable per contract: the successor's own `period` decides what the carried price buys from then on, so a successor with a shorter period raises the effective rate without the price moving. That takes nothing already granted - the old token keeps validating at its original terms forever - which is why step 3 is the holder's decision and why they should read the successor's `period` and `price` first.
 
 Because this is a snapshot-claim rather than burn-to-mint, **migration can duplicate a seat**, and that is accepted rather than fixed. The holder can claim onto v2, sell the v1 token, and both stay honored via `honorsContract`, so the number of concurrently honored seats is not bounded by either contract's `supplyCap`. Burn-to-mint would bound it, but only by making the predecessor expose a burn - the revocation surface that must not exist - so the no-revocation guarantee takes priority and nothing in the contracts bounds, tracks, or invalidates the duplicate. Size a successor's `SUPPLY_CAP` with that in mind, or deploy v2 with no `PREDECESSOR` at all (a paid major version), which accepts no claims.
 

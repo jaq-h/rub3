@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Rub3License} from "./Rub3License.sol";
+import {IRub3Predecessor, Rub3License} from "./Rub3License.sol";
 
 /// @notice Time-bounded subscription license. Each token carries an `expiresAt`
 ///         timestamp; the holder extends it by paying that token's own
@@ -58,13 +58,13 @@ contract Rub3Subscription is Rub3License {
     ) {
         period = period_;
 
-        // {_afterClaim} reads `expiresAt` and `renewPrice` off the predecessor,
-        // and `predecessor` is immutable. A predecessor that does not answer
-        // those selectors would make every holder's claim revert forever, with
+        // {_afterClaim} reads the {IRub3Predecessor} subscription getters off the
+        // predecessor, and `predecessor` is immutable. A predecessor that does
+        // not answer them would make every holder's claim revert forever, with
         // redeployment the only remedy, so reject it at deploy instead.
         if (predecessor_ != address(0)) {
             if (predecessor_.code.length == 0) revert IncompatiblePredecessor(predecessor_);
-            try Rub3Subscription(predecessor_).period() returns (uint256) {}
+            try IRub3Predecessor(predecessor_).period() returns (uint256) {}
             catch { revert IncompatiblePredecessor(predecessor_); }
         }
     }
@@ -117,11 +117,21 @@ contract Rub3Subscription is Rub3License {
         return expiresAt[tokenId] > block.timestamp;
     }
 
-    /// @dev Carry the migrating holder's frozen terms across to the successor
-    ///      token: they keep their remaining time and their original renewal
-    ///      price. Migration must not become a repricing event.
+    /// @dev Carry the migrating holder's remaining time and their frozen renewal
+    ///      price across to the successor token.
+    ///
+    ///      `period` does not carry: it is immutable per contract, so *this*
+    ///      contract's `period` governs what the carried price buys from here
+    ///      on. A successor with a shorter period therefore changes the
+    ///      effective rate. Nothing granted is taken: claiming is opt-in and the
+    ///      holder's original token keeps validating on the old contract at its
+    ///      original terms forever, so a holder inspects this contract's
+    ///      `period` and `price` before claiming.
+    ///
+    ///      Reads go through {IRub3Predecessor}, the view-only slice a successor
+    ///      is allowed to touch, so migration can never disturb the old contract.
     function _afterClaim(uint256 tokenId, uint256 predecessorTokenId) internal override {
-        Rub3Subscription pred = Rub3Subscription(predecessor);
+        IRub3Predecessor pred = IRub3Predecessor(predecessor);
         expiresAt[tokenId]  = pred.expiresAt(predecessorTokenId);
         renewPrice[tokenId] = pred.renewPrice(predecessorTokenId);
     }
