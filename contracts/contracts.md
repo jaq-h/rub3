@@ -237,9 +237,11 @@ The check: fetch the runtime code and confirm the revocation selectors are absen
 
 ```bash
 CODE=$(cast code <CONTRACT_ADDRESS> --rpc-url $RPC)
-for SIG in "burn(uint256)" "adminTransfer(address,address,uint256)" \
-           "forceTransfer(address,address,uint256)" "seize(uint256)" \
-           "pause()" "setPaused(bool)" "revoke(uint256)" "invalidate(uint256)" \
+for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
+           "adminTransfer(address,address,uint256)" \
+           "forceTransfer(address,address,uint256)" "seize(uint256)" "clawback(uint256)" \
+           "pause()" "unpause()" "paused()" "setPaused(bool)" \
+           "revoke(uint256)" "revokeToken(uint256)" "invalidate(uint256)" \
            "setExpiresAt(uint256,uint256)" "setRenewPrice(uint256,uint256)" \
            "upgradeTo(address)" "upgradeToAndCall(address,bytes)" "initialize()" \
            "setWrapperHash(bytes32)" "removeWrapperHash(bytes32)" \
@@ -250,7 +252,7 @@ for SIG in "burn(uint256)" "adminTransfer(address,address,uint256)" \
 done
 ```
 
-Silence means exactly one thing: none of those 18 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical template built from this repo at the same deploy configuration. That comparison is not set up yet.
+Silence means exactly one thing: none of those 24 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical template built from this repo at the same deploy configuration. That comparison is not set up yet.
 
 Sanity-check the method itself against a selector that *is* there - `cast sig "activate(uint256)"` should be found.
 

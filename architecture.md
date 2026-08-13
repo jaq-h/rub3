@@ -529,11 +529,11 @@ Covers contract bugs, paid major versions, and chain migration. Three hard guara
 
 The distinction matters because an agent can verify the first list before buying and can only trust the second.
 
-**Bytecode** - check these against the deployed runtime code; `contracts/test/Rub3Invariants.t.sol` runs exactly this audit:
+**Bytecode** - check these against the deployed runtime code. The 24 selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, and exactly the set the copy-pasteable loop in `contracts/contracts.md` scans for:
 
 | Property | How an agent checks it |
 |---|---|
-| No burn, admin transfer, seizure, or pause | The selectors are absent from the runtime bytecode, and a raw call carrying one reverts (there is no fallback). Scan for `burn(uint256)`, `adminTransfer(address,address,uint256)`, `forceTransfer(address,address,uint256)`, `seize(uint256)`, `pause()`, `setPaused(bool)`, `revoke(uint256)`, `invalidate(uint256)`, `setExpiresAt(uint256,uint256)`, `setRenewPrice(uint256,uint256)`, `forceMigrate(uint256,address)` |
+| No burn, admin transfer, seizure, or pause | The selectors are absent from the runtime bytecode, and a raw call carrying one reverts (there is no fallback). Scan for `burn(uint256)`, `burn(address,uint256)`, `burnFrom(address,uint256)`, `adminTransfer(address,address,uint256)`, `forceTransfer(address,address,uint256)`, `seize(uint256)`, `clawback(uint256)`, `pause()`, `unpause()`, `paused()`, `setPaused(bool)`, `revoke(uint256)`, `revokeToken(uint256)`, `invalidate(uint256)`, `setExpiresAt(uint256,uint256)`, `setRenewPrice(uint256,uint256)`, `forceMigrate(uint256,address)` |
 | No proxy, no upgrade hook | `upgradeTo(address)`, `upgradeToAndCall(address,bytes)`, `initialize()` absent; contract code hashes stable across blocks |
 | Hash set is append-only | `setWrapperHash(bytes32)`, `removeWrapperHash(bytes32)`, `unrevokeWrapperHash(bytes32)` absent; `wrapperHashList()` only ever grows |
 | Renewal terms frozen per token | `renewPrice(tokenId)` does not move after mint; `setRenewPrice(uint256,uint256)`, `setExpiresAt(uint256,uint256)` and any other renewal setter are absent from the runtime bytecode; `period` is `immutable`, with no `setPeriod(uint256)`. Free tiers are legitimate, so a `renewPrice` of `0` is conforming |

@@ -969,6 +969,38 @@ contract Rub3InvariantsTest is Test {
         assertTrue(v2.wasClaimed(newId));
     }
 
+    /// The subscription layer probes the whole slice {_afterClaim} reads, not
+    /// just the `period()` discriminator. A predecessor that answers the base
+    /// slice and `period()` but has no per-token expiry clears both earlier
+    /// layers and would still brick every claim, so it is rejected too.
+    function test_predecessorProbe_rejectsPredecessorMissingExpiresAt() public {
+        address stub = address(new PeriodOnlyPredecessor());
+
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, stub)
+        );
+        new Rub3Subscription(
+            "Rub3 Sub", "R3S", 0, address(0),
+            _hashes(HASH_V1), PRICE, 0, PERIOD, COOLDOWN_BLOCKS,
+            stub, owner
+        );
+    }
+
+    /// And the last getter in the slice on its own: answering `period()` and
+    /// `expiresAt` is still not enough without `renewPrice`.
+    function test_predecessorProbe_rejectsPredecessorMissingRenewPrice() public {
+        address stub = address(new NoRenewPricePredecessor());
+
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, stub)
+        );
+        new Rub3Subscription(
+            "Rub3 Sub", "R3S", 0, address(0),
+            _hashes(HASH_V1), PRICE, 0, PERIOD, COOLDOWN_BLOCKS,
+            stub, owner
+        );
+    }
+
     /// A well-typed predecessor deploys, and the claim path the probe guards
     /// works end to end.
     function test_predecessorProbe_acceptsSubscriptionPredecessor() public {
@@ -1027,4 +1059,34 @@ contract MintCallbackProbe {
     }
 
     receive() external payable {}
+}
+
+
+/// @notice Answers the base read slice and the `period()` discriminator, but
+///         none of the per-token getters {Rub3Subscription-_afterClaim} reads.
+///         A predecessor shaped like this clears both earlier probe layers.
+contract PeriodOnlyPredecessor {
+    function successor() external pure returns (address) {
+        return address(0);
+    }
+
+    function period() external pure returns (uint256) {
+        return 30 days;
+    }
+}
+
+/// @notice One getter further along than {PeriodOnlyPredecessor}: it carries an
+///         expiry but no renewal price.
+contract NoRenewPricePredecessor {
+    function successor() external pure returns (address) {
+        return address(0);
+    }
+
+    function period() external pure returns (uint256) {
+        return 30 days;
+    }
+
+    function expiresAt(uint256) external pure returns (uint256) {
+        return 0;
+    }
 }

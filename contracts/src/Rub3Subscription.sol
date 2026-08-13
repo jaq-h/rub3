@@ -56,11 +56,22 @@ contract Rub3Subscription is Rub3License {
 
         // {Rub3License} has already established that a non-zero predecessor is a
         // live contract answering the base read slice. A subscription carries
-        // more across in {_afterClaim}, so it additionally requires the
-        // subscription slice: a predecessor that cannot answer `period()` is
-        // rejected here rather than bricking every holder's claim forever.
+        // more across in {_afterClaim}, so it additionally requires the whole
+        // subscription slice: `period()` discriminates a subscription from an
+        // access license, and `expiresAt` / `renewPrice` are what {_afterClaim}
+        // itself reads. A predecessor missing any of them would brick every
+        // holder's claim forever, so it is rejected here instead.
+        //
+        // Token id 0 need not exist: both are mapping getters and answer `0`
+        // for an unset key rather than reverting the way `ownerOf` would.
         if (predecessor_ != address(0)) {
             try IRub3Predecessor(predecessor_).period() returns (uint256) {}
+            catch { revert IncompatiblePredecessor(predecessor_); }
+
+            try IRub3Predecessor(predecessor_).expiresAt(0) returns (uint256) {}
+            catch { revert IncompatiblePredecessor(predecessor_); }
+
+            try IRub3Predecessor(predecessor_).renewPrice(0) returns (uint256) {}
             catch { revert IncompatiblePredecessor(predecessor_); }
         }
     }
