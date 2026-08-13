@@ -153,11 +153,12 @@ fn interactive_slow_path(
 /// machine is the user). The headless door passes its signer's address, so an
 /// agent never launches on a session belonging to a different key.
 ///
-/// `require_token` narrows it the same way to one specific token id. The
-/// interactive door passes `None`; the headless door passes `--token-id` when
-/// it was given, so an explicit token constrains cache reuse exactly as it
-/// constrains purchasing. A cached session for another token is a miss, not a
-/// substitute: the caller asked for one particular license.
+/// `require_token` selects one specific token's session instead of the newest
+/// across all of them. The interactive door passes `None`; the headless door
+/// passes `--token-id` when it was given, so an explicit token constrains cache
+/// reuse exactly as it constrains purchasing. Selecting rather than filtering
+/// matters once a signer holds several licenses: the requested token's session
+/// is reused even when another token was activated more recently.
 #[cfg(feature = "cooldown")]
 fn try_session_fast_path(
     app_id: &str,
@@ -165,7 +166,10 @@ fn try_session_fast_path(
     require_wallet: Option<Address>,
     require_token: Option<u64>,
 ) -> Option<crate::session::Session> {
-    let session = crate::session_store::load_latest_session(app_id).ok()?;
+    let session = match require_token {
+        Some(token_id) => crate::session_store::load_session(app_id, token_id).ok()?,
+        None => crate::session_store::load_latest_session(app_id).ok()?,
+    };
 
     if crate::session::verify_local(&session).is_err() {
         return None;
@@ -174,12 +178,6 @@ fn try_session_fast_path(
     if let Some(wallet) = require_wallet {
         let expected = crate::identity::format_addr(wallet);
         if !session.wallet.eq_ignore_ascii_case(&expected) {
-            return None;
-        }
-    }
-
-    if let Some(token_id) = require_token {
-        if session.token_id != token_id {
             return None;
         }
     }
@@ -372,11 +370,19 @@ mod headless {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 HeadlessError::Signer(e) => write!(f, "{e}"),
-                HeadlessError::InsufficientFunds { shortfall: Some(s) } => write!(
-                    f,
-                    "insufficient funds: need {} wei (price + gas), wallet holds {} wei",
-                    s.required, s.available
-                ),
+                HeadlessError::InsufficientFunds { shortfall: Some(s) } => match s.covers {
+                    crate::tx::Covers::PriceAndGas => write!(
+                        f,
+                        "insufficient funds: need {} wei (price + gas), wallet holds {} wei",
+                        s.required, s.available
+                    ),
+                    crate::tx::Covers::PriceOnly => write!(
+                        f,
+                        "insufficient funds: need {} wei for the price alone, before gas, \
+                         wallet holds {} wei",
+                        s.required, s.available
+                    ),
+                },
                 HeadlessError::InsufficientFunds { shortfall: None } => write!(
                     f,
                     "insufficient funds: the node rejected the transaction for lack of \
@@ -449,9 +455,12 @@ mod headless {
                 }
                 // Only when the amounts are real: an orchestrator that read
                 // `required_wei=0` would top the wallet up by nothing.
-                HeadlessError::InsufficientFunds { shortfall: Some(s) } => {
-                    Some(format!("required_wei={} available_wei={}", s.required, s.available))
-                }
+                HeadlessError::InsufficientFunds { shortfall: Some(s) } => Some(format!(
+                    "required_wei={} available_wei={} required_covers={}",
+                    s.required,
+                    s.available,
+                    s.covers.as_str()
+                )),
                 HeadlessError::SoldOut { supply_cap, minted } => {
                     Some(format!("supply_cap={supply_cap} minted={minted}"))
                 }
@@ -540,7 +549,7 @@ mod headless {
         let owned = rpc::tokens_of_owner(&ctx.rpc_url, contract, wallet)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
 
-        let (token_id, outcome) = match (ctx.token_id, owned.first().copied()) {
+        let (token_id, outcome) = match (ctx.token_id, lowest_token(&owned)) {
             // An explicitly requested token must actually be held: buying a
             // second token because the requested one is missing would spend
             // money the caller did not ask to spend.
@@ -589,10 +598,14 @@ mod headless {
             )));
         }
         if let Some(to) = receipt.to.as_deref() {
-            if !to.eq_ignore_ascii_case(&ctx.contract) {
+            let to_addr: Address = to.parse().map_err(|_| {
+                HeadlessError::ActivationFailed(format!(
+                    "activate() receipt carries a malformed `to` address ({to})"
+                ))
+            })?;
+            if to_addr != contract {
                 return Err(HeadlessError::ActivationFailed(format!(
-                    "activate() tx was sent to {to}, expected {}",
-                    ctx.contract
+                    "activate() tx was sent to {to_addr}, expected {contract}"
                 )));
             }
         }
@@ -682,6 +695,16 @@ mod headless {
         Ok((token_id, price))
     }
 
+    /// The token an unqualified run activates: the lowest id the signer holds.
+    ///
+    /// `rpc::tokens_of_owner` returns OpenZeppelin's ERC721Enumerable owner
+    /// array, which swap-and-pop leaves in an arbitrary order after any
+    /// transfer out. Taking the minimum makes the choice depend on what the
+    /// signer holds, not on its transfer history.
+    pub(super) fn lowest_token(owned: &[u64]) -> Option<u64> {
+        owned.iter().copied().min()
+    }
+
     /// `rpc::encode_*_calldata` returns display hex; the transaction envelope
     /// wants bytes. The encoders are pure and always emit valid hex, so a
     /// failure here means the ABI encoder itself is broken.
@@ -710,6 +733,7 @@ mod tests {
                     shortfall: Some(crate::tx::Shortfall {
                         required: alloy::primitives::U256::from(1u64),
                         available: alloy::primitives::U256::ZERO,
+                        covers: crate::tx::Covers::PriceAndGas,
                     }),
                 },
                 11,
@@ -777,11 +801,33 @@ mod tests {
             shortfall: Some(crate::tx::Shortfall {
                 required: alloy::primitives::U256::from(1_000_000u64),
                 available: alloy::primitives::U256::from(12u64),
+                covers: crate::tx::Covers::PriceAndGas,
             }),
         };
         let detail = err.machine_detail().unwrap();
         assert!(detail.contains("required_wei=1000000"), "{detail}");
         assert!(detail.contains("available_wei=12"), "{detail}");
+        assert!(detail.contains("required_covers=price_plus_gas"), "{detail}");
+    }
+
+    /// The pre-flight shortfall is measured before gas can be estimated, so
+    /// both the detail line and the message must say the figure is price-only.
+    /// An orchestrator that topped up exactly this would fail again on gas.
+    #[test]
+    fn price_only_shortfall_is_labelled_as_excluding_gas() {
+        let err = HeadlessError::InsufficientFunds {
+            shortfall: Some(crate::tx::Shortfall {
+                required: alloy::primitives::U256::from(10_000u64),
+                available: alloy::primitives::U256::ZERO,
+                covers: crate::tx::Covers::PriceOnly,
+            }),
+        };
+        let detail = err.machine_detail().unwrap();
+        assert!(detail.contains("required_covers=price"), "{detail}");
+        assert!(!detail.contains("required_covers=price_plus_gas"), "{detail}");
+        let rendered = err.to_string();
+        assert!(rendered.contains("before gas"), "{rendered}");
+        assert!(!rendered.contains("price + gas"), "{rendered}");
     }
 
     /// A node that rejects the transaction for lack of balance reports no
@@ -832,6 +878,102 @@ mod tests {
         assert_ne!(err.exit_code(), EXIT_RPC, "an orchestrator would retry forever");
     }
 
+    /// The enumeration order of `tokensOfOwner` is arbitrary after any
+    /// transfer out, so an unqualified run must pick by id, not by position.
+    #[test]
+    fn unqualified_run_selects_the_lowest_token_id() {
+        use super::headless::lowest_token;
+        assert_eq!(lowest_token(&[5, 3, 9]), Some(3));
+        assert_eq!(lowest_token(&[7]), Some(7));
+        assert_eq!(lowest_token(&[]), None);
+    }
+
+    /// A signer holding several licenses activates them at different times. A
+    /// run naming one token must reuse that token's own cached session, even
+    /// when another token was activated more recently.
+    #[test]
+    fn explicit_token_reuses_its_own_session_when_another_is_newer() {
+        let _guard = crate::session_store::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        let app_id = "com.rub3.test.multi-token";
+        let signer = crate::signer::LocalSigner::from_hex(
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+        let wallet = signer.address();
+
+        let older = signed_session(app_id, 7, &signer, "2026-01-01T00:00:00+00:00");
+        let newer = signed_session(app_id, 3, &signer, "2026-06-01T00:00:00+00:00");
+        crate::session_store::save_session(&older).unwrap();
+        crate::session_store::save_session(&newer).unwrap();
+
+        let picked = try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), Some(7))
+            .expect("token 7 has a valid cached session of its own");
+        assert_eq!(picked.token_id, 7);
+        assert_eq!(picked.nonce, older.nonce);
+
+        let latest = try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), None)
+            .expect("an unqualified run still takes the newest session");
+        assert_eq!(latest.token_id, 3);
+
+        assert!(
+            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), Some(9)).is_none(),
+            "a token with no cached session must be a miss",
+        );
+
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
+    /// Builds a locally signed, unexpired session for `token_id`, persisted the
+    /// way the headless door persists one.
+    fn signed_session(
+        app_id: &str,
+        token_id: u64,
+        signer: &crate::signer::LocalSigner,
+        issued_at: &str,
+    ) -> crate::session::Session {
+        let wallet = crate::identity::format_addr(signer.address());
+        let nonce = crate::session::new_nonce();
+        let expires_at = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        let message = crate::session::session_message(
+            app_id,
+            token_id,
+            "access",
+            &wallet,
+            &wallet,
+            &nonce,
+            Some(&expires_at),
+            None,
+            None,
+            None,
+        );
+        let signature = crate::signer::personal_sign(signer, &message).expect("sign session");
+
+        crate::session::Session {
+            app_id: app_id.to_string(),
+            token_id,
+            identity: "access".to_string(),
+            user_id: wallet.clone(),
+            tba: None,
+            wallet,
+            nonce,
+            issued_at: issued_at.to_string(),
+            expires_at: Some(expires_at),
+            signature,
+            chain: "base".to_string(),
+            contract: "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(),
+            activation_tx: None,
+            activation_block: None,
+            activation_block_hash: None,
+            session_id: None,
+            device_pubkey: None,
+        }
+    }
+
     #[test]
     fn unclassified_failures_have_no_detail_line() {
         assert!(HeadlessError::Rpc("offline".into()).machine_detail().is_none());
@@ -855,6 +997,7 @@ mod tests {
         let mapped: HeadlessError = TxError::InsufficientFunds(Some(crate::tx::Shortfall {
             required: U256::from(5u64),
             available: U256::ZERO,
+            covers: crate::tx::Covers::PriceAndGas,
         }))
         .into();
         assert_eq!(mapped.exit_code(), EXIT_INSUFFICIENT_FUNDS);

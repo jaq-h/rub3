@@ -104,14 +104,15 @@ pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/// `RUB3_SESSION_DIR` is process-global, so every test that points it at a
+/// tmpdir has to take this first, including the ones in `activation`.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::{new_nonce, session_message, Session};
-    use std::sync::Mutex;
-
-    // Tests that mutate RUB3_SESSION_DIR must not run concurrently.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn signed_session(app_id: &str, token_id: u64, expires_at: &str) -> Session {
         use k256::ecdsa::SigningKey;
@@ -153,7 +154,7 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 
@@ -170,7 +171,7 @@ mod tests {
 
     #[test]
     fn load_session_not_found() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 
@@ -182,7 +183,7 @@ mod tests {
 
     #[test]
     fn load_latest_returns_most_recent_valid() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 
@@ -200,7 +201,7 @@ mod tests {
 
     #[test]
     fn load_latest_not_found_when_all_expired() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 

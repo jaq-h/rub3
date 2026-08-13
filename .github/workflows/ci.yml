@@ -141,11 +141,15 @@ jobs:
         run: forge test -vv
 
   # ---------------------------------------------------------------------------
-  # Anvil-gated on-chain E2E (tests/session_onchain_e2e.rs, #[ignore]d).
-  # Spawns a local anvil, deploys Rub3Access with `forge create` from contracts/,
-  # runs purchase + activate, then asserts verify_onchain accepts the good
-  # session and rejects three tampered ones. Needs submodules (forge create
-  # compiles the contracts) and the Foundry toolchain.
+  # Anvil-gated on-chain E2E, both #[ignore]d suites.
+  # session_onchain_e2e.rs spawns a local anvil, deploys Rub3Access with
+  # `forge create` from contracts/, runs purchase + activate, then asserts
+  # verify_onchain accepts the good session and rejects three tampered ones.
+  # headless_e2e.rs drives the agent front door end to end on a fresh key.
+  # Both need submodules (forge create compiles the contracts) and Foundry.
+  #
+  # headless_e2e runs unfiltered and without --test-threads=1: the suite
+  # serialises itself in-file around the anvil port and the env vars it sets.
   #
   # Kept in its own job rather than folded into the tier-3 matrix job so that an
   # on-chain failure is distinguishable at a glance from a unit-test failure.
@@ -177,3 +181,10 @@ jobs:
         run: |
           cargo test -p rub3-wrapper --no-default-features --features tier-3 \
             --test session_onchain_e2e -- --ignored --nocapture
+
+      # always() so a failure in the sibling suite does not hide this one.
+      - name: headless_e2e
+        if: always()
+        run: |
+          cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
+            --test headless_e2e -- --ignored --nocapture

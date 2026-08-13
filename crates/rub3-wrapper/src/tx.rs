@@ -29,6 +29,30 @@ const GAS_LIMIT_BUFFER_PCT: u64 = 125;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
+/// What a [`Shortfall`]'s `required` figure accounts for.
+///
+/// The pre-flight balance check runs before `eth_estimateGas`, because a wallet
+/// that cannot cover the value alone makes the estimate fail with an opaque
+/// error. Its figure therefore excludes gas, and an orchestrator topping up
+/// against it needs to know that rather than being told "price + gas".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Covers {
+    /// The transaction value alone, measured before gas could be estimated.
+    PriceOnly,
+    /// The value plus `gas_limit * max_fee_per_gas`, the full cost ceiling.
+    PriceAndGas,
+}
+
+impl Covers {
+    /// The token emitted as `required_covers=` on the machine-detail line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Covers::PriceOnly => "price",
+            Covers::PriceAndGas => "price_plus_gas",
+        }
+    }
+}
+
 /// A measured funding gap: what the transaction costs, and what the wallet has.
 ///
 /// Only ever constructed from numbers the wrapper read itself. A node that
@@ -38,6 +62,7 @@ const GAS_LIMIT_BUFFER_PCT: u64 = 125;
 pub struct Shortfall {
     pub required: U256,
     pub available: U256,
+    pub covers: Covers,
 }
 
 #[derive(Debug)]
@@ -59,11 +84,19 @@ impl std::fmt::Display for TxError {
         match self {
             TxError::Rpc(e) => write!(f, "rpc error: {e}"),
             TxError::Signer(e) => write!(f, "{e}"),
-            TxError::InsufficientFunds(Some(s)) => write!(
-                f,
-                "insufficient funds: need {} wei (value + gas), wallet holds {} wei",
-                s.required, s.available
-            ),
+            TxError::InsufficientFunds(Some(s)) => match s.covers {
+                Covers::PriceAndGas => write!(
+                    f,
+                    "insufficient funds: need {} wei (value + gas), wallet holds {} wei",
+                    s.required, s.available
+                ),
+                Covers::PriceOnly => write!(
+                    f,
+                    "insufficient funds: need {} wei for the value alone, before gas, \
+                     wallet holds {} wei",
+                    s.required, s.available
+                ),
+            },
             TxError::InsufficientFunds(None) => write!(
                 f,
                 "insufficient funds: the node rejected the transaction for lack of \
@@ -143,6 +176,7 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
             return Err(TxError::InsufficientFunds(Some(Shortfall {
                 required: plan.value,
                 available: balance,
+                covers: Covers::PriceOnly,
             })));
         }
 
@@ -164,6 +198,7 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
             return Err(TxError::InsufficientFunds(Some(Shortfall {
                 required: max_cost,
                 available: balance,
+                covers: Covers::PriceAndGas,
             })));
         }
 
@@ -273,10 +308,26 @@ mod tests {
         let err = TxError::InsufficientFunds(Some(Shortfall {
             required: U256::from(1_000u64),
             available: U256::from(7u64),
+            covers: Covers::PriceAndGas,
         }));
         let rendered = err.to_string();
         assert!(rendered.contains("1000"), "{rendered}");
         assert!(rendered.contains('7'), "{rendered}");
+        assert!(rendered.contains("value + gas"), "{rendered}");
+    }
+
+    /// The pre-flight check fires before gas can be estimated, so its figure
+    /// must not be presented as covering gas.
+    #[test]
+    fn price_only_shortfall_says_it_excludes_gas() {
+        let rendered = TxError::InsufficientFunds(Some(Shortfall {
+            required: U256::from(1_000u64),
+            available: U256::ZERO,
+            covers: Covers::PriceOnly,
+        }))
+        .to_string();
+        assert!(rendered.contains("before gas"), "{rendered}");
+        assert!(!rendered.contains("value + gas"), "{rendered}");
     }
 
     /// With no measured amounts the message says so, rather than rendering a

@@ -253,6 +253,14 @@ The line carries only parameters the wrapper actually measured. Code 11 prints
 shortfall, and no `rub3-detail:` line at all when the node rejected the
 transaction without reporting amounts - never a placeholder zero.
 
+Code 11 also says what `required_wei` covers, because the two balance checks run
+at different points:
+
+| `required_covers` | `required_wei` is | Top up |
+|---|---|---|
+| `price_plus_gas` | price + `gas_limit * max_fee_per_gas`, the full ceiling | that amount |
+| `price` | the purchase price alone, measured before gas could be estimated | that amount plus gas |
+
 `RUB3_SESSION_DIR` overrides where sessions are cached (default
 `~/.rub3/sessions/<app_id>/<token_id>.json`) - useful for containers with a
 mounted volume.
