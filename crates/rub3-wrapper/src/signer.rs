@@ -25,10 +25,16 @@
 //!     input, so no key byte can land in a panic payload.
 //!   * The decoded key bytes and the keystore password are zeroized as soon as
 //!     they have been consumed.
-//!   * The wrapped binary does not inherit them either: `supervisor::spawn`
-//!     strips `RUB3_AGENT_KEY` and `RUB3_AGENT_KEYSTORE_PASSWORD` from the
-//!     child's environment before launching it, unconditionally. The licensed
-//!     product runs under the license, not under the wallet that paid for it.
+//!   * The wrapped binary is not handed them either: `supervisor::spawn`
+//!     strips all four `RUB3_AGENT_*` variables ([`crate::agent_env`]) from the
+//!     child's environment before launching it, unconditionally. So the child
+//!     is not given the agent credential or the location of one.
+//!
+//! That last point is containment, not a sandbox. The child runs as the same
+//! UID as the wrapper and can read any file that user can read, including the
+//! default keystore path `~/.rub3/agent-key.json`. Stripping the variables
+//! means the wrapper does not hand the credential over; it does not mean a
+//! determined child cannot go looking.
 //!
 //! # Sources, in order of precedence
 //!
@@ -51,19 +57,13 @@ use zeroize::Zeroize;
 
 // ── Env / path constants ──────────────────────────────────────────────────────
 
-/// Raw hex private key. Highest precedence. Dev and CI only - an env var is
-/// readable by anything sharing the process environment.
-pub const ENV_AGENT_KEY: &str = "RUB3_AGENT_KEY";
-
-/// Path to an encrypted Web3 Secret Storage (V3) keystore file.
-pub const ENV_AGENT_KEYSTORE: &str = "RUB3_AGENT_KEYSTORE";
-
-/// Keystore password, supplied inline.
-pub const ENV_AGENT_KEYSTORE_PASSWORD: &str = "RUB3_AGENT_KEYSTORE_PASSWORD";
-
-/// Path to a file whose contents are the keystore password. Preferred over
-/// [`ENV_AGENT_KEYSTORE_PASSWORD`] - a file can be mode 0600, an env var cannot.
-pub const ENV_AGENT_KEYSTORE_PASSWORD_FILE: &str = "RUB3_AGENT_KEYSTORE_PASSWORD_FILE";
+// Defined in `agent_env`, which is compiled into every build, so the launcher
+// can strip exactly what this module reads. Re-exported here because this is
+// where a reader looks for them.
+pub use crate::agent_env::{
+    ENV_AGENT_KEY, ENV_AGENT_KEYSTORE, ENV_AGENT_KEYSTORE_PASSWORD,
+    ENV_AGENT_KEYSTORE_PASSWORD_FILE,
+};
 
 /// Default keystore location when `RUB3_AGENT_KEYSTORE` is unset:
 /// `~/.rub3/agent-key.json`.
@@ -414,21 +414,6 @@ mod tests {
             std::env::remove_var(k);
         }
         guard
-    }
-
-    /// `supervisor` cannot name these constants (it is compiled into builds
-    /// with no `signer` module), so it repeats the strings. If they drift, the
-    /// wrapped binary silently regains the key.
-    #[test]
-    fn the_supervisor_strips_exactly_the_secret_bearing_env_vars() {
-        assert!(
-            crate::supervisor::STRIPPED_ENV.contains(&ENV_AGENT_KEY),
-            "the agent key must not reach the wrapped binary",
-        );
-        assert!(
-            crate::supervisor::STRIPPED_ENV.contains(&ENV_AGENT_KEYSTORE_PASSWORD),
-            "the keystore password must not reach the wrapped binary",
-        );
     }
 
     /// `Box<dyn Signer>` is deliberately not `Debug` - the trait must stay

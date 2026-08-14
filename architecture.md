@@ -571,7 +571,7 @@ rub3-wrapper
 
 **Headless mode (built - implementation.md §2.1).** Everything in the tree above except the Wallet Connection webview is signer-agnostic. `activation::ensure_headless(signer, ctx)` runs the same pipeline - enumerate tokens, purchase if empty, cooldown check, activate, sign session, persist - with an operator-supplied signer (env key, keystore, or KMS-backed `Signer` impl). Front doors are Cargo features: `webview` pulls `wry`/`tao`, `headless` pulls neither, so a headless build has no GUI dependency at all - smaller binary, container-friendly. This is the primary path for agent-operated software; the webview is the human fallback.
 
-Key handling is contained rather than spread. Headless necessarily signs and broadcasts, which the interactive flows never do, so the capability lives behind one feature and one object-safe trait whose only primitive is "sign this 32-byte digest" - a KMS or enclave serves it without releasing a key. Exactly one type, `signer::LocalSigner`, ever holds raw key material.
+Key handling is contained rather than spread. Headless necessarily signs and broadcasts, which the interactive flows never do, so the capability lives behind one feature and one object-safe trait whose only primitive is "sign this 32-byte digest" - a KMS or enclave serves it without releasing a key. Exactly one type, `signer::LocalSigner`, ever holds raw key material. The launcher strips all four `RUB3_AGENT_*` variables from the wrapped binary's environment, so the licensed product is not handed the credential or its location; the child still runs as the same UID, so this is containment, not a sandbox.
 
 #### Source layout (current)
 
@@ -587,10 +587,11 @@ crates/rub3-wrapper/
 │   ├── decrypt.rs       — binary decryption, KEK derivation, in-memory exec (planned, tiers 3-4)
 │   ├── store.rs         — tier 0 proof persistence (~/.rub3/licenses/ or $RUB3_LICENSE_DIR)
 │   ├── activation.rs    - activation flow: fast paths, `ensure` (webview door), `ensure_headless` (agent door), exit codes
+│   ├── agent_env.rs     - names of the `RUB3_AGENT_*` credential vars, read by `signer` and stripped by `supervisor`
 │   ├── signer.rs        - `Signer` trait + `LocalSigner` (feature `headless`; the only holder of raw key material)
 │   ├── tx.rs            - EIP-1559 build/sign/broadcast for headless (feature `headless`)
 │   ├── rpc.rs           - on-chain queries (ownerOf, price, cooldown, sessionId, chainId, receipt polling)
-│   ├── supervisor.rs    — child process lifecycle, SIGTERM forwarding
+│   ├── supervisor.rs    - child process lifecycle, SIGTERM forwarding, strips `RUB3_AGENT_*` from the child
 │   └── webview.rs       - native activation window (wry/tao), JS↔Rust IPC (feature `webview`)
 ├── assets/
 │   └── activation.html  — activation UI (connect, cooldown, tx-pending, sign, processing screens)

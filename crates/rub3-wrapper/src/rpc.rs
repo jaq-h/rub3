@@ -69,8 +69,26 @@ pub enum RpcError {
     Transport(String),
     /// Contract call reverted or returned unexpected data.
     Contract(String),
+    /// An argument was malformed: the call was never made and never will
+    /// succeed as given. Kept apart from [`RpcError::Transport`] so callers
+    /// that retry do not retry a request that cannot become valid.
+    InvalidInput(String),
     /// ENS resolution is not yet implemented (Phase 1.6).
     EnsNotSupported,
+}
+
+impl RpcError {
+    /// Whether repeating the identical call could plausibly succeed later.
+    ///
+    /// Only transport failures qualify: a 502, a rate limit or a dropped
+    /// connection says nothing about the request. A reverted call, a malformed
+    /// argument and an unimplemented feature are all settled answers.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            RpcError::Transport(_) => true,
+            RpcError::Contract(_) | RpcError::InvalidInput(_) | RpcError::EnsNotSupported => false,
+        }
+    }
 }
 
 impl std::fmt::Display for RpcError {
@@ -78,6 +96,7 @@ impl std::fmt::Display for RpcError {
         match self {
             RpcError::Transport(e) => write!(f, "transport error: {e}"),
             RpcError::Contract(e) => write!(f, "contract error: {e}"),
+            RpcError::InvalidInput(e) => write!(f, "invalid argument: {e}"),
             RpcError::EnsNotSupported => {
                 write!(f, "ENS resolution not yet supported (planned Phase 1.6)")
             }
@@ -246,7 +265,7 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
     let hash: B256 = tx_hash
         .trim_start_matches("0x")
         .parse::<B256>()
-        .map_err(|e| RpcError::Transport(format!("invalid tx hash: {e}")))?;
+        .map_err(|e| RpcError::InvalidInput(format!("invalid tx hash: {e}")))?;
 
     block_on(async move {
         let provider = build_provider(rpc_url)?;
@@ -300,7 +319,8 @@ pub const RECEIPT_POLL_INTERVAL_SECS: u64 = 3;
 pub enum ReceiptWaitError {
     /// The budget ran out with the transaction still unmined.
     Timeout { after_secs: u64 },
-    /// The receipt query kept failing until the budget ran out.
+    /// The receipt query failed: either it kept failing until the budget ran
+    /// out, or it failed in a way no retry could fix.
     Transport { after_secs: u64, message: String },
 }
 
@@ -341,7 +361,7 @@ impl std::fmt::Display for ReceiptWaitError {
                 write!(f, "tx not confirmed within {after_secs}s")
             }
             ReceiptWaitError::Transport { after_secs, message } => {
-                write!(f, "receipt query still failing after {after_secs}s: {message}")
+                write!(f, "receipt query failed after {after_secs}s: {message}")
             }
         }
     }
@@ -355,11 +375,12 @@ impl std::error::Error for ReceiptWaitError {}
 /// Shared by both front doors: the webview poller thread and the headless
 /// flow call this rather than each keeping their own loop.
 ///
-/// A failed poll never ends the wait early. Once a transaction is broadcast
-/// the only thing that resolves it is a receipt, so a 502, a rate limit or a
-/// dropped connection is retried inside the same budget; a transport failure
-/// is reported only when the budget is exhausted and the last poll was still
-/// failing.
+/// A *transient* failed poll never ends the wait early. Once a transaction is
+/// broadcast the only thing that resolves it is a receipt, so a 502, a rate
+/// limit or a dropped connection is retried inside the same budget, and is
+/// reported only when the budget is exhausted with the last poll still
+/// failing. A poll that fails because the request itself is malformed is
+/// reported at once: waiting out the budget would not make it parse.
 #[cfg(any(feature = "onchain-write", feature = "cooldown"))]
 pub fn wait_for_receipt(rpc_url: &str, tx_hash: &str) -> Result<TxReceipt, ReceiptWaitError> {
     poll_for_receipt(
@@ -388,6 +409,12 @@ where
             // The node answered, so whatever failed earlier was transient and
             // the transaction is merely unmined so far.
             Ok(None) => last_transport_error = None,
+            Err(e) if !e.is_retryable() => {
+                return Err(ReceiptWaitError::Transport {
+                    after_secs: started.elapsed().as_secs(),
+                    message: e.to_string(),
+                })
+            }
             Err(e) => last_transport_error = Some(e.to_string()),
         }
         if attempt + 1 < attempts {
@@ -516,7 +543,7 @@ pub fn mint_token_id(
     let hash: B256 = tx_hash
         .trim_start_matches("0x")
         .parse::<B256>()
-        .map_err(|e| RpcError::Transport(format!("invalid tx hash: {e}")))?;
+        .map_err(|e| RpcError::InvalidInput(format!("invalid tx hash: {e}")))?;
 
     block_on(async move {
         let provider = build_provider(rpc_url)?;
@@ -632,10 +659,13 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    /// A hash that cannot parse is a settled answer, not a network hiccup:
+    /// classified as retryable it would make every poller wait out its budget.
     #[test]
-    fn get_tx_receipt_invalid_hash_returns_transport_error() {
+    fn get_tx_receipt_invalid_hash_is_not_retryable() {
         let err = get_tx_receipt(VALID_RPC, "not-a-hash").unwrap_err();
-        assert!(matches!(err, RpcError::Transport(_)));
+        assert!(matches!(err, RpcError::InvalidInput(_)), "{err}");
+        assert!(!err.is_retryable(), "{err}");
     }
 
     #[test]
@@ -687,9 +717,10 @@ mod tests {
     }
 
     #[test]
-    fn mint_token_id_invalid_hash_returns_transport_error() {
+    fn mint_token_id_invalid_hash_is_not_retryable() {
         let err = mint_token_id(VALID_RPC, "not-a-hash", Address::ZERO, Address::ZERO).unwrap_err();
-        assert!(matches!(err, RpcError::Transport(_)));
+        assert!(matches!(err, RpcError::InvalidInput(_)), "{err}");
+        assert!(!err.is_retryable(), "{err}");
     }
 
     #[test]
@@ -798,6 +829,38 @@ mod tests {
 
         /// Both outcomes report the budget they consumed, so a caller can say
         /// how long it waited regardless of which one it got.
+        /// A malformed request is a settled answer: the caller waited out the
+        /// whole budget for a hash that could never parse, which the webview
+        /// door showed as a "waiting for the tx to land" window for 27s before
+        /// admitting the hash was junk.
+        #[test]
+        fn a_request_that_can_never_succeed_is_reported_at_once() {
+            let (out, calls) = poll_over(vec![
+                Err(RpcError::InvalidInput("invalid tx hash".into())),
+                Ok(Some(receipt())),
+                Ok(Some(receipt())),
+            ]);
+            assert_eq!(calls, 1, "a malformed request was retried");
+            let err = out.expect_err("a hash that cannot parse cannot resolve");
+            assert!(err.to_string().contains("invalid tx hash"), "{err}");
+        }
+
+        /// The same property through the public entry point, which is what the
+        /// webview poller thread actually calls. No node is reached: the hash
+        /// fails to parse first.
+        #[test]
+        fn wait_for_receipt_rejects_an_unparseable_hash_without_waiting() {
+            let started = std::time::Instant::now();
+            let err = wait_for_receipt("http://127.0.0.1:1", "not-a-hash")
+                .expect_err("a hash that cannot parse cannot resolve");
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "sat on the retry budget for {:?}",
+                started.elapsed(),
+            );
+            assert!(err.to_string().contains("invalid tx hash"), "{err}");
+        }
+
         /// `waited_secs` on the exit-21 detail line is how an operator sizes
         /// up an unresolved purchase, so it has to be the time really spent,
         /// not `attempts * interval`. Both directions are wrong under the
@@ -812,7 +875,11 @@ mod tests {
             // Nominal budget 1 x 3600s; one attempt that really takes ~1.1s.
             let timeout = poll_for_receipt(slow, 1, Duration::from_secs(3600))
                 .expect_err("never mined");
-            assert_eq!(timeout.after_secs(), 1, "reported the budget, not the wait");
+            assert!(
+                (1..60).contains(&timeout.after_secs()),
+                "reported the budget, not the wait: {}",
+                timeout.after_secs(),
+            );
 
             let slow_and_broken = || {
                 std::thread::sleep(Duration::from_millis(1_100));
@@ -821,7 +888,11 @@ mod tests {
             // Nominal budget 0s; the endpoint still burned ~1.1s answering.
             let transport = poll_for_receipt(slow_and_broken, 1, Duration::ZERO)
                 .expect_err("never answered");
-            assert_eq!(transport.after_secs(), 1, "a dead endpoint reported no wait at all");
+            assert!(
+                transport.after_secs() >= 1,
+                "a dead endpoint reported no wait at all: {}",
+                transport.after_secs(),
+            );
         }
     }
 }

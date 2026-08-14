@@ -30,8 +30,8 @@ jobs:
   #   the webview front door PLUS tier-0, not tier-0. Measured on this branch:
   #   `cargo tree --features tier-0` still lists `rand` (the dependency that only
   #   the `session` feature pulls in), and `cargo test -p rub3-wrapper --features
-  #   tier-0 --lib` runs 60 tests, exactly the default count, instead of tier-0's
-  #   30. Without `--no-default-features` this matrix would test the default
+  #   tier-0 --lib` runs 62 tests, exactly the default count, instead of tier-0's
+  #   32. Without `--no-default-features` this matrix would test the default
   #   bundle every time and look like coverage while proving nothing.
   # ---------------------------------------------------------------------------
   rust:

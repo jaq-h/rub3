@@ -1,3 +1,4 @@
+pub mod agent_env;
 pub mod license;
 pub mod store;
 

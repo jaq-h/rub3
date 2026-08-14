@@ -37,11 +37,12 @@ rub3/
 │       │   ├── identity.rs           # Identity models (access/account), ERC-6551 TBA derivation
 │       │   ├── store.rs              # Proof persistence (~/.rub3/licenses/ or RUB3_LICENSE_DIR)
 │       │   ├── activation.rs         # Activation orchestration: fast paths, `ensure` (webview), `ensure_headless` (agent), exit codes
+│       │   ├── agent_env.rs          # Names of the `RUB3_AGENT_*` credential vars: read by `signer`, stripped by `supervisor`
 │       │   ├── signer.rs             # `Signer` trait + `LocalSigner` - the only holder of raw key material (feature `headless`)
 │       │   ├── tx.rs                 # EIP-1559 build / sign / broadcast for headless (feature `headless`)
 │       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner, chainId) via alloy
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC message handling (feature `webview`)
-│       │   ├── supervisor.rs         # Child process lifecycle, SIGTERM forwarding
+│       │   ├── supervisor.rs         # Child process lifecycle, SIGTERM forwarding, `RUB3_AGENT_*` stripped from the child
 │       │   ├── session.rs            # Session schema, message hash, verify_local, is_expired
 │       │   └── session_store.rs      # Session persistence, load_latest_session
 │       ├── assets/
@@ -197,12 +198,16 @@ rub3-wrapper --headless --token-id 3 --binary /path/to/your/app
 
 `--headless` requires a build with the `headless` feature; other builds exit 18.
 
-The wrapped binary never inherits the key. Before launching it the wrapper
-removes `RUB3_AGENT_KEY` and `RUB3_AGENT_KEYSTORE_PASSWORD` from the child's
-environment, so the licensed product (and anything it spawns) cannot read the
-agent key or the keystore password and spend from the wallet that paid for it.
-This is unconditional: there is no flag to pass them through, and it applies to
-every build, not only headless ones.
+Before launching the wrapped binary the wrapper removes all four
+`RUB3_AGENT_*` variables (`RUB3_AGENT_KEY`, `RUB3_AGENT_KEYSTORE`,
+`RUB3_AGENT_KEYSTORE_PASSWORD`, `RUB3_AGENT_KEYSTORE_PASSWORD_FILE`) from the
+child's environment, so it does not hand the licensed product the agent
+credential or the location of one. This is unconditional: there is no flag to
+pass them through, and it applies to every build, not only headless ones.
+
+That is containment, not a sandbox. The child runs as the same UID as the
+wrapper and can read any file that user can read, including the default
+keystore path `~/.rub3/agent-key.json`.
 
 ### Signer sources
 
@@ -219,9 +224,8 @@ silent fall-through to a keystore.
 For KMS, HSM, or enclave-backed keys, implement the `Signer` trait and pass it
 to `activation::ensure_headless` directly. Its only primitive is "sign this
 32-byte digest", so no key material ever enters the wrapper's process. Exactly
-one type in the crate - `signer::LocalSigner` - holds a raw key at all, and
-neither the key nor the keystore password survives into the wrapped binary's
-environment.
+one type in the crate - `signer::LocalSigner` - holds a raw key at all, and no
+`RUB3_AGENT_*` variable survives into the wrapped binary's environment.
 
 ### Exit codes
 

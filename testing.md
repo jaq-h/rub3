@@ -19,15 +19,15 @@ capabilities nor the headless front door. Cargo features are additive, so
 `--no-default-features` is mandatory when selecting another bundle:
 
 ```bash
-# tier-3 (adds onchain-write + cooldown): 68 lib tests
+# tier-3 (adds onchain-write + cooldown): 72 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
 
-# tier-3 + the headless (agent) front door: 114 lib tests
+# tier-3 + the headless (agent) front door: 117 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
 ```
 
-For reference, `--lib` counts per bundle: `tier-0` 30, `tier-1`/`tier-2` 60,
-`tier-3`/`tier-4` 68, `tier-3,headless` 114. Each total includes the one
+For reference, `--lib` counts per bundle: `tier-0` 32, `tier-1`/`tier-2` 62,
+`tier-3`/`tier-4` 72, `tier-3,headless` 117. Each total includes the one
 `#[ignore]`d network test, which a plain run skips, so a bundle reports one
 fewer as passed.
 
@@ -56,8 +56,8 @@ scripts/test-e2e.sh
 - **`signer::tests`** (requires `headless` feature) - hex key parsing (bare/prefixed/padded, and every rejection: wrong length, non-hex, zero and out-of-curve-order scalars), `Debug` redaction and error messages asserted not to echo the input, `personal_sign` / `sign_prehash` recovery, RFC-6979 determinism, keystore decrypt, password-file precedence, and the strict env-key-over-keystore resolution order with no fall-through on a malformed key
 - **`tx::tests`** (requires `headless` feature) - invalid-URL transport error, the node's `insufficient funds` classifier, and the shortfall message with and without known amounts
 - **`activation::tests`** (requires `headless` feature) - the exit-code table asserted value-by-value, all classified codes distinct and disjoint from 0/1/2, `machine_detail` contents, `lowest_token` selection, the token- and wallet-scoped session fast path, and every unconfirmed-purchase outcome mapping to the terminal code 21
-- **`rpc::tests::receipt_polling`** (requires `onchain-write` or `cooldown`) - the receipt poll loop driven over scripted answers: a transient transport failure does not end the wait, one that outlasts the budget is reported as `Transport`, a recovered poll ends as `Timeout`, and both report real wall-clock waiting time rather than the nominal budget
-- **`supervisor::tests`** (Unix) - the wrapped binary's own reported environment carries neither `RUB3_AGENT_KEY` nor `RUB3_AGENT_KEYSTORE_PASSWORD`
+- **`rpc::tests::receipt_polling`** (requires `onchain-write` or `cooldown`) - the receipt poll loop driven over scripted answers: a transient transport failure does not end the wait, one that outlasts the budget is reported as `Transport`, a recovered poll ends as `Timeout`, a request that can never succeed (an unparseable tx hash) is reported at once instead of consuming the budget, and both outcomes report real wall-clock waiting time rather than the nominal budget
+- **`supervisor::tests`** (Unix) - the wrapped binary's own reported environment carries none of the four `RUB3_AGENT_*` variables, covered for the raw-key source, the keystore-plus-password-file source (the documented preferred setup) and all sources at once
 
 ### Integration tests (`tests/integration.rs`)
 

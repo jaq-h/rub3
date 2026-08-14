@@ -38,24 +38,24 @@ pub fn run(binary: &Path, args: &[String]) -> i32 {
     }
 }
 
-/// Environment variables the wrapped binary must never see.
+/// Launches the wrapped binary without the agent credential in its
+/// environment.
 ///
-/// Headless activation reads a funded private key, or the password that
-/// decrypts one, out of the environment. The wrapped binary is the licensed
-/// product, not the license holder: leaving either variable in its environment
-/// would hand it (and its own children, and any crash reporter it ships) the
-/// ability to drain the wallet. Stripping them is unconditional and not gated
-/// behind the `headless` feature, because what matters is that the child never
-/// sees key material regardless of how this wrapper was built.
+/// Headless activation reads a funded private key, or an encrypted keystore
+/// and the password that opens it, out of the environment. The wrapped binary
+/// is the licensed product, not the license holder: leaving any of those
+/// variables in its environment would hand it (and its own children, and any
+/// crash reporter it ships) what it needs to spend from the wallet. So every
+/// name in [`crate::agent_env::AGENT_ENV_VARS`] is removed first.
 ///
-/// Mirrors `signer::ENV_AGENT_KEY` and `signer::ENV_AGENT_KEYSTORE_PASSWORD`,
-/// which cannot be named here: `signer` exists only in headless builds.
-pub(crate) const STRIPPED_ENV: [&str; 2] = ["RUB3_AGENT_KEY", "RUB3_AGENT_KEYSTORE_PASSWORD"];
-
+/// Unconditional, and not gated behind the `headless` feature: what matters is
+/// that the child is never handed the credential, however this wrapper was
+/// built. It is containment, not a sandbox - the child runs as the same UID
+/// and can still read whatever that user can read.
 fn spawn(binary: &Path, args: &[String]) -> std::io::Result<Child> {
     let mut cmd = Command::new(binary);
     cmd.args(args);
-    for name in STRIPPED_ENV {
+    for name in crate::agent_env::AGENT_ENV_VARS {
         cmd.env_remove(name);
     }
     cmd.spawn()
@@ -103,22 +103,19 @@ mod libc_signal {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::agent_env::{
+        AGENT_ENV_VARS, ENV_AGENT_KEY, ENV_AGENT_KEYSTORE, ENV_AGENT_KEYSTORE_PASSWORD,
+        ENV_AGENT_KEYSTORE_PASSWORD_FILE,
+    };
 
-    /// The wrapped binary runs with the operator's key in reach unless the
-    /// wrapper takes it away. Proven by letting a real child report its own
-    /// environment: a `printenv` dump is the child's view of what it inherited.
-    #[test]
-    fn the_wrapped_binary_does_not_inherit_agent_key_material() {
-        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dump = dir.path().join("child-env.txt");
-
+    /// Runs `spawn` against a child that dumps its own environment, and
+    /// returns what that child saw. The dump is the child's report of what it
+    /// inherited, which is the thing under test.
+    fn child_environment(dir: &std::path::Path) -> String {
+        let dump = dir.join("child-env.txt");
         // Inherited on purpose: it is how the child tells us what it saw, and
-        // it proves the dump ran rather than the file merely being empty.
+        // its presence proves the dump ran rather than the file being empty.
         std::env::set_var("RUB3_TEST_ENV_DUMP", &dump);
-        std::env::set_var("RUB3_AGENT_KEY", "0xdeadbeef");
-        std::env::set_var("RUB3_AGENT_KEYSTORE_PASSWORD", "hunter2");
 
         let status = spawn(
             Path::new("/bin/sh"),
@@ -132,30 +129,82 @@ mod tests {
         .expect("wait for child");
         assert!(status.success(), "child failed: {status:?}");
 
-        let child_env = std::fs::read_to_string(&dump).expect("child wrote its environment");
-        let names: Vec<&str> = child_env
-            .lines()
-            .filter_map(|l| l.split_once('='))
-            .map(|(k, _)| k)
-            .collect();
-
+        let seen = std::fs::read_to_string(&dump).expect("child wrote its environment");
         assert!(
-            names.contains(&"RUB3_TEST_ENV_DUMP"),
-            "the dump did not capture the child's environment: {child_env:?}",
+            seen.lines().any(|l| l.starts_with("RUB3_TEST_ENV_DUMP=")),
+            "the dump did not capture the child's environment: {seen:?}",
         );
-        for stripped in STRIPPED_ENV {
+        std::env::remove_var("RUB3_TEST_ENV_DUMP");
+        seen
+    }
+
+    fn assert_no_agent_vars(seen: &str, secrets: &[&str]) {
+        let names: Vec<&str> = seen.lines().filter_map(|l| l.split_once('=')).map(|(k, _)| k).collect();
+        for stripped in AGENT_ENV_VARS {
+            assert!(!names.contains(&stripped), "{stripped} reached the wrapped binary");
+        }
+        for secret in secrets {
             assert!(
-                !names.contains(&stripped),
-                "{stripped} reached the wrapped binary",
+                !seen.contains(secret),
+                "credential material reached the wrapped binary under another name",
             );
         }
-        assert!(
-            !child_env.contains("hunter2") && !child_env.contains("0xdeadbeef"),
-            "key material reached the wrapped binary under some other name",
-        );
+    }
 
-        std::env::remove_var("RUB3_TEST_ENV_DUMP");
-        std::env::remove_var("RUB3_AGENT_KEY");
-        std::env::remove_var("RUB3_AGENT_KEYSTORE_PASSWORD");
+    /// The raw-key configuration: `RUB3_AGENT_KEY` alone.
+    #[test]
+    fn the_wrapped_binary_does_not_inherit_a_raw_agent_key() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        std::env::set_var(ENV_AGENT_KEY, "0xdeadbeef");
+        let seen = child_environment(dir.path());
+        std::env::remove_var(ENV_AGENT_KEY);
+
+        assert_no_agent_vars(&seen, &["0xdeadbeef"]);
+    }
+
+    /// The documented preferred configuration: an encrypted keystore plus a
+    /// mode-0600 password file, no inline password. Neither variable is the
+    /// key, but a child holding both paths can decrypt one, so neither may
+    /// survive into its environment.
+    #[test]
+    fn the_wrapped_binary_does_not_inherit_the_keystore_or_its_password_file() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let keystore = dir.path().join("agent-key.json");
+        let password_file = dir.path().join("pw.txt");
+
+        std::env::set_var(ENV_AGENT_KEYSTORE, &keystore);
+        std::env::set_var(ENV_AGENT_KEYSTORE_PASSWORD_FILE, &password_file);
+        let seen = child_environment(dir.path());
+        std::env::remove_var(ENV_AGENT_KEYSTORE);
+        std::env::remove_var(ENV_AGENT_KEYSTORE_PASSWORD_FILE);
+
+        assert_no_agent_vars(
+            &seen,
+            &[
+                keystore.to_str().expect("utf-8 path"),
+                password_file.to_str().expect("utf-8 path"),
+            ],
+        );
+    }
+
+    /// Every source at once, including the inline password.
+    #[test]
+    fn the_wrapped_binary_inherits_no_agent_variable_from_any_source() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        std::env::set_var(ENV_AGENT_KEY, "0xdeadbeef");
+        std::env::set_var(ENV_AGENT_KEYSTORE, dir.path().join("agent-key.json"));
+        std::env::set_var(ENV_AGENT_KEYSTORE_PASSWORD, "hunter2");
+        std::env::set_var(ENV_AGENT_KEYSTORE_PASSWORD_FILE, dir.path().join("pw.txt"));
+        let seen = child_environment(dir.path());
+        for name in AGENT_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        assert_no_agent_vars(&seen, &["0xdeadbeef", "hunter2"]);
     }
 }
