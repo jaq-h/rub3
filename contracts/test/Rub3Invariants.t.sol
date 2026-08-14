@@ -954,6 +954,24 @@ contract Rub3InvariantsTest is Test {
         );
     }
 
+    /// The mirror of the subscription probe, over the same `period()`
+    /// discriminator: an access license may not declare a subscription
+    /// predecessor. Without it, `_afterClaim` on an access license carries
+    /// nothing, so any subscriber - including one lapsed years ago - could mint
+    /// a perpetual license for free. Cross-model succession is impossible by
+    /// construction, in both directions.
+    function test_predecessorProbe_accessRejectsSubscriptionPredecessor() public {
+        Rub3Subscription sub = _deploySubscription(address(0));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, address(sub))
+        );
+        new Rub3Access(
+            "x", "x", 0, address(0),
+            _hashes(HASH_V3), PRICE, 0, COOLDOWN_BLOCKS, address(sub), owner
+        );
+    }
+
     /// A well-typed access predecessor still deploys, and still completes a
     /// claim end to end. The probe never reads the *value* of `successor()`,
     /// because the predecessor points here only after this deploy.

@@ -197,7 +197,7 @@ cast call <CONTRACT_ADDRESS> "revocationReason(bytes32)(string)" <H> --rpc-url $
 
 For contract bugs, paid major versions, and chain migration. Both sides opt in, and the holder does the moving.
 
-1. Deploy the successor with `PREDECESSOR=<OLD_CONTRACT>` (immutable - a contract deployed without it accepts no claims).
+1. Deploy the successor with `PREDECESSOR=<OLD_CONTRACT>` (immutable - a contract deployed without it accepts no claims). The successor must be the same model as the predecessor: `CONTRACT_TYPE=access` with a subscription predecessor, or `CONTRACT_TYPE=subscription` with an access one, reverts at deploy with `IncompatiblePredecessor(address)`. Cross-model succession is impossible by construction, not a judgement call - both constructors probe `period()` as the discriminator, the subscription requiring the predecessor to answer it and the access license requiring it to fail.
 2. Point the old contract at it:
 
    ```bash
@@ -228,6 +228,8 @@ The wrapper's trust rule - "contract X, or X's successor holding a token claimed
 ```bash
 cast call <NEW_CONTRACT> "honorsContract(address,uint256)(bool)" <OLD_CONTRACT> <NEW_TOKEN_ID> --rpc-url $RPC
 ```
+
+It spans exactly one hop, by construction: each contract compares the address you pass against its own immutable `predecessor` and looks no further back. After a second migration (v1 -> v2 -> v3), `v3.honorsContract(v1, <V3_TOKEN_ID>)` is false, so a wrapper still pinned to v1 does not honor the v3 token. Nobody is stranded by that - no token is ever burned, so the holder's v1 token (and their v2 token, if they claimed one) keeps validating forever on its own contract, which is exactly what a v1-pinned wrapper checks.
 
 ## Auditing the invariants before buying
 

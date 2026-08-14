@@ -523,7 +523,11 @@ Covers contract bugs, paid major versions, and chain migration. Three hard guara
 
    Both sides opt in, explicitly: the successor names its `predecessor` at deploy (immutable), and the predecessor's owner points `successor` at it. A v2 deployed *without* a predecessor accepts no claims - that is how a paid major version is shipped while still signposting where it lives.
 
+   **Succession is same-model, by construction.** An access contract cannot declare a subscription predecessor, and a subscription cannot declare an access one: both constructors probe the predecessor over the same discriminator, `period()`, which `Rub3Subscription` requires it to answer and `Rub3Access` requires it to fail. A cross-model pairing reverts at deploy with `IncompatiblePredecessor(address)`, so it is not a mistake a deployer can make. That closes the one path where a claim could grant more than the holder had: an access license carries nothing across in `_afterClaim`, so a subscription predecessor would have let any subscriber - including one lapsed years ago - mint a perpetual license for free.
+
 3. **The wrapper's trust rule: "contract X, or X's successor holding a token claimed from X."** `honorsContract(X, tokenId)` evaluates exactly that in one `eth_call`. A token *bought* on the successor is not a claim, so a wrapper pinned to X does not accept it. The predecessor's opt-in is checked once, at claim time, and recorded permanently - a later `setSuccessor` cannot retroactively unmake a claim that already happened, because a claim already made is a grant.
+
+   **The rule spans exactly one hop, by construction.** `honorsContract` compares its argument against this contract's own immutable `predecessor` and nothing further back, so after a second migration (v1 -> v2 -> v3) `v3.honorsContract(v1, tokenId)` is false: a wrapper pinned to v1 does not honor a v3 token. The holder is not stranded by that. No token is ever burned, so their v1 token - and their v2 token, if they claimed one - keeps validating forever on its own contract, which is what a v1-pinned wrapper checks anyway. Claiming onto v3 adds a token; it takes none away.
 
 ##### What is enforced by bytecode, and what is convention
 

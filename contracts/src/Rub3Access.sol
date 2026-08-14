@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Rub3License} from "./Rub3License.sol";
+import {IRub3Predecessor, Rub3License} from "./Rub3License.sol";
 
 /// @notice One-time-purchase access license. The NFT grants permanent access to
 ///         the wrapped application for its owner.
@@ -26,7 +26,22 @@ contract Rub3Access is Rub3License {
     ) Rub3License(
         name_, symbol_, identityModel_, tbaImplementation_, wrapperHashes_,
         price_, supplyCap_, cooldownBlocks_, predecessor_, owner_
-    ) {}
+    ) {
+        // Succession is same-model only, and that is enforced here rather than
+        // left to the deployer. {Rub3License} has already established that a
+        // non-zero predecessor is a live contract answering the base read slice;
+        // this is the mirror of the {Rub3Subscription} probe over the same
+        // discriminator. A subscription predecessor answers `period()`, and an
+        // access license carries no terms across in `_afterClaim`, so pointing
+        // one here would let a lapsed subscriber mint a perpetual license for
+        // free. Rejected at deploy, by name, rather than silently later.
+        if (predecessor_ != address(0)) {
+            bool answersPeriod = true;
+            try IRub3Predecessor(predecessor_).period() returns (uint256) {}
+            catch { answersPeriod = false; }
+            if (answersPeriod) revert IncompatiblePredecessor(predecessor_);
+        }
+    }
 
     /// @notice Mint a fresh license token to `recipient`.
     /// @dev    Passing `address(0)` mints to `msg.sender`.

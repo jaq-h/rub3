@@ -14,11 +14,13 @@ interface IRub3Predecessor {
     function successor() external view returns (address);
 
     /// The subscription slice, absent on a predecessor that is not a
-    /// subscription. `period()` is read only by the {Rub3Subscription}
-    /// constructor probe, as the discriminator between a subscription and an
-    /// access license; it is immutable per contract and never carries across a
-    /// claim. `expiresAt` / `renewPrice` are the per-token terms `_afterClaim`
-    /// actually carries.
+    /// subscription. `period()` is read only by the constructor probes, as the
+    /// discriminator between a subscription and an access license: both
+    /// concrete contracts probe it, {Rub3Subscription} requiring a predecessor
+    /// to answer it and {Rub3Access} requiring one to fail it, so cross-model
+    /// succession cannot be deployed at all. It is immutable per contract and
+    /// never carries across a claim. `expiresAt` / `renewPrice` are the
+    /// per-token terms `_afterClaim` actually carries.
     function period() external view returns (uint256);
     function expiresAt(uint256 tokenId) external view returns (uint256);
     function renewPrice(uint256 tokenId) external view returns (uint256);
