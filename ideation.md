@@ -147,6 +147,6 @@ No existing project closes the full machine loop — buy, verify, run, resell �
 
 Phase 1 (Proof of Concept) is largely built along the original human-interactive path: wrapper runtime with process supervision, license proof + session crypto, native activation window, on-chain queries, tier-3 cooldown activation, purchase UI, identity models with TBA derivation, and the `Rub3Access`/`Rub3Subscription` contracts with 33 forge tests.
 
-The plan has since been reoriented agent-first (see [implementation.md](implementation.md)): the next work is headless activation, USDC/EIP-3009 purchases, the fee-stamping factory, ownership-invariant hardening, and the CLI — ahead of WalletConnect and other human-surface polish. Tier-4 device binding and binary encryption are deferred.
+The plan has since been reoriented agent-first (see [implementation.md](implementation.md)): headless activation has landed, and the next work is USDC/EIP-3009 purchases, the fee-stamping factory, ownership-invariant hardening, and the CLI - ahead of WalletConnect and other human-surface polish. Tier-4 device binding and binary encryption are deferred.
 
 See [architecture.md](architecture.md) and [implementation.md](implementation.md) for technical details.

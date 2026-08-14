@@ -53,9 +53,9 @@ const ERC721_TRANSFER_SIG: B256 =
 /// Minimal tx receipt — the fields the wrapper cares about.
 #[derive(Debug, Clone)]
 pub struct TxReceipt {
-    pub status:       bool,
+    pub status: bool,
     pub block_number: u64,
-    pub block_hash:   String,
+    pub block_hash: String,
     /// `to` address from the receipt, lowercased hex. Used by tier-3
     /// on-chain re-verification to confirm the tx hit the license contract.
     pub to: Option<String>,
@@ -69,8 +69,26 @@ pub enum RpcError {
     Transport(String),
     /// Contract call reverted or returned unexpected data.
     Contract(String),
+    /// An argument was malformed: the call was never made and never will
+    /// succeed as given. Kept apart from [`RpcError::Transport`] so callers
+    /// that retry do not retry a request that cannot become valid.
+    InvalidInput(String),
     /// ENS resolution is not yet implemented (Phase 1.6).
     EnsNotSupported,
+}
+
+impl RpcError {
+    /// Whether repeating the identical call could plausibly succeed later.
+    ///
+    /// Only transport failures qualify: a 502, a rate limit or a dropped
+    /// connection says nothing about the request. A reverted call, a malformed
+    /// argument and an unimplemented feature are all settled answers.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            RpcError::Transport(_) => true,
+            RpcError::Contract(_) | RpcError::InvalidInput(_) | RpcError::EnsNotSupported => false,
+        }
+    }
 }
 
 impl std::fmt::Display for RpcError {
@@ -78,6 +96,7 @@ impl std::fmt::Display for RpcError {
         match self {
             RpcError::Transport(e) => write!(f, "transport error: {e}"),
             RpcError::Contract(e) => write!(f, "contract error: {e}"),
+            RpcError::InvalidInput(e) => write!(f, "invalid argument: {e}"),
             RpcError::EnsNotSupported => {
                 write!(f, "ENS resolution not yet supported (planned Phase 1.6)")
             }
@@ -214,11 +233,7 @@ pub fn cooldown_blocks(rpc_url: &str, contract: Address) -> Result<u64, RpcError
 
 /// Calls `activeSessionId(tokenId)` view. Used after an `activate()` tx lands
 /// to read the authoritative session id the contract assigned.
-pub fn active_session_id(
-    rpc_url: &str,
-    contract: Address,
-    token_id: u64,
-) -> Result<u64, RpcError> {
+pub fn active_session_id(rpc_url: &str, contract: Address, token_id: u64) -> Result<u64, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
         let instance = IRub3License::new(contract, provider);
@@ -236,7 +251,9 @@ pub fn active_session_id(
 /// Pure — no RPC. The wrapper shows this to the user so they can paste it
 /// into their wallet to send the tx themselves.
 pub fn encode_activate_calldata(token_id: u64) -> String {
-    let call = IRub3License::activateCall { tokenId: U256::from(token_id) };
+    let call = IRub3License::activateCall {
+        tokenId: U256::from(token_id),
+    };
     format!("0x{}", hex::encode(call.abi_encode()))
 }
 
@@ -246,7 +263,7 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
     let hash: B256 = tx_hash
         .trim_start_matches("0x")
         .parse::<B256>()
-        .map_err(|e| RpcError::Transport(format!("invalid tx hash: {e}")))?;
+        .map_err(|e| RpcError::InvalidInput(format!("invalid tx hash: {e}")))?;
 
     block_on(async move {
         let provider = build_provider(rpc_url)?;
@@ -257,7 +274,7 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
 
         let receipt = match maybe {
             Some(r) => r,
-            None    => return Ok(None),
+            None => return Ok(None),
         };
 
         let block_hash = receipt
@@ -270,12 +287,149 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
             .map(|a| format!("0x{}", hex::encode(a.as_slice())));
 
         Ok(Some(TxReceipt {
-            status:       receipt.status(),
+            status: receipt.status(),
             block_number,
             block_hash,
             to,
         }))
     })
+}
+
+/// Tx receipt polling budget - attempts × interval = total wait.
+///
+/// 30s covers Base's ~2s soft finality with a wide margin; it is also the
+/// budget the interactive flow has always used, kept identical here so the
+/// human and agent front doors behave the same when a chain is congested.
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+pub const RECEIPT_POLL_ATTEMPTS: u32 = 10;
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+pub const RECEIPT_POLL_INTERVAL_SECS: u64 = 3;
+
+/// Why [`wait_for_receipt`] gave up.
+///
+/// Both cases mean the same thing to a caller that just spent money: the
+/// transaction may still be mined and cannot be assumed dead. They are kept
+/// apart only so the failure can be reported honestly - a timeout says the
+/// node answered and the tx was simply not mined yet, a transport failure says
+/// the node stopped answering at all, and neither is a reason to re-broadcast.
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+#[derive(Debug)]
+pub enum ReceiptWaitError {
+    /// The budget ran out with the transaction still unmined.
+    Timeout { after_secs: u64 },
+    /// The receipt query failed: either it kept failing until the budget ran
+    /// out, or it failed in a way no retry could fix.
+    Transport { after_secs: u64, message: String },
+}
+
+// `after_secs` on both variants is wall-clock time actually spent waiting, not
+// the nominal budget: it is what an operator reads off the exit-21 detail line
+// to reconstruct how long a committed purchase went unresolved, and a dead
+// endpoint that blocks on every call can burn far more than the budget.
+
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+impl ReceiptWaitError {
+    /// Wall-clock seconds actually spent waiting before giving up.
+    ///
+    /// Measured, not derived from `attempts * interval`: the loop sleeps only
+    /// between attempts, and a slow endpoint can make each attempt cost far
+    /// more than the interval.
+    pub fn after_secs(&self) -> u64 {
+        match self {
+            ReceiptWaitError::Timeout { after_secs }
+            | ReceiptWaitError::Transport { after_secs, .. } => *after_secs,
+        }
+    }
+
+    /// The transport failure that ended the wait, or `None` when the node kept
+    /// answering and the transaction simply had not been mined.
+    pub fn transport_message(&self) -> Option<&str> {
+        match self {
+            ReceiptWaitError::Timeout { .. } => None,
+            ReceiptWaitError::Transport { message, .. } => Some(message),
+        }
+    }
+}
+
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+impl std::fmt::Display for ReceiptWaitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReceiptWaitError::Timeout { after_secs } => {
+                write!(f, "tx not confirmed within {after_secs}s")
+            }
+            ReceiptWaitError::Transport {
+                after_secs,
+                message,
+            } => {
+                write!(f, "receipt query failed after {after_secs}s: {message}")
+            }
+        }
+    }
+}
+
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+impl std::error::Error for ReceiptWaitError {}
+
+/// Polls `get_tx_receipt` until the transaction is mined or the budget runs out.
+///
+/// Shared by both front doors: the webview poller thread and the headless
+/// flow call this rather than each keeping their own loop.
+///
+/// A *transient* failed poll never ends the wait early. Once a transaction is
+/// broadcast the only thing that resolves it is a receipt, so a 502, a rate
+/// limit or a dropped connection is retried inside the same budget, and is
+/// reported only when the budget is exhausted with the last poll still
+/// failing. A poll that fails because the request itself is malformed is
+/// reported at once: waiting out the budget would not make it parse.
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+pub fn wait_for_receipt(rpc_url: &str, tx_hash: &str) -> Result<TxReceipt, ReceiptWaitError> {
+    poll_for_receipt(
+        || get_tx_receipt(rpc_url, tx_hash),
+        RECEIPT_POLL_ATTEMPTS,
+        std::time::Duration::from_secs(RECEIPT_POLL_INTERVAL_SECS),
+    )
+}
+
+/// The polling loop behind [`wait_for_receipt`], with the query and the clock
+/// passed in so the retry behaviour can be exercised without a node.
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+fn poll_for_receipt<F>(
+    mut poll: F,
+    attempts: u32,
+    interval: std::time::Duration,
+) -> Result<TxReceipt, ReceiptWaitError>
+where
+    F: FnMut() -> Result<Option<TxReceipt>, RpcError>,
+{
+    let started = std::time::Instant::now();
+    let mut last_transport_error: Option<String> = None;
+    for attempt in 0..attempts {
+        match poll() {
+            Ok(Some(r)) => return Ok(r),
+            // The node answered, so whatever failed earlier was transient and
+            // the transaction is merely unmined so far.
+            Ok(None) => last_transport_error = None,
+            Err(e) if !e.is_retryable() => {
+                return Err(ReceiptWaitError::Transport {
+                    after_secs: started.elapsed().as_secs(),
+                    message: e.to_string(),
+                })
+            }
+            Err(e) => last_transport_error = Some(e.to_string()),
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(interval);
+        }
+    }
+    let after_secs = started.elapsed().as_secs();
+    match last_transport_error {
+        Some(message) => Err(ReceiptWaitError::Transport {
+            after_secs,
+            message,
+        }),
+        None => Err(ReceiptWaitError::Timeout { after_secs }),
+    }
 }
 
 // ── Identity model ────────────────────────────────────────────────────────────
@@ -309,6 +463,22 @@ pub fn tba_implementation(rpc_url: &str, contract: Address) -> Result<Address, R
             .await
             .map_err(|e| RpcError::Contract(e.to_string()))?;
         Ok(r)
+    })
+}
+
+/// Returns the chain id the RPC endpoint is serving.
+///
+/// Headless activation compares this against the chain id the binary was
+/// packed for, before it signs anything: a wrapper pointed at the wrong
+/// endpoint would otherwise produce a perfectly valid transaction for the
+/// wrong network.
+pub fn chain_id(rpc_url: &str) -> Result<u64, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        provider
+            .get_chain_id()
+            .await
+            .map_err(|e| RpcError::Transport(e.to_string()))
     })
 }
 
@@ -377,7 +547,7 @@ pub fn mint_token_id(
     let hash: B256 = tx_hash
         .trim_start_matches("0x")
         .parse::<B256>()
-        .map_err(|e| RpcError::Transport(format!("invalid tx hash: {e}")))?;
+        .map_err(|e| RpcError::InvalidInput(format!("invalid tx hash: {e}")))?;
 
     block_on(async move {
         let provider = build_provider(rpc_url)?;
@@ -416,9 +586,7 @@ pub fn mint_token_id(
 
 // ── Internals ─────────────────────────────────────────────────────────────────
 
-fn build_provider(
-    rpc_url: &str,
-) -> Result<impl alloy::providers::Provider, RpcError> {
+fn build_provider(rpc_url: &str) -> Result<impl alloy::providers::Provider, RpcError> {
     let url: url::Url = rpc_url
         .parse()
         .map_err(|e: url::ParseError| RpcError::Transport(e.to_string()))?;
@@ -493,9 +661,18 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    /// A hash that cannot parse is a settled answer, not a network hiccup:
+    /// classified as retryable it would make every poller wait out its budget.
     #[test]
-    fn get_tx_receipt_invalid_hash_returns_transport_error() {
+    fn get_tx_receipt_invalid_hash_is_not_retryable() {
         let err = get_tx_receipt(VALID_RPC, "not-a-hash").unwrap_err();
+        assert!(matches!(err, RpcError::InvalidInput(_)), "{err}");
+        assert!(!err.is_retryable(), "{err}");
+    }
+
+    #[test]
+    fn chain_id_invalid_url_returns_transport_error() {
+        let err = chain_id("not-a-url").unwrap_err();
         assert!(matches!(err, RpcError::Transport(_)));
     }
 
@@ -542,15 +719,18 @@ mod tests {
     }
 
     #[test]
-    fn mint_token_id_invalid_hash_returns_transport_error() {
+    fn mint_token_id_invalid_hash_is_not_retryable() {
         let err = mint_token_id(VALID_RPC, "not-a-hash", Address::ZERO, Address::ZERO).unwrap_err();
-        assert!(matches!(err, RpcError::Transport(_)));
+        assert!(matches!(err, RpcError::InvalidInput(_)), "{err}");
+        assert!(!err.is_retryable(), "{err}");
     }
 
     #[test]
     fn encode_purchase_calldata_matches_selector() {
         // keccak256("purchase(address)")[..4] = 0x25b31a97
-        let recipient: Address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".parse().unwrap();
+        let recipient: Address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+            .parse()
+            .unwrap();
         let data = encode_purchase_calldata(recipient);
         assert!(data.starts_with("0x25b31a97"), "got {data}");
         // selector (4) + 32-byte argument = 36 bytes = 72 hex chars, plus "0x" prefix.
@@ -564,8 +744,163 @@ mod tests {
 
     #[test]
     fn encode_purchase_calldata_differs_by_recipient() {
-        let a: Address = "0x0000000000000000000000000000000000000001".parse().unwrap();
-        let b: Address = "0x0000000000000000000000000000000000000002".parse().unwrap();
+        let a: Address = "0x0000000000000000000000000000000000000001"
+            .parse()
+            .unwrap();
+        let b: Address = "0x0000000000000000000000000000000000000002"
+            .parse()
+            .unwrap();
         assert_ne!(encode_purchase_calldata(a), encode_purchase_calldata(b));
+    }
+
+    // ── Receipt polling ───────────────────────────────────────────────────────
+
+    #[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+    mod receipt_polling {
+        use super::*;
+        use std::cell::RefCell;
+        use std::time::Duration;
+
+        fn receipt() -> TxReceipt {
+            TxReceipt {
+                status: true,
+                block_number: 42,
+                block_hash: "0xblock".to_string(),
+                to: None,
+            }
+        }
+
+        /// Runs the real polling loop over a scripted sequence of answers,
+        /// with a zero interval so no test waits on the wall clock.
+        fn poll_over(
+            answers: Vec<Result<Option<TxReceipt>, RpcError>>,
+        ) -> (Result<TxReceipt, ReceiptWaitError>, usize) {
+            let attempts = answers.len() as u32;
+            let queue = RefCell::new(answers.into_iter());
+            let calls = RefCell::new(0usize);
+            let out = poll_for_receipt(
+                || {
+                    *calls.borrow_mut() += 1;
+                    queue.borrow_mut().next().expect("polled past the budget")
+                },
+                attempts,
+                Duration::ZERO,
+            );
+            let calls = *calls.borrow();
+            (out, calls)
+        }
+
+        /// The regression: a purchase receipt poll that hits a 502 must keep
+        /// polling inside its budget. Bailing on the first transport error
+        /// abandons a transaction whose funds are already committed.
+        #[test]
+        fn a_transient_transport_failure_does_not_end_the_wait() {
+            let (out, calls) = poll_over(vec![
+                Err(RpcError::Transport("502 Bad Gateway".into())),
+                Ok(None),
+                Ok(Some(receipt())),
+            ]);
+            assert_eq!(calls, 3, "the loop stopped polling early");
+            assert_eq!(out.expect("receipt").block_number, 42);
+        }
+
+        /// Only a budget that runs out while polling is still failing may be
+        /// reported as a transport failure.
+        #[test]
+        fn a_transport_failure_is_reported_once_the_budget_is_exhausted() {
+            let (out, _) = poll_over(vec![
+                Ok(None),
+                Err(RpcError::Transport("connection reset".into())),
+                Err(RpcError::Transport("connection reset".into())),
+            ]);
+            let err = out.expect_err("the budget ran out");
+            assert_eq!(
+                err.transport_message(),
+                Some("transport error: connection reset"),
+                "{err}",
+            );
+        }
+
+        /// A node that answers again after a wobble leaves an unmined tx, not
+        /// a transport failure: the caller is waiting, not disconnected.
+        #[test]
+        fn a_recovered_poll_ends_as_a_timeout_not_a_transport_failure() {
+            let (out, _) = poll_over(vec![
+                Err(RpcError::Transport("502 Bad Gateway".into())),
+                Ok(None),
+                Ok(None),
+            ]);
+            let err = out.expect_err("the budget ran out");
+            assert!(err.transport_message().is_none(), "{err}");
+            assert!(matches!(err, ReceiptWaitError::Timeout { .. }), "{err}");
+        }
+
+        /// Both outcomes report the budget they consumed, so a caller can say
+        /// how long it waited regardless of which one it got.
+        /// A malformed request is a settled answer: the caller waited out the
+        /// whole budget for a hash that could never parse, which the webview
+        /// door showed as a "waiting for the tx to land" window for 27s before
+        /// admitting the hash was junk.
+        #[test]
+        fn a_request_that_can_never_succeed_is_reported_at_once() {
+            let (out, calls) = poll_over(vec![
+                Err(RpcError::InvalidInput("invalid tx hash".into())),
+                Ok(Some(receipt())),
+                Ok(Some(receipt())),
+            ]);
+            assert_eq!(calls, 1, "a malformed request was retried");
+            let err = out.expect_err("a hash that cannot parse cannot resolve");
+            assert!(err.to_string().contains("invalid tx hash"), "{err}");
+        }
+
+        /// The same property through the public entry point, which is what the
+        /// webview poller thread actually calls. No node is reached: the hash
+        /// fails to parse first.
+        #[test]
+        fn wait_for_receipt_rejects_an_unparseable_hash_without_waiting() {
+            let started = std::time::Instant::now();
+            let err = wait_for_receipt("http://127.0.0.1:1", "not-a-hash")
+                .expect_err("a hash that cannot parse cannot resolve");
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "sat on the retry budget for {:?}",
+                started.elapsed(),
+            );
+            assert!(err.to_string().contains("invalid tx hash"), "{err}");
+        }
+
+        /// `waited_secs` on the exit-21 detail line is how an operator sizes
+        /// up an unresolved purchase, so it has to be the time really spent,
+        /// not `attempts * interval`. Both directions are wrong under the
+        /// nominal figure: the loop sleeps one interval fewer than it has,
+        /// and a slow endpoint can outrun the whole budget in one attempt.
+        #[test]
+        fn both_outcomes_report_wall_clock_time_not_the_nominal_budget() {
+            let slow = || {
+                std::thread::sleep(Duration::from_millis(1_100));
+                Ok(None)
+            };
+            // Nominal budget 1 x 3600s; one attempt that really takes ~1.1s.
+            let timeout =
+                poll_for_receipt(slow, 1, Duration::from_secs(3600)).expect_err("never mined");
+            assert!(
+                (1..60).contains(&timeout.after_secs()),
+                "reported the budget, not the wait: {}",
+                timeout.after_secs(),
+            );
+
+            let slow_and_broken = || {
+                std::thread::sleep(Duration::from_millis(1_100));
+                Err(RpcError::Transport("offline".into()))
+            };
+            // Nominal budget 0s; the endpoint still burned ~1.1s answering.
+            let transport =
+                poll_for_receipt(slow_and_broken, 1, Duration::ZERO).expect_err("never answered");
+            assert!(
+                transport.after_secs() >= 1,
+                "a dead endpoint reported no wait at all: {}",
+                transport.after_secs(),
+            );
+        }
     }
 }

@@ -4,13 +4,13 @@ use std::process::Command;
 
 const APP_ID: &str = "com.rub3.example";
 const TOKEN_ID: u64 = 1;
-const STATIC_PRIVKEY_HEX: &str =
-    "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const STATIC_PRIVKEY_HEX: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 fn license_dir() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("licenses");
-    let key = k256::ecdsa::SigningKey::from_slice(&hex::decode(STATIC_PRIVKEY_HEX).unwrap()).unwrap();
+    let key =
+        k256::ecdsa::SigningKey::from_slice(&hex::decode(STATIC_PRIVKEY_HEX).unwrap()).unwrap();
     let address = helpers::verifying_key_to_address(key.verifying_key());
     let sig = helpers::sign_activation(&key, APP_ID, TOKEN_ID);
     helpers::create_license_json(&dir, APP_ID, TOKEN_ID, &address, &sig);

@@ -38,7 +38,7 @@ impl IdentityModel {
     /// Wire string used in the `Session.identity` field.
     pub fn as_str(&self) -> &'static str {
         match self {
-            IdentityModel::Access  => "access",
+            IdentityModel::Access => "access",
             IdentityModel::Account => "account",
         }
     }
@@ -60,12 +60,11 @@ pub const ERC6551_SALT: B256 = B256::ZERO;
 //   <20 bytes implementation>
 //   5af43d82803e903d91602b57fd5bf3 — runtime suffix
 const INIT_CODE_PREFIX: &[u8] = &[
-    0x3d, 0x60, 0xad, 0x80, 0x60, 0x0a, 0x3d, 0x39, 0x81, 0xf3,
-    0x36, 0x3d, 0x3d, 0x37, 0x3d, 0x3d, 0x3d, 0x36, 0x3d, 0x73,
+    0x3d, 0x60, 0xad, 0x80, 0x60, 0x0a, 0x3d, 0x39, 0x81, 0xf3, 0x36, 0x3d, 0x3d, 0x37, 0x3d, 0x3d,
+    0x3d, 0x36, 0x3d, 0x73,
 ];
 const INIT_CODE_SUFFIX: &[u8] = &[
-    0x5a, 0xf4, 0x3d, 0x82, 0x80, 0x3e, 0x90, 0x3d, 0x91,
-    0x60, 0x2b, 0x57, 0xfd, 0x5b, 0xf3,
+    0x5a, 0xf4, 0x3d, 0x82, 0x80, 0x3e, 0x90, 0x3d, 0x91, 0x60, 0x2b, 0x57, 0xfd, 0x5b, 0xf3,
 ];
 
 // ── TBA derivation ────────────────────────────────────────────────────────────
@@ -84,9 +83,9 @@ const INIT_CODE_SUFFIX: &[u8] = &[
 /// * `token_id` — the NFT token id.
 pub fn derive_tba(
     implementation: Address,
-    chain_id:       u64,
-    contract:       Address,
-    token_id:       u64,
+    chain_id: u64,
+    contract: Address,
+    token_id: u64,
 ) -> Address {
     // keccak256(abi.encode(salt, chainId, tokenContract, tokenId))
     // Each element is a 32-byte ABI word; addresses are left-padded.
@@ -121,7 +120,7 @@ pub fn derive_tba(
 /// lower-cased 0x-prefixed hex so callers can compare them byte-for-byte.
 pub fn resolve_user_id(model: IdentityModel, wallet: Address, tba: Option<Address>) -> String {
     match model {
-        IdentityModel::Access  => format_addr(wallet),
+        IdentityModel::Access => format_addr(wallet),
         IdentityModel::Account => {
             format_addr(tba.expect("resolve_user_id: account model requires tba"))
         }
@@ -139,7 +138,7 @@ pub fn format_addr(addr: Address) -> String {
 mod tests {
     use super::*;
 
-    const IMPL:     Address = address!("1111111111111111111111111111111111111111");
+    const IMPL: Address = address!("1111111111111111111111111111111111111111");
     const CONTRACT: Address = address!("2222222222222222222222222222222222222222");
 
     // ── IdentityModel ────────────────────────────────────────────────────────
@@ -152,13 +151,13 @@ mod tests {
 
     #[test]
     fn from_u8_rejects_out_of_range() {
-        assert_eq!(IdentityModel::from_u8(2),   None);
+        assert_eq!(IdentityModel::from_u8(2), None);
         assert_eq!(IdentityModel::from_u8(255), None);
     }
 
     #[test]
     fn as_str_matches_wire_format() {
-        assert_eq!(IdentityModel::Access.as_str(),  "access");
+        assert_eq!(IdentityModel::Access.as_str(), "access");
         assert_eq!(IdentityModel::Account.as_str(), "account");
     }
 
@@ -182,13 +181,13 @@ mod tests {
     fn derive_tba_differs_by_contract() {
         let other: Address = address!("3333333333333333333333333333333333333333");
         let a = derive_tba(IMPL, 8453, CONTRACT, 42);
-        let b = derive_tba(IMPL, 8453, other,    42);
+        let b = derive_tba(IMPL, 8453, other, 42);
         assert_ne!(a, b);
     }
 
     #[test]
     fn derive_tba_differs_by_chain_id() {
-        let a = derive_tba(IMPL, 1,    CONTRACT, 42);
+        let a = derive_tba(IMPL, 1, CONTRACT, 42);
         let b = derive_tba(IMPL, 8453, CONTRACT, 42);
         assert_ne!(a, b);
     }
@@ -196,7 +195,7 @@ mod tests {
     #[test]
     fn derive_tba_differs_by_implementation() {
         let other: Address = address!("4444444444444444444444444444444444444444");
-        let a = derive_tba(IMPL,  8453, CONTRACT, 42);
+        let a = derive_tba(IMPL, 8453, CONTRACT, 42);
         let b = derive_tba(other, 8453, CONTRACT, 42);
         assert_ne!(a, b);
     }
@@ -213,7 +212,7 @@ mod tests {
     #[test]
     fn resolve_user_id_account_returns_tba() {
         let wallet: Address = address!("00000000000000000000000000000000000000aa");
-        let tba:    Address = address!("00000000000000000000000000000000000000bb");
+        let tba: Address = address!("00000000000000000000000000000000000000bb");
         let id = resolve_user_id(IdentityModel::Account, wallet, Some(tba));
         assert_eq!(id, "0x00000000000000000000000000000000000000bb");
     }

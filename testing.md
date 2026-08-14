@@ -14,6 +14,23 @@ cargo test -p rub3-wrapper
 
 This runs all unit tests, integration tests, and license e2e tests. No external tools required — wallet generation and signing are done natively in Rust via `k256`.
 
+The default bundle is `tier-2` + `webview`, so it compiles neither the tier-3
+capabilities nor the headless front door. Cargo features are additive, so
+`--no-default-features` is mandatory when selecting another bundle:
+
+```bash
+# tier-3 (adds onchain-write + cooldown): 72 lib tests
+cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
+
+# tier-3 + the headless (agent) front door: 117 lib tests
+cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
+```
+
+For reference, `--lib` counts per bundle: `tier-0` 32, `tier-1`/`tier-2` 62,
+`tier-3`/`tier-4` 72, `tier-3,headless` 117. Each total includes the one
+`#[ignore]`d network test, which a plain run skips, so a bundle reports one
+fewer as passed.
+
 Network-dependent tests (requires internet). `--ignored` runs *only* the ignored tests, so this replaces the suite above rather than adding to it:
 
 ```bash
@@ -34,7 +51,13 @@ scripts/test-e2e.sh
 - **`store::tests`** — proof save/load, directory creation, overwrite, missing file handling
 - **`rpc::tests`** — provider construction, contract call error paths, `encode_activate_calldata` selector + layout, `get_tx_receipt` / `get_block_number` error paths, ENS stub
 - **`session::tests`** (requires `session` feature) — message determinism, tier-diffing, expiry edge cases, sign/verify round-trip, wrong-wallet failure; with `cooldown` adds: `verify_onchain` missing-field + bad-URL paths, `should_reverify` distribution sanity
-- **`session_store::tests`** (requires `session` feature) — save/load round-trip, missing-session, `load_latest_session` picking the freshest valid session
+- **`session_store::tests`** (requires `session` feature) - save/load round-trip, missing-session, `load_latest_session` picking the freshest valid session (`load_latest_session_for_wallet` narrows the same scan to one signer, covered from `activation::tests`)
+- **`identity::tests`** - `IdentityModel` parsing and wire format, ERC-6551 TBA derivation determinism and sensitivity to each input, `resolve_user_id` for both models
+- **`signer::tests`** (requires `headless` feature) - hex key parsing (bare/prefixed/padded, and every rejection: wrong length, non-hex, zero and out-of-curve-order scalars), `Debug` redaction and error messages asserted not to echo the input, `personal_sign` / `sign_prehash` recovery, RFC-6979 determinism, keystore decrypt, password-file precedence, and the strict env-key-over-keystore resolution order with no fall-through on a malformed key
+- **`tx::tests`** (requires `headless` feature) - invalid-URL transport error, the node's `insufficient funds` classifier, and the shortfall message with and without known amounts
+- **`activation::tests`** (requires `headless` feature) - the exit-code table asserted value-by-value, all classified codes distinct and disjoint from 0/1/2, `machine_detail` contents, `lowest_token` selection, the token- and wallet-scoped session fast path, and every unconfirmed-purchase outcome mapping to the terminal code 21
+- **`rpc::tests::receipt_polling`** (requires `onchain-write` or `cooldown`) - the receipt poll loop driven over scripted answers: a transient transport failure does not end the wait, one that outlasts the budget is reported as `Transport`, a recovered poll ends as `Timeout`, a request that can never succeed (an unparseable tx hash) is reported at once instead of consuming the budget, and both outcomes report real wall-clock waiting time rather than the nominal budget
+- **`supervisor::tests`** (Unix) - the wrapped binary's own reported environment carries none of the four `RUB3_AGENT_*` variables, covered for the raw-key source, the keystore-plus-password-file source (the documented preferred setup) and all sources at once
 
 ### Integration tests (`tests/integration.rs`)
 
@@ -80,6 +103,25 @@ Run with:
 ```bash
 cargo test -p rub3-wrapper --no-default-features --features tier-3 \
     -- --ignored session_verify_onchain_e2e
+```
+
+### Headless (agent) E2E (`tests/headless_e2e.rs`)
+
+Drives `activation::ensure_headless` end to end with no webview involved: the test binary links neither `wry` nor `tao`. Same gating as the suite above (`#[ignore]`, prints `SKIP:` and passes when Foundry is absent). Runs anvil on port **8549** so it can run alongside `session_onchain_e2e.rs` (8547), and serialises its own tests through a file-level mutex covering the port and the process-global env vars, so no `--test-threads=1` is needed. Every test generates a fresh key and resolves it through the real `RUB3_AGENT_KEY` path with an isolated `RUB3_SESSION_DIR`.
+
+- `headless_purchase_activate_persist_e2e` - funds a fresh key, purchases at 0.01 ETH, activates, asserts ownership / `nextTokenId` / every session field / `verify_local` / `verify_onchain` / on-disk persistence, then relaunches and asserts `Reused` with no new mint
+- `headless_insufficient_funds_e2e` - unfunded key → exit code 11
+- `headless_sold_out_e2e` - supply cap of 1, already minted → exit code 12
+- `headless_cooldown_active_then_ready_e2e` - exit code 13 reporting `blocks_remaining`, then succeeds after `anvil_mine` with `session_id` bumped to 2
+- `headless_explicit_token_not_owned_e2e` - `--token-id` the signer does not hold → exit code 20, minting nothing
+- `headless_explicit_token_id_does_not_reuse_another_tokens_session_e2e` - a cached session for a different token cannot satisfy `--token-id` → exit code 20
+- `headless_chain_id_mismatch_e2e` - endpoint chain id ≠ build chain id → exit code 19, refused before anything is signed
+
+Run with:
+
+```bash
+cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
+    -- --ignored headless
 ```
 
 ### Test helpers (`tests/helpers/mod.rs`)

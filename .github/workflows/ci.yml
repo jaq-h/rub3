@@ -1,11 +1,11 @@
 name: CI
 
-# Runners are macOS because the wrapper links `wry` + `tao` unconditionally
-# (src/webview.rs is not feature-gated). On Linux those need webkit2gtk/GTK
-# system packages installed via apt, and this workflow was verified end to end
-# on macOS only -- no step here is guessed. Once the `headless` feature lands
-# and makes the webview optional, a headless bundle can move to ubuntu-latest,
-# which is faster and cheaper.
+# Runners are macOS because any build with the `webview` feature links `wry` +
+# `tao`, and the default feature set enables it, so the lint job compiles them.
+# On Linux those need webkit2gtk/GTK system packages installed via apt, and this
+# workflow was verified end to end on macOS only -- no step here is guessed.
+# The tier and headless bundles below build with --no-default-features and link
+# neither, so they could move to ubuntu-latest once that is verified.
 
 on:
   pull_request:
@@ -25,13 +25,14 @@ jobs:
   # Rust wrapper, one job per tier bundle.
   #
   # WHY --no-default-features IS NON-NEGOTIABLE:
-  #   Cargo features are additive. The crate sets `default = ["tier-2"]`, so
-  #   `--features tier-0` means tier-2 PLUS tier-0, not tier-0. Verified on this
-  #   repo: `cargo tree --features tier-0` still lists `rand` (the dependency
-  #   that only the `session` feature pulls in), and `cargo test --features
-  #   tier-0` runs 68 tests, exactly the tier-2 count, instead of tier-0's 38.
-  #   Without `--no-default-features` this matrix would test tier-2 five times
-  #   and look like coverage while proving nothing.
+  #   Cargo features are additive. The crate sets
+  #   `default = ["tier-2", "webview"]`, so `--features tier-0` means tier-2 plus
+  #   the webview front door PLUS tier-0, not tier-0. Measured on this branch:
+  #   `cargo tree --features tier-0` still lists `rand` (the dependency that only
+  #   the `session` feature pulls in), and `cargo test -p rub3-wrapper --features
+  #   tier-0 --lib` runs 62 tests, exactly the default count, instead of tier-0's
+  #   32. Without `--no-default-features` this matrix would test the default
+  #   bundle every time and look like coverage while proving nothing.
   # ---------------------------------------------------------------------------
   rust:
     name: rust (${{ matrix.bundle }})
@@ -50,10 +51,12 @@ jobs:
             features: tier-3
           - bundle: tier-4
             features: tier-4
-          # The `headless` feature does not exist on main yet. When it lands,
-          # uncomment these two lines to cover it composed with tier-3:
-          # - bundle: tier-3 + headless
-          #   features: tier-3,headless
+          - bundle: tier-3 + headless
+            features: tier-3,headless
+          # The interactive front door. Tier bundles no longer imply it, so
+          # without this entry nothing blocking compiles src/webview.rs.
+          - bundle: tier-2 + webview
+            features: tier-2,webview
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -64,7 +67,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           # Feature sets produce different artifacts; keep a cache per bundle
-          # so the five jobs do not evict each other.
+          # so the matrix jobs do not evict each other.
           key: ${{ matrix.bundle }}
 
       - name: Build (${{ matrix.bundle }})
@@ -74,39 +77,53 @@ jobs:
         run: cargo test -p rub3-wrapper --no-default-features --features ${{ matrix.features }}
 
   # ---------------------------------------------------------------------------
-  # Formatting and lint. NON-BLOCKING on purpose: both fail on main today, so
-  # gating on them would block every unrelated PR.
+  # Formatting and lint. Clippy is now a REAL GATE; fmt is still advisory.
   #
-  # Measured on fee0124 (current origin/main), which this branch changes only
-  # under .github/, so these are main's numbers:
+  # Measured on this branch at the commit that made clippy clean:
   #
-  #   cargo fmt --all -- --check                 exit 1, 112 diff hunks across
-  #                                              11 files (hand-aligned struct
-  #                                              literals and match arms that
-  #                                              rustfmt wants to collapse)
+  #   cargo clippy -p rub3-wrapper                exit 0, no warnings, under the
+  #     --all-targets -- -D warnings              default bundle and under
+  #                                               tier-0/1/2/3/4,
+  #                                               tier-3,binary-encryption,
+  #                                               tier-2,webview and
+  #                                               tier-3,headless.
+  #                                               The 6 warnings main carried are
+  #                                               fixed at the root: the
+  #                                               conditionally-dead IpcState TTL
+  #                                               field, map_or -> is_some_and,
+  #                                               deref_addrof and the function
+  #                                               item cast in supervisor's
+  #                                               signal trampoline, the shared
+  #                                               tests/helpers module that each
+  #                                               test binary only partly uses,
+  #                                               and the ten-field session
+  #                                               preimage builder (allowed with
+  #                                               a stated reason - one parameter
+  #                                               per hashed field is the point).
   #
-  #   cargo clippy --all-targets -- -D warnings  exit 101, 6 warnings:
-  #                                                too_many_arguments (10/7)
-  #                                                map_or can be simplified
-  #                                                immediately dereferencing a ref
-  #                                                function item cast to integer
-  #                                                unread field session_ttl_secs
-  #                                                unused fn generate_wallet
+  #   cargo fmt --all -- --check                  exit 1, 11 diff hunks in a
+  #                                               single file:
+  #                                               tests/session_onchain_e2e.rs
+  #                                               (hand-aligned argument lists
+  #                                               rustfmt wants to explode one
+  #                                               per line). Every other file in
+  #                                               the workspace is rustfmt-clean.
   #
-  # Cleanup is deliberately deferred to its own task (rub3-fmt-clippy) rather
-  # than done here: this PR is CI configuration only, and a whole-repo reformat
-  # would conflict with every branch currently open against
-  # crates/rub3-wrapper/. When that task lands, delete the `continue-on-error`
-  # below and these become real gates.
+  # That last file is owned by the concurrent section-2.4 branch, which is
+  # rewriting its constructor-argument list - exactly the region rustfmt would
+  # reflow. Formatting it here would hand that branch a pointless conflict, so
+  # the fmt step stays `continue-on-error` until 2.4 lands and its owner runs
+  # rustfmt over it. At that point drop the `continue-on-error` below and fmt
+  # becomes a real gate too.
   #
-  # clippy runs with `-D warnings` on purpose: plain `cargo clippy` exits 0 even
-  # when it emits warnings, so a permissive clippy job would sit green forever
-  # and prove nothing.
+  # The fmt failure is scoped to the STEP, not the job, so clippy regressions now
+  # turn this check red. clippy runs with `-D warnings` on purpose: plain
+  # `cargo clippy` exits 0 even when it emits warnings, so a permissive clippy
+  # job would sit green forever and prove nothing.
   # ---------------------------------------------------------------------------
   lint:
-    name: lint (non-blocking, failing on main today)
+    name: lint (clippy blocking, fmt advisory)
     runs-on: macos-15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -114,10 +131,13 @@ jobs:
         with:
           key: lint
 
-      - name: cargo fmt --check
+      # Advisory: one pre-existing file is deliberately left unformatted, see
+      # above. The log still shows the drift.
+      - name: cargo fmt --check (advisory)
+        continue-on-error: true
         run: cargo fmt --all -- --check
 
-      # always() so a fmt failure does not hide the clippy result.
+      # always() so the advisory fmt step never short-circuits the real gate.
       - name: cargo clippy
         if: always()
         run: cargo clippy -p rub3-wrapper --all-targets -- -D warnings
@@ -143,11 +163,15 @@ jobs:
         run: forge test -vv
 
   # ---------------------------------------------------------------------------
-  # Anvil-gated on-chain E2E (tests/session_onchain_e2e.rs, #[ignore]d).
-  # Spawns a local anvil, deploys Rub3Access with `forge create` from contracts/,
-  # runs purchase + activate, then asserts verify_onchain accepts the good
-  # session and rejects three tampered ones. Needs submodules (forge create
-  # compiles the contracts) and the Foundry toolchain.
+  # Anvil-gated on-chain E2E, both #[ignore]d suites.
+  # session_onchain_e2e.rs spawns a local anvil, deploys Rub3Access with
+  # `forge create` from contracts/, runs purchase + activate, then asserts
+  # verify_onchain accepts the good session and rejects three tampered ones.
+  # headless_e2e.rs drives the agent front door end to end on a fresh key.
+  # Both need submodules (forge create compiles the contracts) and Foundry.
+  #
+  # headless_e2e runs unfiltered and without --test-threads=1: the suite
+  # serialises itself in-file around the anvil port and the env vars it sets.
   #
   # Kept in its own job rather than folded into the tier-3 matrix job so that an
   # on-chain failure is distinguishable at a glance from a unit-test failure.
@@ -179,3 +203,10 @@ jobs:
         run: |
           cargo test -p rub3-wrapper --no-default-features --features tier-3 \
             --test session_onchain_e2e -- --ignored --nocapture
+
+      # always() so a failure in the sibling suite does not hide this one.
+      - name: headless_e2e
+        if: always()
+        run: |
+          cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
+            --test headless_e2e -- --ignored --nocapture

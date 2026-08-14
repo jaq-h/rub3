@@ -51,7 +51,10 @@ impl std::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VerifyError::InvalidSignature(msg) => write!(f, "invalid signature: {msg}"),
-            VerifyError::AddressMismatch { expected, recovered } => write!(
+            VerifyError::AddressMismatch {
+                expected,
+                recovered,
+            } => write!(
                 f,
                 "address mismatch: proof claims {expected}, signature recovers {recovered}"
             ),
@@ -124,8 +127,8 @@ pub(crate) fn recover_address(message: &[u8; 32], sig_hex: &str) -> Result<Strin
         }
     };
 
-    let sig = Signature::from_slice(r_s)
-        .map_err(|e| VerifyError::InvalidSignature(e.to_string()))?;
+    let sig =
+        Signature::from_slice(r_s).map_err(|e| VerifyError::InvalidSignature(e.to_string()))?;
     let rec_id = RecoveryId::try_from(recovery_id)
         .map_err(|e| VerifyError::InvalidSignature(e.to_string()))?;
 
@@ -207,7 +210,10 @@ mod tests {
         };
 
         let json = serde_json::to_string(&proof).unwrap();
-        assert!(!json.contains("paid_by"), "paid_by should be omitted when None");
+        assert!(
+            !json.contains("paid_by"),
+            "paid_by should be omitted when None"
+        );
     }
 
     #[test]

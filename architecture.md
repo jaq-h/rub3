@@ -353,7 +353,7 @@ Session files are keyed on both app_id and token_id: `~/.rub3/sessions/<app_id>/
 
 ## Transaction Confirmation
 
-Tiers 3-4 require at least one on-chain tx (purchase and/or activate) during the activation flow. In **interactive mode** the wrapper never holds keys and never broadcasts txs itself — it encodes calldata, surfaces it to the user, and waits for the tx to confirm. In **headless mode** (planned, implementation.md §2.1) the operator supplies a signer explicitly — env key, keystore, or KMS-backed `Signer` impl — and the wrapper signs and broadcasts directly; there is no confirmation UI because there is no user round-trip. For interactive builds, how the "wait" happens is an orthogonal concern with three implementations, rendered side-by-side as tabs on the purchase and cooldown screens:
+Tiers 3-4 require at least one on-chain tx (purchase and/or activate) during the activation flow. In **interactive mode** the wrapper never holds keys and never broadcasts txs itself - it encodes calldata, surfaces it to the user, and waits for the tx to confirm. In **headless mode** (built, implementation.md §2.1) the operator supplies a signer explicitly - env key, keystore, or KMS-backed `Signer` impl - and the wrapper signs and broadcasts directly; there is no confirmation UI because there is no user round-trip. For interactive builds, how the "wait" happens is an orthogonal concern with three implementations, rendered side-by-side as tabs on the purchase and cooldown screens:
 
 | Mode | Reliance | Tolerant of offline activation | JS bundle |
 |---|---|---|---|
@@ -569,7 +569,9 @@ rub3-wrapper
     └── Tauri mode: launch Tauri app entry point
 ```
 
-**Headless mode (planned — implementation.md §2.1).** Everything in the tree above except the Wallet Connection webview is signer-agnostic. `activation::ensure_headless(signer)` runs the same pipeline — enumerate tokens, purchase if empty, cooldown check, activate, sign session, persist — with an operator-supplied signer (env key, keystore, or KMS-backed trait impl). The `headless` build excludes `wry`/`tao` entirely: smaller binary, no GUI dependencies, container-friendly. This is the primary path for agent-operated software; the webview is the human fallback.
+**Headless mode (built - implementation.md §2.1).** Everything in the tree above except the Wallet Connection webview is signer-agnostic. `activation::ensure_headless(signer, ctx)` runs the same pipeline - enumerate tokens, purchase if empty, cooldown check, activate, sign session, persist - with an operator-supplied signer (env key, keystore, or KMS-backed `Signer` impl). Front doors are Cargo features: `webview` pulls `wry`/`tao`, `headless` pulls neither, so a headless build has no GUI dependency at all - smaller binary, container-friendly. This is the primary path for agent-operated software; the webview is the human fallback.
+
+Key handling is contained rather than spread. Headless necessarily signs and broadcasts, which the interactive flows never do, so the capability lives behind one feature and one object-safe trait whose only primitive is "sign this 32-byte digest" - a KMS or enclave serves it without releasing a key. Exactly one type, `signer::LocalSigner`, ever holds raw key material. The launcher strips all four `RUB3_AGENT_*` variables from the wrapped binary's environment, so the licensed product is not handed the credential or its location; the child still runs as the same UID, so this is containment, not a sandbox.
 
 #### Source layout (current)
 
@@ -584,16 +586,21 @@ crates/rub3-wrapper/
 │   ├── device.rs        — device keypair generation, storage, challenge-response (planned, tier 4)
 │   ├── decrypt.rs       — binary decryption, KEK derivation, in-memory exec (planned, tiers 3-4)
 │   ├── store.rs         — tier 0 proof persistence (~/.rub3/licenses/ or $RUB3_LICENSE_DIR)
-│   ├── activation.rs    — tier-aware activation flow: check session → verify → launch or open webview
-│   ├── rpc.rs           — on-chain queries (ownerOf, price, cooldown, sessionId, registeredDevice)
-│   ├── supervisor.rs    — child process lifecycle, SIGTERM forwarding
-│   └── webview.rs       — native activation window (wry/tao), JS↔Rust IPC
+│   ├── activation.rs    - activation flow: fast paths, `ensure` (webview door), `ensure_headless` (agent door), exit codes
+│   ├── agent_env.rs     - names of the `RUB3_AGENT_*` credential vars, read by `signer` and stripped by `supervisor`
+│   ├── signer.rs        - `Signer` trait + `LocalSigner` (feature `headless`; the only holder of raw key material)
+│   ├── tx.rs            - EIP-1559 build/sign/broadcast for headless (feature `headless`)
+│   ├── rpc.rs           - on-chain queries (ownerOf, price, cooldown, sessionId, chainId, receipt polling)
+│   ├── supervisor.rs    - child process lifecycle, SIGTERM forwarding, strips `RUB3_AGENT_*` from the child
+│   └── webview.rs       - native activation window (wry/tao), JS↔Rust IPC (feature `webview`)
 ├── assets/
 │   └── activation.html  — activation UI (connect, cooldown, tx-pending, sign, processing screens)
 └── tests/
     ├── helpers/mod.rs   — test utilities (wallet gen, signing, license creation)
     ├── integration.rs   — wrapper binary tests (exit codes, args, missing binary)
-    └── license_e2e.rs   — static + dynamic license tests, SIGTERM forwarding
+    ├── license_e2e.rs   - static + dynamic license tests, SIGTERM forwarding
+    ├── session_onchain_e2e.rs - anvil-gated `verify_onchain` against a live chain
+    └── headless_e2e.rs  - anvil-gated agent path: fresh key → purchase → activate → persist → fast path
 ```
 
 #### Dependencies
@@ -606,8 +613,9 @@ crates/rub3-wrapper/
 | `sha2` | SHA-256 for activation/session message hash |
 | `sha3` | Keccak-256 for Ethereum address derivation + personal_sign |
 | `hex` | Hex encoding/decoding |
-| `wry` | Embedded webview for activation UI |
-| `tao` | Native window/event loop |
+| `wry` | Embedded webview for activation UI (feature `webview`; absent from headless builds) |
+| `tao` | Native window/event loop (feature `webview`; absent from headless builds) |
+| `zeroize` | Wiping decoded key bytes and keystore passwords (feature `headless`) |
 | `serde` / `serde_json` | Session/proof serialization |
 | `dirs` | Platform data directory resolution |
 | `chrono` | RFC-3339 timestamps |
@@ -1076,7 +1084,7 @@ Session files stored at `~/.rub3/sessions/<app_id>/<token_id>.json` — one per 
 
 ### Wallet as trust boundary
 
-In interactive mode the wrapper never holds a wallet private key — signing happens in the user's wallet. In headless mode (planned, implementation.md §2.1) the operator explicitly supplies a signer (env key, keystore, or KMS-backed trait impl); key custody is the operator's policy decision, and serious agent deployments front it with spending limits and allowlists rather than granting an unconstrained wallet. Session signatures are free — no on-chain effect. The wrapper does hold a device private key (tier 4), but this is an ephemeral key used only for device binding — it cannot sign transactions or move funds.
+In interactive mode the wrapper never holds a wallet private key - signing happens in the user's wallet. In headless mode (built, implementation.md §2.1) the operator explicitly supplies a signer (env key, keystore, or KMS-backed trait impl); key custody is the operator's policy decision, and serious agent deployments front it with spending limits and allowlists rather than granting an unconstrained wallet. Session signatures are free - no on-chain effect. The wrapper does hold a device private key (tier 4), but this is an ephemeral key used only for device binding - it cannot sign transactions or move funds.
 
 ### Threat model by tier
 
