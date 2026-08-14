@@ -353,7 +353,7 @@ Session files are keyed on both app_id and token_id: `~/.rub3/sessions/<app_id>/
 
 ## Transaction Confirmation
 
-Tiers 3-4 require at least one on-chain tx (purchase and/or activate) during the activation flow. In **interactive mode** the wrapper never holds keys and never broadcasts txs itself — it encodes calldata, surfaces it to the user, and waits for the tx to confirm. In **headless mode** (planned, implementation.md §2.1) the operator supplies a signer explicitly — env key, keystore, or KMS-backed `Signer` impl — and the wrapper signs and broadcasts directly; there is no confirmation UI because there is no user round-trip. For interactive builds, how the "wait" happens is an orthogonal concern with three implementations, rendered side-by-side as tabs on the purchase and cooldown screens:
+Tiers 3-4 require at least one on-chain tx (purchase and/or activate) during the activation flow. In **interactive mode** the wrapper never holds keys and never broadcasts txs itself — it encodes calldata, surfaces it to the user, and waits for the tx to confirm. In **headless mode** (built, implementation.md §2.1) the operator supplies a signer explicitly — env key, keystore, or KMS-backed `Signer` impl — and the wrapper signs and broadcasts directly; there is no confirmation UI because there is no user round-trip. For interactive builds, how the "wait" happens is an orthogonal concern with three implementations, rendered side-by-side as tabs on the purchase and cooldown screens:
 
 | Mode | Reliance | Tolerant of offline activation | JS bundle |
 |---|---|---|---|
@@ -1084,7 +1084,7 @@ Session files stored at `~/.rub3/sessions/<app_id>/<token_id>.json` — one per 
 
 ### Wallet as trust boundary
 
-In interactive mode the wrapper never holds a wallet private key — signing happens in the user's wallet. In headless mode (planned, implementation.md §2.1) the operator explicitly supplies a signer (env key, keystore, or KMS-backed trait impl); key custody is the operator's policy decision, and serious agent deployments front it with spending limits and allowlists rather than granting an unconstrained wallet. Session signatures are free — no on-chain effect. The wrapper does hold a device private key (tier 4), but this is an ephemeral key used only for device binding — it cannot sign transactions or move funds.
+In interactive mode the wrapper never holds a wallet private key — signing happens in the user's wallet. In headless mode (built, implementation.md §2.1) the operator explicitly supplies a signer (env key, keystore, or KMS-backed trait impl); key custody is the operator's policy decision, and serious agent deployments front it with spending limits and allowlists rather than granting an unconstrained wallet. Session signatures are free — no on-chain effect. The wrapper does hold a device private key (tier 4), but this is an ephemeral key used only for device binding — it cannot sign transactions or move funds.
 
 ### Threat model by tier
 

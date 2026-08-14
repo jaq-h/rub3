@@ -603,29 +603,14 @@ Cut from the active roadmap with rationale; scaffolds are retained.
 
 ## Directory Structure
 
-Current (implemented):
+Current (implemented). The per-module map is not repeated here: README.md →
+"Project structure" names every wrapper module, and architecture.md → "Source
+layout (current)" adds the deferred `device.rs` / `decrypt.rs` scaffolds.
 
 ```
 rub3/
 ├── crates/
-│   └── rub3-wrapper/                 # Wrapper runtime
-│       ├── src/
-│       │   ├── main.rs               # CLI entry point, app constants
-│       │   ├── lib.rs                # Public module re-exports (feature-gated)
-│       │   ├── license.rs            # Proof schema, activation message, ECDSA verification
-│       │   ├── identity.rs           # Identity models, ERC-6551 TBA derivation
-│       │   ├── store.rs              # Proof persistence (RUB3_LICENSE_DIR override)
-│       │   ├── activation.rs         # Activation flow orchestration
-│       │   ├── rpc.rs                # On-chain queries (ownerOf, price, cooldown, purchase) via alloy
-│       │   ├── webview.rs            # Native activation window (wry/tao), IPC
-│       │   ├── supervisor.rs         # Child process lifecycle, signal forwarding, `RUB3_AGENT_*` stripped from the child
-│       │   ├── session.rs            # [feature = "session"] session schema, message, verify_local
-│       │   ├── session_store.rs      # [feature = "session"] load/save/load_latest_session
-│       │   ├── device.rs             # [scaffold, deferred] device keypair mgmt
-│       │   └── decrypt.rs            # [scaffold, deferred] AES-256-GCM binary unwrap
-│       ├── assets/
-│       │   └── activation.html       # Activation UI
-│       └── tests/
+│   └── rub3-wrapper/                 # Wrapper runtime (src/, assets/activation.html, tests/)
 ├── contracts/                        # Foundry project (§1.5, §1.6)
 │   ├── src/
 │   │   ├── Rub3License.sol           # Abstract base: ERC-721 + Enumerable + Ownable, activation

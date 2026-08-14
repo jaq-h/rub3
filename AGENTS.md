@@ -11,7 +11,7 @@ Two halves, different toolchains:
 | `crates/rub3-wrapper/` | wrapper runtime, the only workspace member | `cargo`, from the repo root |
 | `contracts/` | Foundry project, ERC-721 license contracts | `forge`, **from `contracts/`** |
 
-`README.md` → "Project structure" is the per-module map. It omits two feature-gated scaffolds, `src/device.rs` (tier 4) and `src/decrypt.rs` (binary encryption), plus `tests/session_onchain_e2e.rs`; `architecture.md` → "Source layout (current)" covers those two but omits `src/identity.rs`. Between them they describe every module.
+`README.md` → "Project structure" is the per-module map. It omits two feature-gated scaffolds, `src/device.rs` (tier 4) and `src/decrypt.rs` (binary encryption); `architecture.md` → "Source layout (current)" covers those two but omits `src/identity.rs`. Between them they describe every module.
 
 ## Build and test
 
