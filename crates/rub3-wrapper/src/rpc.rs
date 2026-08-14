@@ -290,18 +290,38 @@ pub const RECEIPT_POLL_INTERVAL_SECS: u64 = 3;
 
 /// Why [`wait_for_receipt`] gave up.
 ///
-/// The two cases mean very different things to a caller that just spent money:
-/// a transport failure says nothing landed as far as we can tell, while a
-/// timeout says the transaction is still pending and may yet be mined. Callers
-/// that broadcast a payment need to tell them apart, so the distinction is
-/// carried in the type instead of being flattened into a string.
+/// Both cases mean the same thing to a caller that just spent money: the
+/// transaction may still be mined and cannot be assumed dead. They are kept
+/// apart only so the failure can be reported honestly - a timeout says the
+/// node answered and the tx was simply not mined yet, a transport failure says
+/// the node stopped answering at all, and neither is a reason to re-broadcast.
 #[cfg(any(feature = "onchain-write", feature = "cooldown"))]
 #[derive(Debug)]
 pub enum ReceiptWaitError {
     /// The budget ran out with the transaction still unmined.
     Timeout { after_secs: u64 },
-    /// The receipt query itself failed.
-    Transport(String),
+    /// The receipt query kept failing until the budget ran out.
+    Transport { after_secs: u64, message: String },
+}
+
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+impl ReceiptWaitError {
+    /// The wait budget that elapsed before giving up, in seconds.
+    pub fn after_secs(&self) -> u64 {
+        match self {
+            ReceiptWaitError::Timeout { after_secs }
+            | ReceiptWaitError::Transport { after_secs, .. } => *after_secs,
+        }
+    }
+
+    /// The transport failure that ended the wait, or `None` when the node kept
+    /// answering and the transaction simply had not been mined.
+    pub fn transport_message(&self) -> Option<&str> {
+        match self {
+            ReceiptWaitError::Timeout { .. } => None,
+            ReceiptWaitError::Transport { message, .. } => Some(message),
+        }
+    }
 }
 
 #[cfg(any(feature = "onchain-write", feature = "cooldown"))]
@@ -311,7 +331,9 @@ impl std::fmt::Display for ReceiptWaitError {
             ReceiptWaitError::Timeout { after_secs } => {
                 write!(f, "tx not confirmed within {after_secs}s")
             }
-            ReceiptWaitError::Transport(e) => write!(f, "{e}"),
+            ReceiptWaitError::Transport { after_secs, message } => {
+                write!(f, "receipt query still failing after {after_secs}s: {message}")
+            }
         }
     }
 }
@@ -323,21 +345,50 @@ impl std::error::Error for ReceiptWaitError {}
 ///
 /// Shared by both front doors: the webview poller thread and the headless
 /// flow call this rather than each keeping their own loop.
+///
+/// A failed poll never ends the wait early. Once a transaction is broadcast
+/// the only thing that resolves it is a receipt, so a 502, a rate limit or a
+/// dropped connection is retried inside the same budget; a transport failure
+/// is reported only when the budget is exhausted and the last poll was still
+/// failing.
 #[cfg(any(feature = "onchain-write", feature = "cooldown"))]
 pub fn wait_for_receipt(rpc_url: &str, tx_hash: &str) -> Result<TxReceipt, ReceiptWaitError> {
-    for attempt in 0..RECEIPT_POLL_ATTEMPTS {
-        match get_tx_receipt(rpc_url, tx_hash) {
+    poll_for_receipt(
+        || get_tx_receipt(rpc_url, tx_hash),
+        RECEIPT_POLL_ATTEMPTS,
+        std::time::Duration::from_secs(RECEIPT_POLL_INTERVAL_SECS),
+    )
+}
+
+/// The polling loop behind [`wait_for_receipt`], with the query and the clock
+/// passed in so the retry behaviour can be exercised without a node.
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+fn poll_for_receipt<F>(
+    mut poll: F,
+    attempts: u32,
+    interval: std::time::Duration,
+) -> Result<TxReceipt, ReceiptWaitError>
+where
+    F: FnMut() -> Result<Option<TxReceipt>, RpcError>,
+{
+    let mut last_transport_error: Option<String> = None;
+    for attempt in 0..attempts {
+        match poll() {
             Ok(Some(r)) => return Ok(r),
-            Ok(None) => {}
-            Err(e) => return Err(ReceiptWaitError::Transport(e.to_string())),
+            // The node answered, so whatever failed earlier was transient and
+            // the transaction is merely unmined so far.
+            Ok(None) => last_transport_error = None,
+            Err(e) => last_transport_error = Some(e.to_string()),
         }
-        if attempt + 1 < RECEIPT_POLL_ATTEMPTS {
-            std::thread::sleep(std::time::Duration::from_secs(RECEIPT_POLL_INTERVAL_SECS));
+        if attempt + 1 < attempts {
+            std::thread::sleep(interval);
         }
     }
-    Err(ReceiptWaitError::Timeout {
-        after_secs: RECEIPT_POLL_ATTEMPTS as u64 * RECEIPT_POLL_INTERVAL_SECS,
-    })
+    let after_secs = attempts as u64 * interval.as_secs();
+    match last_transport_error {
+        Some(message) => Err(ReceiptWaitError::Transport { after_secs, message }),
+        None => Err(ReceiptWaitError::Timeout { after_secs }),
+    }
 }
 
 // ── Identity model ────────────────────────────────────────────────────────────
@@ -651,5 +702,103 @@ mod tests {
         let a: Address = "0x0000000000000000000000000000000000000001".parse().unwrap();
         let b: Address = "0x0000000000000000000000000000000000000002".parse().unwrap();
         assert_ne!(encode_purchase_calldata(a), encode_purchase_calldata(b));
+    }
+
+    // ── Receipt polling ───────────────────────────────────────────────────────
+
+    #[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+    mod receipt_polling {
+        use super::*;
+        use std::cell::RefCell;
+        use std::time::Duration;
+
+        fn receipt() -> TxReceipt {
+            TxReceipt {
+                status: true,
+                block_number: 42,
+                block_hash: "0xblock".to_string(),
+                to: None,
+            }
+        }
+
+        /// Runs the real polling loop over a scripted sequence of answers,
+        /// with a zero interval so no test waits on the wall clock.
+        fn poll_over(
+            answers: Vec<Result<Option<TxReceipt>, RpcError>>,
+        ) -> (Result<TxReceipt, ReceiptWaitError>, usize) {
+            let attempts = answers.len() as u32;
+            let queue = RefCell::new(answers.into_iter());
+            let calls = RefCell::new(0usize);
+            let out = poll_for_receipt(
+                || {
+                    *calls.borrow_mut() += 1;
+                    queue.borrow_mut().next().expect("polled past the budget")
+                },
+                attempts,
+                Duration::ZERO,
+            );
+            let calls = *calls.borrow();
+            (out, calls)
+        }
+
+        /// The regression: a purchase receipt poll that hits a 502 must keep
+        /// polling inside its budget. Bailing on the first transport error
+        /// abandons a transaction whose funds are already committed.
+        #[test]
+        fn a_transient_transport_failure_does_not_end_the_wait() {
+            let (out, calls) = poll_over(vec![
+                Err(RpcError::Transport("502 Bad Gateway".into())),
+                Ok(None),
+                Ok(Some(receipt())),
+            ]);
+            assert_eq!(calls, 3, "the loop stopped polling early");
+            assert_eq!(out.expect("receipt").block_number, 42);
+        }
+
+        /// Only a budget that runs out while polling is still failing may be
+        /// reported as a transport failure.
+        #[test]
+        fn a_transport_failure_is_reported_once_the_budget_is_exhausted() {
+            let (out, _) = poll_over(vec![
+                Ok(None),
+                Err(RpcError::Transport("connection reset".into())),
+                Err(RpcError::Transport("connection reset".into())),
+            ]);
+            let err = out.expect_err("the budget ran out");
+            assert_eq!(
+                err.transport_message(),
+                Some("transport error: connection reset"),
+                "{err}",
+            );
+        }
+
+        /// A node that answers again after a wobble leaves an unmined tx, not
+        /// a transport failure: the caller is waiting, not disconnected.
+        #[test]
+        fn a_recovered_poll_ends_as_a_timeout_not_a_transport_failure() {
+            let (out, _) = poll_over(vec![
+                Err(RpcError::Transport("502 Bad Gateway".into())),
+                Ok(None),
+                Ok(None),
+            ]);
+            let err = out.expect_err("the budget ran out");
+            assert!(err.transport_message().is_none(), "{err}");
+            assert!(matches!(err, ReceiptWaitError::Timeout { .. }), "{err}");
+        }
+
+        /// Both outcomes report the budget they consumed, so a caller can say
+        /// how long it waited regardless of which one it got.
+        #[test]
+        fn both_outcomes_report_the_elapsed_budget() {
+            // One attempt, so the budget is reported without any sleeping.
+            let budget = Duration::from_secs(30);
+            let timeout = poll_for_receipt(|| Ok(None), 1, budget).expect_err("never mined");
+            assert_eq!(timeout.after_secs(), 30);
+
+            let transport =
+                poll_for_receipt(|| Err(RpcError::Transport("offline".into())), 1, budget)
+                    .expect_err("never answered");
+            assert_eq!(transport.after_secs(), 30);
+        }
     }
 }

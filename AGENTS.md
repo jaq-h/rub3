@@ -68,7 +68,14 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3 \
 
 It spawns `anvil` on port 8547, deploys `Rub3Access` via `forge create`, and performs a real `purchase` + `activate`. It needs `anvil`, `forge`, and `cast` on `PATH`; when any is missing it prints `SKIP: …` and passes, so it never fails for a missing toolchain.
 
-`--ignored` covers two unrelated gates: under the default bundle it instead runs `rpc::tests::owner_of_unminted_token_returns_contract_error`, which needs live Base mainnet RPC.
+`tests/headless_e2e.rs` is the same shape for the agent front door, gated on `headless` instead, on port 8549 so both can run at once, and self-serialising so it needs no `--test-threads=1`:
+
+```bash
+cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
+  -- --ignored headless
+```
+
+`--ignored` covers unrelated gates: under the default bundle it instead runs `rpc::tests::owner_of_unminted_token_returns_contract_error`, which needs live Base mainnet RPC.
 
 ## Where the design authority lives
 

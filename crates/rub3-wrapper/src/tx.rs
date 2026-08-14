@@ -152,9 +152,11 @@ pub struct TxPlan {
 pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String, TxError> {
     let from = signer.address();
 
-    // Everything that needs the network happens in one block_on so the caller
-    // stays synchronous, matching the rest of the wrapper.
-    let prepared = block_on(async {
+    // One runtime and one provider for the whole transaction: signing is
+    // synchronous, so it sits inside the async block rather than splitting the
+    // network work in two. The caller stays synchronous, matching the rest of
+    // the wrapper.
+    block_on(async move {
         let provider = build_provider(rpc_url)?;
 
         let chain_id = provider.get_chain_id().await.map_err(|e| TxError::Rpc(e.to_string()))?;
@@ -202,46 +204,27 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
             })));
         }
 
-        Ok(Prepared {
+        let tx = TxEip1559 {
             chain_id,
             nonce,
             gas_limit,
             max_fee_per_gas: fees.max_fee_per_gas,
             max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
-        })
-    })?;
+            to: TxKind::Call(plan.to),
+            value: plan.value,
+            access_list: Default::default(),
+            input: plan.input.clone().into(),
+        };
 
-    let tx = TxEip1559 {
-        chain_id: prepared.chain_id,
-        nonce: prepared.nonce,
-        gas_limit: prepared.gas_limit,
-        max_fee_per_gas: prepared.max_fee_per_gas,
-        max_priority_fee_per_gas: prepared.max_priority_fee_per_gas,
-        to: TxKind::Call(plan.to),
-        value: plan.value,
-        access_list: Default::default(),
-        input: plan.input.clone().into(),
-    };
+        let signature = signer.sign_prehash(tx.signature_hash())?;
+        let raw = TxEnvelope::Eip1559(tx.into_signed(signature)).encoded_2718();
 
-    let signature = signer.sign_prehash(tx.signature_hash())?;
-    let raw = TxEnvelope::Eip1559(tx.into_signed(signature)).encoded_2718();
-
-    block_on(async move {
-        let provider = build_provider(rpc_url)?;
         let pending = provider
             .send_raw_transaction(&raw)
             .await
             .map_err(|e| classify(e.to_string()))?;
         Ok(format!("0x{}", hex::encode(pending.tx_hash().as_slice())))
     })
-}
-
-struct Prepared {
-    chain_id: u64,
-    nonce: u64,
-    gas_limit: u64,
-    max_fee_per_gas: u128,
-    max_priority_fee_per_gas: u128,
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────

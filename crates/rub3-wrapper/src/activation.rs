@@ -257,7 +257,10 @@ pub const EXIT_INSUFFICIENT_FUNDS: i32 = 11;
 pub const EXIT_SOLD_OUT: i32 = 12;
 /// `activate()` is rate-limited; `blocks_remaining` says for how long.
 pub const EXIT_COOLDOWN_ACTIVE: i32 = 13;
-/// A transaction reverted, or did not confirm inside the poll budget.
+/// An `activate()` transaction reverted, or did not confirm inside the poll
+/// budget. Retryable: nothing was paid, and a re-send either lands or hits the
+/// cooldown gate. A `purchase()` that fails to confirm is
+/// `EXIT_PURCHASE_UNCONFIRMED` instead.
 pub const EXIT_ACTIVATION_FAILED: i32 = 14;
 /// The assembled session failed local signature/expiry verification.
 pub const EXIT_VERIFICATION_FAILED: i32 = 15;
@@ -272,7 +275,8 @@ pub const EXIT_CHAIN_MISMATCH: i32 = 19;
 /// `--token-id N` names a token the signer does not hold.
 pub const EXIT_TOKEN_NOT_OWNED: i32 = 20;
 /// A `purchase()` transaction was broadcast but did not confirm inside the
-/// receipt budget. Deliberately distinct from `EXIT_ACTIVATION_FAILED`: the
+/// receipt budget, whether because no receipt arrived or because polling for
+/// it kept failing. Deliberately distinct from `EXIT_ACTIVATION_FAILED`: the
 /// money may already be spent, so this one must not be retried blindly.
 pub const EXIT_PURCHASE_UNCONFIRMED: i32 = 21;
 
@@ -291,16 +295,19 @@ child is the child's status and not an activation failure.
   11  insufficient funds for purchase + gas
   12  no token held and supply is sold out
   13  cooldown active - stderr carries `blocks_remaining=N`
-  14  activation failed (tx reverted, or not confirmed in time)
+  14  activate() reverted, or did not confirm in time - retryable, the
+      purchase price was not at stake
   15  session verification failed
   16  chain RPC / transport failure
   17  session could not be persisted
   18  headless mode not compiled into this build
   19  chain id mismatch between the RPC endpoint and this build
   20  --token-id names a token this signer does not hold
-  21  purchase broadcast but not confirmed in time - do NOT retry blindly:
-      stderr carries `tx_hash=0x...`; resolve that transaction first, then
-      re-run once it has mined or been dropped
+  21  purchase broadcast but not confirmed - the receipt never arrived in
+      time, or the receipt query itself kept failing. Either way the price
+      may already be spent, so do NOT retry blindly: stderr carries
+      `tx_hash=0x...`; resolve that transaction first, then re-run once it
+      has mined or been dropped
 
 Signer sources, highest precedence first:
   RUB3_AGENT_KEY                        raw hex private key (dev / CI only)
@@ -363,7 +370,10 @@ mod headless {
         SoldOut { supply_cap: u64, minted: u64 },
         /// `activate()` is rate-limited for this token for another N blocks.
         CooldownActive { token_id: u64, blocks_remaining: u64 },
-        /// A transaction reverted, or did not confirm inside the poll budget.
+        /// An `activate()` transaction reverted, or did not confirm inside
+        /// the poll budget. Retryable: nothing was paid, and a re-send either
+        /// lands or hits the cooldown gate. A `purchase()` that fails to
+        /// confirm is `PurchaseUnconfirmed` instead.
         ActivationFailed(String),
         /// The session was assembled but failed local verification. Signals a
         /// signer whose signatures do not recover to the address it claims.
@@ -377,11 +387,13 @@ mod headless {
         ChainIdMismatch { expected: u64, actual: u64 },
         /// `--token-id N` names a token this signer does not hold.
         TokenNotOwned { token_id: u64, wallet: String },
-        /// A `purchase()` transaction was broadcast but no receipt arrived
-        /// inside the poll budget. It may still be mined, so the price may
-        /// already have been paid: retrying before resolving `tx_hash` can buy
-        /// a second license.
-        PurchaseUnconfirmed { tx_hash: String, after_secs: u64 },
+        /// A `purchase()` transaction was broadcast but was not confirmed
+        /// inside the poll budget, either because no receipt arrived or
+        /// because the node stopped answering. It may still be mined, so the
+        /// price may already have been paid: retrying before resolving
+        /// `tx_hash` can buy a second license. `reason` carries the transport
+        /// failure when polling itself was what broke.
+        PurchaseUnconfirmed { tx_hash: String, after_secs: u64, reason: Option<String> },
         /// Headless activation needs a real license contract; this build points
         /// at the zero address, or at something that is not an address at all.
         NoContract,
@@ -430,12 +442,21 @@ mod headless {
                 HeadlessError::TokenNotOwned { token_id, wallet } => {
                     write!(f, "token {token_id} is not owned by {wallet}")
                 }
-                HeadlessError::PurchaseUnconfirmed { tx_hash, after_secs } => write!(
-                    f,
-                    "purchase() tx {tx_hash} was broadcast but did not confirm within \
-                     {after_secs}s: it may still be mined, so check it before re-running \
-                     rather than retrying blindly"
-                ),
+                HeadlessError::PurchaseUnconfirmed { tx_hash, after_secs, reason } => {
+                    write!(
+                        f,
+                        "purchase() tx {tx_hash} was broadcast but did not confirm within \
+                         {after_secs}s"
+                    )?;
+                    if let Some(reason) = reason {
+                        write!(f, " ({reason})")?;
+                    }
+                    write!(
+                        f,
+                        ": it may still be mined, so check it before re-running rather than \
+                         retrying blindly"
+                    )
+                }
                 HeadlessError::NoContract => write!(
                     f,
                     "headless activation requires a usable license contract, but this build has none configured"
@@ -498,7 +519,7 @@ mod headless {
                 HeadlessError::TokenNotOwned { token_id, .. } => {
                     Some(format!("token_id={token_id}"))
                 }
-                HeadlessError::PurchaseUnconfirmed { tx_hash, after_secs } => {
+                HeadlessError::PurchaseUnconfirmed { tx_hash, after_secs, .. } => {
                     Some(format!("tx_hash={tx_hash} waited_secs={after_secs}"))
                 }
                 _ => None,
@@ -713,17 +734,8 @@ mod headless {
         let tx_hash =
             tx::send(&ctx.rpc_url, signer, &TxPlan { to: contract, value: price, input: calldata })?;
 
-        let receipt = rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash).map_err(|e| match e {
-            // The price has left the wallet if this lands later, so this is not
-            // the same failure as a reverted or unbroadcast purchase.
-            rpc::ReceiptWaitError::Timeout { after_secs } => HeadlessError::PurchaseUnconfirmed {
-                tx_hash: tx_hash.clone(),
-                after_secs,
-            },
-            rpc::ReceiptWaitError::Transport(m) => {
-                HeadlessError::ActivationFailed(format!("purchase() tx {tx_hash}: {m}"))
-            }
-        })?;
+        let receipt =
+            rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash).map_err(|e| unconfirmed(&tx_hash, e))?;
         if !receipt.status {
             return Err(HeadlessError::ActivationFailed(format!(
                 "purchase() reverted on-chain (tx {tx_hash})"
@@ -744,6 +756,20 @@ mod headless {
     /// signer holds, not on its transfer history.
     pub(super) fn lowest_token(owned: &[u64]) -> Option<u64> {
         owned.iter().copied().min()
+    }
+
+    /// Every way of failing to confirm a broadcast `purchase()`.
+    ///
+    /// Once the transaction is on the wire the price is committed, so no such
+    /// failure is retryable - not a timeout, and not the node going away while
+    /// we poll. Both map to the terminal code that hands the orchestrator the
+    /// hash to resolve, because a retry buys a second license.
+    pub(super) fn unconfirmed(tx_hash: &str, e: rpc::ReceiptWaitError) -> HeadlessError {
+        HeadlessError::PurchaseUnconfirmed {
+            tx_hash: tx_hash.to_string(),
+            after_secs: e.after_secs(),
+            reason: e.transport_message().map(str::to_string),
+        }
     }
 
     /// `rpc::encode_*_calldata` returns display hex; the transaction envelope
@@ -796,6 +822,7 @@ mod tests {
                 HeadlessError::PurchaseUnconfirmed {
                     tx_hash: "0xfeed".into(),
                     after_secs: 30,
+                    reason: None,
                 },
                 21,
             ),
@@ -1032,6 +1059,7 @@ mod tests {
         let err = HeadlessError::PurchaseUnconfirmed {
             tx_hash: "0xabc123".into(),
             after_secs: 30,
+            reason: None,
         };
         assert_eq!(err.exit_code(), EXIT_PURCHASE_UNCONFIRMED);
         assert_ne!(
@@ -1043,6 +1071,52 @@ mod tests {
         assert!(detail.contains("tx_hash=0xabc123"), "{detail}");
         assert!(detail.contains("waited_secs=30"), "{detail}");
         assert!(err.to_string().contains("0xabc123"), "{err}");
+    }
+
+    /// The purchase receipt wait has two ways to fail and both spend money:
+    /// once the transaction is broadcast, a node that stops answering is no
+    /// more retryable than one that answers "not mined yet". Classifying the
+    /// transport case as the retryable code sends an orchestrator into a
+    /// second purchase of the same license.
+    #[test]
+    fn every_unconfirmed_purchase_outcome_is_terminal_and_names_its_transaction() {
+        let cases = [
+            crate::rpc::ReceiptWaitError::Timeout { after_secs: 30 },
+            crate::rpc::ReceiptWaitError::Transport {
+                after_secs: 30,
+                message: "transport error: 502 Bad Gateway".into(),
+            },
+        ];
+
+        for case in cases {
+            let rendered = case.to_string();
+            let err = headless::unconfirmed("0xdeadbeef", case);
+            assert_eq!(
+                err.exit_code(),
+                EXIT_PURCHASE_UNCONFIRMED,
+                "wrong code for {rendered}",
+            );
+            assert_ne!(err.exit_code(), EXIT_ACTIVATION_FAILED, "{rendered}");
+            let detail = err.machine_detail().expect("must carry a detail line");
+            assert!(detail.contains("tx_hash=0xdeadbeef"), "{detail}");
+            assert!(detail.contains("waited_secs=30"), "{detail}");
+        }
+    }
+
+    /// The transport failure has to survive into the message, or the operator
+    /// resolving the hash cannot tell a congested chain from a dead endpoint.
+    #[test]
+    fn an_unconfirmed_purchase_reports_why_polling_ended() {
+        let err = headless::unconfirmed(
+            "0xdeadbeef",
+            crate::rpc::ReceiptWaitError::Transport {
+                after_secs: 30,
+                message: "transport error: 502 Bad Gateway".into(),
+            },
+        );
+        let rendered = err.to_string();
+        assert!(rendered.contains("502 Bad Gateway"), "{rendered}");
+        assert!(rendered.contains("retrying blindly"), "{rendered}");
     }
 
     /// A session file whose signed `token_id` disagrees with the filename it

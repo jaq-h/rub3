@@ -233,19 +233,24 @@ activation failure.
 | 11 | Insufficient funds for purchase + gas | Top up the wallet |
 | 12 | No token held and supply sold out | Terminal - try another contract |
 | 13 | Cooldown active | Back off `blocks_remaining` blocks, then retry |
-| 14 | Activation failed (reverted, or not confirmed in time) | Retry |
+| 14 | `activate()` failed (reverted, or not confirmed in time) | Retry - nothing was paid |
 | 15 | Session verification failed | Signer/config bug - do not retry blindly |
 | 16 | Chain RPC / transport failure | Retry, or switch endpoint |
 | 17 | Session could not be persisted | Check the session dir is writable |
 | 18 | Headless not compiled into this build | Use a `headless` build |
 | 19 | Chain id mismatch between endpoint and build | Fix `RPC_URL` |
 | 20 | `--token-id` names a token this signer does not hold | Fix the id, or drop the flag to purchase |
-| 21 | Purchase broadcast but not confirmed in time | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
+| 21 | Purchase broadcast but not confirmed - timed out, or the receipt query kept failing | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
 
 Code 21 is deliberately not 14: the price may already have left the wallet, so
 a blind retry can buy a second license. Once the named transaction has mined,
 re-running takes the ordinary `tokensOfOwner` path and activates the token that
 was bought; once it has been dropped, re-running purchases exactly once.
+
+Every way of failing to confirm a broadcast purchase lands on 21, including the
+RPC endpoint going away while the wrapper polls for the receipt: a transaction
+whose fate is unknown is unresolved, not failed. Transient poll failures are
+retried inside the 30s budget first, so a single 502 does not end a run.
 
 Failures with structured parameters also print one parseable line:
 
