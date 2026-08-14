@@ -149,10 +149,14 @@ fn start_anvil() -> AnvilGuard {
 
 /// Deploys `Rub3Access` with the given price, supply cap, and cooldown.
 ///
-/// Constructor args (9): name, symbol, identityModel, tbaImplementation,
-/// wrapperHash, price, supplyCap, cooldownBlocks, owner.
+/// Constructor args (10): name, symbol, identityModel, tbaImplementation,
+/// wrapperHashes, price, supplyCap, cooldownBlocks, predecessor, owner.
+///
+/// `wrapperHashes` is the append-only hash set (contracts §2.4), seeded with a
+/// single stand-in release hash - the zero hash is rejected on-chain because it
+/// is the `Unknown` sentinel. `predecessor` is zero: no migration source.
 fn deploy_access(price_wei: &str, supply_cap: &str, cooldown_blocks: &str) -> String {
-    let zero_hash = "0x0000000000000000000000000000000000000000000000000000000000000000";
+    let wrapper_hashes = "[0x1111111111111111111111111111111111111111111111111111111111111111]";
     let zero_addr = "0x0000000000000000000000000000000000000000";
     let output = Command::new("forge")
         .current_dir(contracts_dir())
@@ -169,10 +173,11 @@ fn deploy_access(price_wei: &str, supply_cap: &str, cooldown_blocks: &str) -> St
             "RUB3H",
             "0",
             zero_addr,
-            zero_hash,
+            wrapper_hashes,
             price_wei,
             supply_cap,
             cooldown_blocks,
+            zero_addr,
             DEPLOYER_ADDR,
         ])
         .output()
