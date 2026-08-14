@@ -20,10 +20,10 @@ pub enum StoreError {
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StoreError::NotFound   => write!(f, "session not found"),
-            StoreError::Io(e)      => write!(f, "io error: {e}"),
-            StoreError::Serde(e)   => write!(f, "json error: {e}"),
-            StoreError::NoDataDir  => write!(f, "no home directory available"),
+            StoreError::NotFound => write!(f, "session not found"),
+            StoreError::Io(e) => write!(f, "io error: {e}"),
+            StoreError::Serde(e) => write!(f, "json error: {e}"),
+            StoreError::NoDataDir => write!(f, "no home directory available"),
         }
     }
 }
@@ -41,7 +41,9 @@ fn sessions_root() -> Result<PathBuf, StoreError> {
 
 /// Resolves the session file path for `app_id` + `token_id`.
 pub fn session_path(app_id: &str, token_id: u64) -> Result<PathBuf, StoreError> {
-    Ok(sessions_root()?.join(app_id).join(format!("{token_id}.json")))
+    Ok(sessions_root()?
+        .join(app_id)
+        .join(format!("{token_id}.json")))
 }
 
 // ── Load / save ───────────────────────────────────────────────────────────────
@@ -137,37 +139,53 @@ mod tests {
         use k256::ecdsa::SigningKey;
         use rand::rngs::OsRng;
 
-        let signing_key   = SigningKey::random(&mut OsRng);
-        let wallet        = crate::license::public_key_to_address(signing_key.verifying_key());
-        let nonce         = new_nonce();
-        let identity      = "access";
-        let user_id       = wallet.clone();
-        let msg           = session_message(app_id, token_id, identity, &user_id, &wallet, &nonce, Some(expires_at), None, None, None);
-        let prefixed      = crate::license::personal_sign_hash(&msg);
+        let signing_key = SigningKey::random(&mut OsRng);
+        let wallet = crate::license::public_key_to_address(signing_key.verifying_key());
+        let nonce = new_nonce();
+        let identity = "access";
+        let user_id = wallet.clone();
+        let msg = session_message(
+            app_id,
+            token_id,
+            identity,
+            &user_id,
+            &wallet,
+            &nonce,
+            Some(expires_at),
+            None,
+            None,
+            None,
+        );
+        let prefixed = crate::license::personal_sign_hash(&msg);
 
         use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature};
         let (sig, rec_id): (Signature, RecoveryId) = signing_key.sign_prehash(&prefixed).unwrap();
         let v = rec_id.to_byte() + 27;
-        let sig_bytes: Vec<u8> = sig.to_bytes().iter().copied().chain(std::iter::once(v)).collect();
+        let sig_bytes: Vec<u8> = sig
+            .to_bytes()
+            .iter()
+            .copied()
+            .chain(std::iter::once(v))
+            .collect();
 
         Session {
-            app_id:                app_id.into(),
+            app_id: app_id.into(),
             token_id,
-            identity:              identity.into(),
+            identity: identity.into(),
             user_id,
-            tba:                   None,
+            tba: None,
             wallet,
             nonce,
-            issued_at:             chrono::Utc::now().to_rfc3339(),
-            expires_at:            Some(expires_at.into()),
-            signature:             format!("0x{}", hex::encode(&sig_bytes)),
-            chain:                 "base".into(),
-            contract:              "0x0000000000000000000000000000000000000002".into(),
-            activation_tx:         None,
-            activation_block:      None,
+            issued_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: Some(expires_at.into()),
+            signature: format!("0x{}", hex::encode(&sig_bytes)),
+            chain: "base".into(),
+            contract: "0x0000000000000000000000000000000000000002".into(),
+            activation_tx: None,
+            activation_block: None,
             activation_block_hash: None,
-            session_id:            None,
-            device_pubkey:         None,
+            session_id: None,
+            device_pubkey: None,
         }
     }
 
@@ -182,8 +200,8 @@ mod tests {
 
         let loaded = load_session("com.rub3.test", 1).unwrap();
         assert_eq!(loaded.token_id, session.token_id);
-        assert_eq!(loaded.wallet,   session.wallet);
-        assert_eq!(loaded.nonce,    session.nonce);
+        assert_eq!(loaded.wallet, session.wallet);
+        assert_eq!(loaded.nonce, session.nonce);
 
         std::env::remove_var("RUB3_SESSION_DIR");
     }
@@ -207,7 +225,7 @@ mod tests {
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 
         // Two tokens, one expired.
-        let valid   = signed_session("com.rub3.test", 1, "2099-01-01T00:00:00Z");
+        let valid = signed_session("com.rub3.test", 1, "2099-01-01T00:00:00Z");
         let expired = signed_session("com.rub3.test", 2, "2000-01-01T00:00:00Z");
         save_session(&valid).unwrap();
         save_session(&expired).unwrap();

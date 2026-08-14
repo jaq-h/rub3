@@ -80,14 +80,20 @@ jobs:
   # Formatting and lint. NON-BLOCKING on purpose: both fail on main today, so
   # gating on them would block every unrelated PR.
   #
-  # Measured on this branch. The fmt drift predates it (main was at 112 hunks
-  # across 11 files on fee0124) and the headless files add to it; clippy is
-  # unchanged - no warning comes from new or changed code:
+  # Measured on this branch. Every file this branch touched is now rustfmt-clean;
+  # the drift that remains predates it (main was at 112 hunks across 11 files on
+  # fee0124) and its cleanup is deferred, see below. Clippy is unchanged - no
+  # warning comes from new or changed code:
   #
-  #   cargo fmt --all -- --check                 exit 1, 171 diff hunks across
-  #                                              15 files (hand-aligned struct
-  #                                              literals and match arms that
-  #                                              rustfmt wants to collapse)
+  #   cargo fmt --all -- --check                 exit 1, 29 diff hunks across 5
+  #                                              files, none of them touched by
+  #                                              this branch: identity.rs,
+  #                                              license.rs, tests/integration.rs,
+  #                                              tests/license_e2e.rs,
+  #                                              tests/session_onchain_e2e.rs
+  #                                              (hand-aligned struct literals
+  #                                              and match arms that rustfmt
+  #                                              wants to collapse)
   #
   #   cargo clippy --all-targets -- -D warnings  exit 101, 6 warnings, the same
   #                                              6 main already had:

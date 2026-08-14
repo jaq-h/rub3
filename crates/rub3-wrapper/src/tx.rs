@@ -159,7 +159,10 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
     block_on(async move {
         let provider = build_provider(rpc_url)?;
 
-        let chain_id = provider.get_chain_id().await.map_err(|e| TxError::Rpc(e.to_string()))?;
+        let chain_id = provider
+            .get_chain_id()
+            .await
+            .map_err(|e| TxError::Rpc(e.to_string()))?;
         let nonce = provider
             .get_transaction_count(from)
             .await
@@ -172,8 +175,10 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
         // Pre-flight: a wallet that cannot even cover `value` will make
         // `eth_estimateGas` fail with an opaque error. Checking first lets us
         // report the actual shortfall.
-        let balance =
-            provider.get_balance(from).await.map_err(|e| TxError::Rpc(e.to_string()))?;
+        let balance = provider
+            .get_balance(from)
+            .await
+            .map_err(|e| TxError::Rpc(e.to_string()))?;
         if balance < plan.value {
             return Err(TxError::InsufficientFunds(Some(Shortfall {
                 required: plan.value,
@@ -194,8 +199,8 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
             .map_err(|e| classify(e.to_string()))?;
         let gas_limit = estimate.saturating_mul(GAS_LIMIT_BUFFER_PCT) / 100;
 
-        let max_cost = plan.value
-            + U256::from(gas_limit).saturating_mul(U256::from(fees.max_fee_per_gas));
+        let max_cost =
+            plan.value + U256::from(gas_limit).saturating_mul(U256::from(fees.max_fee_per_gas));
         if balance < max_cost {
             return Err(TxError::InsufficientFunds(Some(Shortfall {
                 required: max_cost,
@@ -230,8 +235,9 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
 // ── Internals ─────────────────────────────────────────────────────────────────
 
 fn build_provider(rpc_url: &str) -> Result<impl Provider, TxError> {
-    let url: url::Url =
-        rpc_url.parse().map_err(|e: url::ParseError| TxError::Rpc(e.to_string()))?;
+    let url: url::Url = rpc_url
+        .parse()
+        .map_err(|e: url::ParseError| TxError::Rpc(e.to_string()))?;
     Ok(alloy::providers::ProviderBuilder::new().connect_http(url))
 }
 
@@ -253,7 +259,11 @@ mod tests {
     const ANVIL_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
     fn plan() -> TxPlan {
-        TxPlan { to: Address::ZERO, value: U256::ZERO, input: vec![] }
+        TxPlan {
+            to: Address::ZERO,
+            value: U256::ZERO,
+            input: vec![],
+        }
     }
 
     #[test]
@@ -268,13 +278,19 @@ mod tests {
     #[test]
     fn classify_maps_node_insufficient_funds_without_amounts() {
         let err = classify("err: insufficient funds for gas * price + value".into());
-        assert!(matches!(err, TxError::InsufficientFunds(None)), "got {err:?}");
+        assert!(
+            matches!(err, TxError::InsufficientFunds(None)),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn classify_is_case_insensitive() {
         let err = classify("Insufficient Funds".into());
-        assert!(matches!(err, TxError::InsufficientFunds(None)), "got {err:?}");
+        assert!(
+            matches!(err, TxError::InsufficientFunds(None)),
+            "got {err:?}"
+        );
     }
 
     #[test]

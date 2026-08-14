@@ -286,12 +286,19 @@ impl LocalSigner {
         }
         let decrypted = PrivateKeySigner::decrypt_keystore(path, password)
             .map_err(|_| SignerError::KeystoreDecryptFailed)?;
-        Ok(Self::from_signing_key(decrypted.into_credential(), "keystore"))
+        Ok(Self::from_signing_key(
+            decrypted.into_credential(),
+            "keystore",
+        ))
     }
 
     fn from_signing_key(key: SigningKey, source: &'static str) -> Self {
         let address = address_of(&key);
-        Self { key, address, source }
+        Self {
+            key,
+            address,
+            source,
+        }
     }
 }
 
@@ -348,7 +355,9 @@ pub fn resolve_signer() -> Result<Box<dyn Signer>, SignerError> {
         Err(e) => return Err(e),
     }
 
-    let explicit = std::env::var(ENV_AGENT_KEYSTORE).ok().filter(|p| !p.trim().is_empty());
+    let explicit = std::env::var(ENV_AGENT_KEYSTORE)
+        .ok()
+        .filter(|p| !p.trim().is_empty());
     let path = match explicit {
         Some(p) => PathBuf::from(p),
         None => match default_keystore_path() {
@@ -444,9 +453,14 @@ mod tests {
     #[test]
     fn from_hex_accepts_prefixed_and_bare() {
         let expected: Address = ANVIL_ADDR.parse().unwrap();
-        assert_eq!(LocalSigner::from_hex(ANVIL_KEY).unwrap().address(), expected);
         assert_eq!(
-            LocalSigner::from_hex(ANVIL_KEY.trim_start_matches("0x")).unwrap().address(),
+            LocalSigner::from_hex(ANVIL_KEY).unwrap().address(),
+            expected
+        );
+        assert_eq!(
+            LocalSigner::from_hex(ANVIL_KEY.trim_start_matches("0x"))
+                .unwrap()
+                .address(),
             expected
         );
     }
@@ -462,7 +476,10 @@ mod tests {
 
     #[test]
     fn from_hex_rejects_wrong_length() {
-        assert_eq!(LocalSigner::from_hex("0xdeadbeef").unwrap_err(), SignerError::MalformedKey);
+        assert_eq!(
+            LocalSigner::from_hex("0xdeadbeef").unwrap_err(),
+            SignerError::MalformedKey
+        );
         assert_eq!(
             LocalSigner::from_hex(&format!("{ANVIL_KEY}ff")).unwrap_err(),
             SignerError::MalformedKey
@@ -472,15 +489,24 @@ mod tests {
     #[test]
     fn from_hex_rejects_non_hex() {
         let bad = "z".repeat(64);
-        assert_eq!(LocalSigner::from_hex(&bad).unwrap_err(), SignerError::MalformedKey);
+        assert_eq!(
+            LocalSigner::from_hex(&bad).unwrap_err(),
+            SignerError::MalformedKey
+        );
     }
 
     #[test]
     fn from_hex_rejects_out_of_range_scalar() {
         // All-zero is not a valid secp256k1 scalar.
-        assert_eq!(LocalSigner::from_hex(&"0".repeat(64)).unwrap_err(), SignerError::InvalidKey);
+        assert_eq!(
+            LocalSigner::from_hex(&"0".repeat(64)).unwrap_err(),
+            SignerError::InvalidKey
+        );
         // Above the curve order.
-        assert_eq!(LocalSigner::from_hex(&"f".repeat(64)).unwrap_err(), SignerError::InvalidKey);
+        assert_eq!(
+            LocalSigner::from_hex(&"f".repeat(64)).unwrap_err(),
+            SignerError::InvalidKey
+        );
     }
 
     /// The whole point of the redacted `Debug`: `{:?}` must never widen into a
@@ -489,9 +515,15 @@ mod tests {
     fn debug_never_prints_key_material() {
         let signer = LocalSigner::from_hex(ANVIL_KEY).unwrap();
         let rendered = format!("{signer:?}");
-        assert!(!rendered.contains("ac0974"), "debug leaked key bytes: {rendered}");
+        assert!(
+            !rendered.contains("ac0974"),
+            "debug leaked key bytes: {rendered}"
+        );
         assert!(rendered.contains("<redacted>"));
-        assert!(rendered.to_lowercase().contains("f39fd6"), "debug should name the address");
+        assert!(
+            rendered.to_lowercase().contains("f39fd6"),
+            "debug should name the address"
+        );
     }
 
     /// Error messages are the other surface that could echo a key. None of the
@@ -524,7 +556,10 @@ mod tests {
         let signer = LocalSigner::from_hex(ANVIL_KEY).unwrap();
         let digest = B256::from([3u8; 32]);
         let sig = signer.sign_prehash(digest).unwrap();
-        assert_eq!(sig.recover_address_from_prehash(&digest).unwrap(), signer.address());
+        assert_eq!(
+            sig.recover_address_from_prehash(&digest).unwrap(),
+            signer.address()
+        );
     }
 
     #[test]
@@ -533,7 +568,10 @@ mod tests {
         // backend swap silently introducing randomness into the tx path.
         let signer = LocalSigner::from_hex(ANVIL_KEY).unwrap();
         let d = B256::from([9u8; 32]);
-        assert_eq!(signer.sign_prehash(d).unwrap(), signer.sign_prehash(d).unwrap());
+        assert_eq!(
+            signer.sign_prehash(d).unwrap(),
+            signer.sign_prehash(d).unwrap()
+        );
     }
 
     // ── Source selection ─────────────────────────────────────────────────────
@@ -567,7 +605,11 @@ mod tests {
         assert_ne!(signer.address(), keystore_addr);
         assert_eq!(signer.source(), "env");
 
-        for k in [ENV_AGENT_KEY, ENV_AGENT_KEYSTORE, ENV_AGENT_KEYSTORE_PASSWORD] {
+        for k in [
+            ENV_AGENT_KEY,
+            ENV_AGENT_KEYSTORE,
+            ENV_AGENT_KEYSTORE_PASSWORD,
+        ] {
             std::env::remove_var(k);
         }
     }
@@ -587,7 +629,11 @@ mod tests {
 
         assert_eq!(resolve_err(), SignerError::MalformedKey);
 
-        for k in [ENV_AGENT_KEY, ENV_AGENT_KEYSTORE, ENV_AGENT_KEYSTORE_PASSWORD] {
+        for k in [
+            ENV_AGENT_KEY,
+            ENV_AGENT_KEYSTORE,
+            ENV_AGENT_KEYSTORE_PASSWORD,
+        ] {
             std::env::remove_var(k);
         }
     }
@@ -645,7 +691,10 @@ mod tests {
         let err = LocalSigner::from_keystore(&path, "not-the-password").unwrap_err();
         assert_eq!(err, SignerError::KeystoreDecryptFailed);
         let rendered = err.to_string();
-        assert!(!rendered.contains("not-the-password"), "error echoed password: {rendered}");
+        assert!(
+            !rendered.contains("not-the-password"),
+            "error echoed password: {rendered}"
+        );
     }
 
     #[test]
@@ -678,7 +727,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var(ENV_AGENT_KEYSTORE, dir.path().join("absent.json"));
         std::env::set_var(ENV_AGENT_KEYSTORE_PASSWORD, "x");
-        assert_eq!(resolve_err(), SignerError::KeystoreNotFound(dir.path().join("absent.json")));
+        assert_eq!(
+            resolve_err(),
+            SignerError::KeystoreNotFound(dir.path().join("absent.json"))
+        );
         for k in [ENV_AGENT_KEYSTORE, ENV_AGENT_KEYSTORE_PASSWORD] {
             std::env::remove_var(k);
         }

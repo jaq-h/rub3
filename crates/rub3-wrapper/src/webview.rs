@@ -30,10 +30,14 @@ pub struct ActivationContext {
 
 pub enum ActivationResult {
     /// Legacy `LicenseProof` (zero-contract / tier 0-2 fallback).
-    LegacySuccess { proof: LicenseProof },
+    LegacySuccess {
+        proof: LicenseProof,
+    },
     /// Tier-3 session issued after a confirmed `activate()` tx.
     #[cfg(feature = "cooldown")]
-    SessionSuccess { session: Session },
+    SessionSuccess {
+        session: Session,
+    },
     Cancelled,
     Error(String),
 }
@@ -46,9 +50,14 @@ enum IpcMessage {
     /// Page finished loading; Rust should respond with onAppInfo().
     Ready,
     /// User submitted a wallet address; check ownership on-chain.
-    Connect { address: String },
+    Connect {
+        address: String,
+    },
     /// User selected a token from the multi-token selection screen.
-    TokenSelected { token_id: u64, owner_address: String },
+    TokenSelected {
+        token_id: u64,
+        owner_address: String,
+    },
     /// Legacy path: user signed the activation_message locally and pasted the
     /// signature. Used when no contract is configured (zero address).
     Signed {
@@ -78,21 +87,23 @@ enum IpcMessage {
     /// Session without holding in-process state between IPC calls.
     #[cfg(feature = "cooldown")]
     SessionSigned {
-        signature:             String,
-        token_id:              u64,
-        owner_address:         String,
-        identity:              String,
-        user_id:               String,
-        tba:                   Option<String>,
-        nonce:                 String,
-        expires_at:            String,
-        session_id:            u64,
-        activation_tx:         String,
-        activation_block:      u64,
+        signature: String,
+        token_id: u64,
+        owner_address: String,
+        identity: String,
+        user_id: String,
+        tba: Option<String>,
+        nonce: String,
+        expires_at: String,
+        session_id: u64,
+        activation_tx: String,
+        activation_block: u64,
         activation_block_hash: String,
     },
     Cancel,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 // ── Internal channel ──────────────────────────────────────────────────────────
@@ -163,7 +174,11 @@ pub fn run_activation_window(ctx: ActivationContext) -> ActivationResult {
         }
 
         // User clicked the OS window close button.
-        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
+        if let Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } = event
+        {
             let _ = result_tx.send(ActivationResult::Cancelled);
             *control_flow = ControlFlow::Exit;
         }
@@ -178,14 +193,14 @@ pub fn run_activation_window(ctx: ActivationContext) -> ActivationResult {
 /// threads spawned from the handler (tx polling) need their own copy.
 #[derive(Clone)]
 struct IpcState {
-    app_id:           String,
-    contract:         String,
-    chain_id:         u64,
-    rpc_url:          String,
-    developer_ens:    Option<String>,
+    app_id: String,
+    contract: String,
+    chain_id: u64,
+    rpc_url: String,
+    developer_ens: Option<String>,
     session_ttl_secs: i64,
-    cmd_tx:           mpsc::Sender<Cmd>,
-    result_tx:        mpsc::Sender<ActivationResult>,
+    cmd_tx: mpsc::Sender<Cmd>,
+    result_tx: mpsc::Sender<ActivationResult>,
 }
 
 impl IpcState {
@@ -210,8 +225,10 @@ impl IpcState {
             }
 
             IpcMessage::Connect { address } => {
-                let contract_addr: alloy::primitives::Address =
-                    self.contract.parse().unwrap_or(alloy::primitives::Address::ZERO);
+                let contract_addr: alloy::primitives::Address = self
+                    .contract
+                    .parse()
+                    .unwrap_or(alloy::primitives::Address::ZERO);
 
                 if contract_addr.is_zero() {
                     // No contract configured — skip on-chain check, use token 1 (legacy).
@@ -260,11 +277,19 @@ impl IpcState {
                 }
             }
 
-            IpcMessage::TokenSelected { token_id, owner_address } => {
+            IpcMessage::TokenSelected {
+                token_id,
+                owner_address,
+            } => {
                 self.proceed_after_token_selected(&owner_address, token_id);
             }
 
-            IpcMessage::Signed { token_id, owner_address, signature, paid_by } => {
+            IpcMessage::Signed {
+                token_id,
+                owner_address,
+                signature,
+                paid_by,
+            } => {
                 let proof = LicenseProof {
                     app_id: self.app_id.clone(),
                     token_id,
@@ -275,17 +300,26 @@ impl IpcState {
                     chain: "base".to_string(),
                     contract: self.contract.clone(),
                 };
-                let _ = self.result_tx.send(ActivationResult::LegacySuccess { proof });
+                let _ = self
+                    .result_tx
+                    .send(ActivationResult::LegacySuccess { proof });
                 let _ = self.cmd_tx.send(Cmd::Close);
             }
 
             #[cfg(feature = "cooldown")]
-            IpcMessage::ActivateTxSent { tx_hash, token_id, owner_address } => {
+            IpcMessage::ActivateTxSent {
+                tx_hash,
+                token_id,
+                owner_address,
+            } => {
                 self.spawn_tx_poller(tx_hash, token_id, owner_address);
             }
 
             #[cfg(feature = "onchain-write")]
-            IpcMessage::PurchaseTxSent { tx_hash, owner_address } => {
+            IpcMessage::PurchaseTxSent {
+                tx_hash,
+                owner_address,
+            } => {
                 self.spawn_purchase_poller(tx_hash, owner_address);
             }
 
@@ -407,11 +441,17 @@ impl IpcState {
     ) {
         let cap = match crate::rpc::supply_cap(&self.rpc_url, contract_addr) {
             Ok(c) => c,
-            Err(e) => { self.eval_err(&format!("supply cap read failed: {e}")); return; }
+            Err(e) => {
+                self.eval_err(&format!("supply cap read failed: {e}"));
+                return;
+            }
         };
         let next_id = match crate::rpc::next_token_id(&self.rpc_url, contract_addr) {
             Ok(n) => n,
-            Err(e) => { self.eval_err(&format!("nextTokenId read failed: {e}")); return; }
+            Err(e) => {
+                self.eval_err(&format!("nextTokenId read failed: {e}"));
+                return;
+            }
         };
         if cap != 0 && next_id >= cap {
             self.eval_err("Sold out — no more tokens available for purchase");
@@ -420,7 +460,10 @@ impl IpcState {
 
         let price = match crate::rpc::token_price(&self.rpc_url, contract_addr) {
             Ok(p) => p,
-            Err(e) => { self.eval_err(&format!("price read failed: {e}")); return; }
+            Err(e) => {
+                self.eval_err(&format!("price read failed: {e}"));
+                return;
+            }
         };
         let calldata = crate::rpc::encode_purchase_calldata(recipient);
 
@@ -472,7 +515,8 @@ impl IpcState {
             if let Some(to) = receipt.to.as_deref() {
                 if !to.eq_ignore_ascii_case(&state.contract) {
                     state.eval_err(&format!(
-                        "purchase() tx was sent to {to}, expected {}", state.contract
+                        "purchase() tx was sent to {to}, expected {}",
+                        state.contract
                     ));
                     return;
                 }
@@ -480,22 +524,28 @@ impl IpcState {
 
             let contract_addr: alloy::primitives::Address = match state.contract.parse() {
                 Ok(a) => a,
-                Err(_) => { state.eval_err("contract address is malformed"); return; }
-            };
-            let recipient: alloy::primitives::Address = match owner_address.parse() {
-                Ok(a) => a,
-                Err(_) => { state.eval_err("owner address is malformed"); return; }
-            };
-
-            let token_id = match crate::rpc::mint_token_id(
-                &state.rpc_url, &tx_hash, contract_addr, recipient,
-            ) {
-                Ok(id) => id,
-                Err(e) => {
-                    state.eval_err(&format!("failed to extract minted tokenId: {e}"));
+                Err(_) => {
+                    state.eval_err("contract address is malformed");
                     return;
                 }
             };
+            let recipient: alloy::primitives::Address = match owner_address.parse() {
+                Ok(a) => a,
+                Err(_) => {
+                    state.eval_err("owner address is malformed");
+                    return;
+                }
+            };
+
+            let token_id =
+                match crate::rpc::mint_token_id(&state.rpc_url, &tx_hash, contract_addr, recipient)
+                {
+                    Ok(id) => id,
+                    Err(e) => {
+                        state.eval_err(&format!("failed to extract minted tokenId: {e}"));
+                        return;
+                    }
+                };
 
             // Re-enter the normal flow exactly as if tokens_of_owner had
             // returned this single token.
@@ -536,7 +586,8 @@ impl IpcState {
             if let Some(to) = receipt.to.as_deref() {
                 if !to.eq_ignore_ascii_case(&state.contract) {
                     state.eval_err(&format!(
-                        "activate() tx was sent to {to}, expected {}", state.contract
+                        "activate() tx was sent to {to}, expected {}",
+                        state.contract
                     ));
                     return;
                 }
@@ -602,23 +653,23 @@ impl IpcState {
     #[cfg(feature = "cooldown")]
     fn finalize_session(&self, a: FinalizeArgs) {
         let session = Session {
-            app_id:                self.app_id.clone(),
-            token_id:              a.token_id,
-            identity:              a.identity,
-            user_id:               a.user_id,
-            tba:                   a.tba,
-            wallet:                a.owner_address,
-            nonce:                 a.nonce,
-            issued_at:             chrono::Utc::now().to_rfc3339(),
-            expires_at:            Some(a.expires_at),
-            signature:             a.signature,
-            chain:                 "base".to_string(),
-            contract:              self.contract.clone(),
-            activation_tx:         Some(a.activation_tx),
-            activation_block:      Some(a.activation_block),
+            app_id: self.app_id.clone(),
+            token_id: a.token_id,
+            identity: a.identity,
+            user_id: a.user_id,
+            tba: a.tba,
+            wallet: a.owner_address,
+            nonce: a.nonce,
+            issued_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: Some(a.expires_at),
+            signature: a.signature,
+            chain: "base".to_string(),
+            contract: self.contract.clone(),
+            activation_tx: Some(a.activation_tx),
+            activation_block: Some(a.activation_block),
             activation_block_hash: Some(a.activation_block_hash),
-            session_id:            Some(a.session_id),
-            device_pubkey:         None,
+            session_id: Some(a.session_id),
+            device_pubkey: None,
         };
 
         if let Err(e) = crate::session::verify_local(&session) {
@@ -626,7 +677,9 @@ impl IpcState {
             return;
         }
 
-        let _ = self.result_tx.send(ActivationResult::SessionSuccess { session });
+        let _ = self
+            .result_tx
+            .send(ActivationResult::SessionSuccess { session });
         let _ = self.cmd_tx.send(Cmd::Close);
     }
 
@@ -637,10 +690,7 @@ impl IpcState {
     }
 
     fn eval_err(&self, msg: &str) {
-        self.eval(format!(
-            "window.rub3.onError({})",
-            serde_json::json!(msg)
-        ));
+        self.eval(format!("window.rub3.onError({})", serde_json::json!(msg)));
     }
 }
 
@@ -648,17 +698,16 @@ impl IpcState {
 
 #[cfg(feature = "cooldown")]
 struct FinalizeArgs {
-    signature:             String,
-    token_id:              u64,
-    owner_address:         String,
-    identity:              String,
-    user_id:               String,
-    tba:                   Option<String>,
-    nonce:                 String,
-    expires_at:            String,
-    session_id:            u64,
-    activation_tx:         String,
-    activation_block:      u64,
+    signature: String,
+    token_id: u64,
+    owner_address: String,
+    identity: String,
+    user_id: String,
+    tba: Option<String>,
+    nonce: String,
+    expires_at: String,
+    session_id: u64,
+    activation_tx: String,
+    activation_block: u64,
     activation_block_hash: String,
 }
-

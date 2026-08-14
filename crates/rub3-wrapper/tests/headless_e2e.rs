@@ -97,7 +97,12 @@ fn toolchain_ready() -> bool {
 fn contracts_dir() -> PathBuf {
     // tests/ → crates/rub3-wrapper → crates → workspace root → contracts
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    crate_dir.parent().unwrap().parent().unwrap().join("contracts")
+    crate_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("contracts")
 }
 
 // ── Anvil lifecycle ───────────────────────────────────────────────────────────
@@ -217,7 +222,13 @@ fn fund(to: Address, amount: &str) {
 /// Mines `n` blocks so a cooldown window can elapse without waiting.
 fn mine(n: u32) {
     let output = Command::new("cast")
-        .args(["rpc", "anvil_mine", &format!("0x{n:x}"), "--rpc-url", &rpc_url()])
+        .args([
+            "rpc",
+            "anvil_mine",
+            &format!("0x{n:x}"),
+            "--rpc-url",
+            &rpc_url(),
+        ])
         .output()
         .expect("failed to run cast rpc anvil_mine");
     assert!(
@@ -254,7 +265,10 @@ impl Agent {
         // Resolve through the production path so the test exercises the real
         // env-var source, not a test-only constructor.
         let signer = resolve_signer().expect("resolve_signer from RUB3_AGENT_KEY");
-        Self { signer, _session_dir: session_dir }
+        Self {
+            signer,
+            _session_dir: session_dir,
+        }
     }
 
     fn address(&self) -> Address {
@@ -295,14 +309,18 @@ fn headless_purchase_activate_persist_e2e() {
 
     // Cooldown 15 blocks = the contract's enforced floor (MIN_COOLDOWN_BLOCKS).
     let contract = deploy_access(PRICE_WEI, "0", "15");
-    let contract_addr: Address = contract.parse().expect("forge returned a malformed address");
+    let contract_addr: Address = contract
+        .parse()
+        .expect("forge returned a malformed address");
 
     let agent = Agent::new();
     fund(agent.address(), FUNDING_ETH);
 
     // Pre-conditions: the agent owns nothing and nothing has been minted.
     assert!(
-        rpc::tokens_of_owner(&rpc_url(), contract_addr, agent.address()).unwrap().is_empty(),
+        rpc::tokens_of_owner(&rpc_url(), contract_addr, agent.address())
+            .unwrap()
+            .is_empty(),
         "a fresh key must start with no tokens",
     );
     assert_eq!(rpc::next_token_id(&rpc_url(), contract_addr).unwrap(), 0);
@@ -312,9 +330,15 @@ fn headless_purchase_activate_persist_e2e() {
         .expect("headless activation should succeed");
 
     match &outcome {
-        HeadlessOutcome::PurchasedAndActivated { token_id, price_wei } => {
+        HeadlessOutcome::PurchasedAndActivated {
+            token_id,
+            price_wei,
+        } => {
             assert_eq!(*token_id, 0, "first mint should be token id 0");
-            assert_eq!(price_wei, PRICE_WEI, "should have paid the advertised price");
+            assert_eq!(
+                price_wei, PRICE_WEI,
+                "should have paid the advertised price"
+            );
         }
         other => panic!("expected PurchasedAndActivated, got {other:?}"),
     }
@@ -325,20 +349,35 @@ fn headless_purchase_activate_persist_e2e() {
         vec![0],
         "the agent should now hold token 0",
     );
-    assert_eq!(rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(), agent.address());
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address()
+    );
     assert_eq!(rpc::next_token_id(&rpc_url(), contract_addr).unwrap(), 1);
 
     // ── The session is well-formed and bound to real chain state ─────────────
     assert_eq!(session.app_id, APP_ID);
     assert_eq!(session.token_id, 0);
-    assert_eq!(session.identity, "access", "fixture deploys the access model");
+    assert_eq!(
+        session.identity, "access",
+        "fixture deploys the access model"
+    );
     assert!(session.tba.is_none(), "access model has no TBA");
     assert!(
-        session.wallet.eq_ignore_ascii_case(&format!("0x{}", hex::encode(agent.address()))),
+        session
+            .wallet
+            .eq_ignore_ascii_case(&format!("0x{}", hex::encode(agent.address()))),
         "session wallet should be the signer address",
     );
-    assert_eq!(session.user_id, session.wallet, "access model: user_id is the wallet");
-    assert_eq!(session.session_id, Some(1), "first activation gets session id 1");
+    assert_eq!(
+        session.user_id, session.wallet,
+        "access model: user_id is the wallet"
+    );
+    assert_eq!(
+        session.session_id,
+        Some(1),
+        "first activation gets session id 1"
+    );
     assert!(session.activation_tx.is_some());
     assert!(session.activation_block.is_some());
 
@@ -357,8 +396,15 @@ fn headless_purchase_activate_persist_e2e() {
     let (reused, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
         .expect("relaunch should succeed from cache");
 
-    assert_eq!(outcome, HeadlessOutcome::Reused, "relaunch must hit the fast path");
-    assert_eq!(reused.nonce, session.nonce, "the same session should come back");
+    assert_eq!(
+        outcome,
+        HeadlessOutcome::Reused,
+        "relaunch must hit the fast path"
+    );
+    assert_eq!(
+        reused.nonce, session.nonce,
+        "the same session should come back"
+    );
     assert_eq!(
         rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
         minted_before,
@@ -418,7 +464,11 @@ fn headless_sold_out_e2e() {
         ])
         .output()
         .expect("cast send purchase");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let agent = Agent::new();
     fund(agent.address(), FUNDING_ETH);
@@ -454,8 +504,8 @@ fn headless_cooldown_active_then_ready_e2e() {
     fund(agent.address(), FUNDING_ETH);
 
     // First run: buys and activates, starting the cooldown.
-    let (first, _) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
-        .expect("first activation");
+    let (first, _) =
+        ensure_headless(agent.signer.as_ref(), &ctx(&contract, None)).expect("first activation");
 
     // Wipe the cached session so the flow is forced back on-chain; the token
     // stays owned, so this is the "session expired inside cooldown" case.
@@ -466,25 +516,45 @@ fn headless_cooldown_active_then_ready_e2e() {
         .expect_err("cooldown should block a second activation");
 
     let remaining = match &err {
-        HeadlessError::CooldownActive { token_id, blocks_remaining } => {
+        HeadlessError::CooldownActive {
+            token_id,
+            blocks_remaining,
+        } => {
             assert_eq!(*token_id, first.token_id);
-            assert!(*blocks_remaining > 0, "cooldown must report blocks remaining");
+            assert!(
+                *blocks_remaining > 0,
+                "cooldown must report blocks remaining"
+            );
             *blocks_remaining
         }
         other => panic!("expected CooldownActive, got {other:?}"),
     };
     assert_eq!(err.exit_code(), 13);
-    assert!(err.machine_detail().unwrap().contains(&format!("blocks_remaining={remaining}")));
+    assert!(err
+        .machine_detail()
+        .unwrap()
+        .contains(&format!("blocks_remaining={remaining}")));
 
     // Let the window elapse; the same call should now go through.
     mine(remaining as u32 + 1);
     let (second, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
         .expect("activation should succeed once the cooldown elapses");
 
-    assert_eq!(outcome, HeadlessOutcome::Activated, "token already held - no purchase");
+    assert_eq!(
+        outcome,
+        HeadlessOutcome::Activated,
+        "token already held - no purchase"
+    );
     assert_eq!(second.token_id, first.token_id);
-    assert_eq!(second.session_id, Some(2), "a second activate() bumps the session id");
-    assert_ne!(second.nonce, first.nonce, "a re-activation mints a fresh session");
+    assert_eq!(
+        second.session_id,
+        Some(2),
+        "a second activate() bumps the session id"
+    );
+    assert_ne!(
+        second.nonce, first.nonce,
+        "a re-activation mints a fresh session"
+    );
     session::verify_local(&second).expect("re-activated session must verify");
 }
 
@@ -537,8 +607,8 @@ fn headless_explicit_token_id_does_not_reuse_another_tokens_session_e2e() {
     fund(agent.address(), FUNDING_ETH);
 
     // Run 1: no explicit token, so the flow buys token 0 and caches a session.
-    let (cached, _) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
-        .expect("first activation");
+    let (cached, _) =
+        ensure_headless(agent.signer.as_ref(), &ctx(&contract, None)).expect("first activation");
     assert_eq!(cached.token_id, 0);
 
     // Run 2: a different token is requested. The cached session for token 0

@@ -84,7 +84,14 @@ pub fn ensure(
     }
 
     // ── Slow path: activation window ─────────────────────────────────────────
-    interactive_slow_path(app_id, contract, chain_id, rpc_url, developer_ens, session_ttl_secs)
+    interactive_slow_path(
+        app_id,
+        contract,
+        chain_id,
+        rpc_url,
+        developer_ens,
+        session_ttl_secs,
+    )
 }
 
 #[cfg(feature = "webview")]
@@ -375,11 +382,16 @@ mod headless {
         /// The wallet cannot cover the purchase price plus gas. `shortfall`
         /// carries the amounts only when the wrapper measured them itself; a
         /// node that rejected the transaction reports no parseable numbers.
-        InsufficientFunds { shortfall: Option<crate::tx::Shortfall> },
+        InsufficientFunds {
+            shortfall: Option<crate::tx::Shortfall>,
+        },
         /// The signer holds no token and the contract has minted its cap.
         SoldOut { supply_cap: u64, minted: u64 },
         /// `activate()` is rate-limited for this token for another N blocks.
-        CooldownActive { token_id: u64, blocks_remaining: u64 },
+        CooldownActive {
+            token_id: u64,
+            blocks_remaining: u64,
+        },
         /// An `activate()` transaction reverted, or did not confirm inside
         /// the poll budget. Retryable, but not because nothing was spent: the
         /// same run may already have completed a `purchase()`. A re-run
@@ -405,7 +417,11 @@ mod headless {
         /// price may already have been paid: retrying before resolving
         /// `tx_hash` can buy a second license. `reason` carries the transport
         /// failure when polling itself was what broke.
-        PurchaseUnconfirmed { tx_hash: String, after_secs: u64, reason: Option<String> },
+        PurchaseUnconfirmed {
+            tx_hash: String,
+            after_secs: u64,
+            reason: Option<String>,
+        },
         /// Headless activation needs a real license contract; this build points
         /// at the zero address, or at something that is not an address at all.
         NoContract,
@@ -511,9 +527,12 @@ mod headless {
         /// placeholder zeroes.
         pub fn machine_detail(&self) -> Option<String> {
             match self {
-                HeadlessError::CooldownActive { token_id, blocks_remaining } => {
-                    Some(format!("token_id={token_id} blocks_remaining={blocks_remaining}"))
-                }
+                HeadlessError::CooldownActive {
+                    token_id,
+                    blocks_remaining,
+                } => Some(format!(
+                    "token_id={token_id} blocks_remaining={blocks_remaining}"
+                )),
                 // Only when the amounts are real: an orchestrator that read
                 // `required_wei=0` would top the wallet up by nothing.
                 HeadlessError::InsufficientFunds { shortfall: Some(s) } => Some(format!(
@@ -525,15 +544,17 @@ mod headless {
                 HeadlessError::SoldOut { supply_cap, minted } => {
                     Some(format!("supply_cap={supply_cap} minted={minted}"))
                 }
-                HeadlessError::ChainIdMismatch { expected, actual } => {
-                    Some(format!("expected_chain_id={expected} actual_chain_id={actual}"))
-                }
+                HeadlessError::ChainIdMismatch { expected, actual } => Some(format!(
+                    "expected_chain_id={expected} actual_chain_id={actual}"
+                )),
                 HeadlessError::TokenNotOwned { token_id, .. } => {
                     Some(format!("token_id={token_id}"))
                 }
-                HeadlessError::PurchaseUnconfirmed { tx_hash, after_secs, .. } => {
-                    Some(format!("tx_hash={tx_hash} waited_secs={after_secs}"))
-                }
+                HeadlessError::PurchaseUnconfirmed {
+                    tx_hash,
+                    after_secs,
+                    ..
+                } => Some(format!("tx_hash={tx_hash} waited_secs={after_secs}")),
                 _ => None,
             }
         }
@@ -594,14 +615,18 @@ mod headless {
         // An unparseable address and the zero address mean the same thing: this
         // build carries no usable contract. Both are build-time constants, so
         // neither is worth a retry.
-        let contract: Address = ctx.contract.parse().map_err(|_| HeadlessError::NoContract)?;
+        let contract: Address = ctx
+            .contract
+            .parse()
+            .map_err(|_| HeadlessError::NoContract)?;
         if contract.is_zero() {
             return Err(HeadlessError::NoContract);
         }
 
         // Signing for the wrong network is silent and expensive; catch it before
         // the first transaction rather than after.
-        let node_chain_id = rpc::chain_id(&ctx.rpc_url).map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+        let node_chain_id =
+            rpc::chain_id(&ctx.rpc_url).map_err(|e| HeadlessError::Rpc(e.to_string()))?;
         if node_chain_id != ctx.chain_id {
             return Err(HeadlessError::ChainIdMismatch {
                 expected: ctx.chain_id,
@@ -643,7 +668,10 @@ mod headless {
         let (ready, blocks_remaining) = rpc::cooldown_ready(&ctx.rpc_url, contract, token_id)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
         if !ready {
-            return Err(HeadlessError::CooldownActive { token_id, blocks_remaining });
+            return Err(HeadlessError::CooldownActive {
+                token_id,
+                blocks_remaining,
+            });
         }
 
         // ── activate() ───────────────────────────────────────────────────────
@@ -651,7 +679,11 @@ mod headless {
         let tx_hash = tx::send(
             &ctx.rpc_url,
             signer,
-            &TxPlan { to: contract, value: U256::ZERO, input: calldata },
+            &TxPlan {
+                to: contract,
+                value: U256::ZERO,
+                input: calldata,
+            },
         )?;
 
         let receipt = rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash).map_err(|e| {
@@ -688,8 +720,8 @@ mod headless {
         )
         .map_err(HeadlessError::Rpc)?;
 
-        let signature = crate::signer::personal_sign(signer, &draft.message)
-            .map_err(HeadlessError::Signer)?;
+        let signature =
+            crate::signer::personal_sign(signer, &draft.message).map_err(HeadlessError::Signer)?;
 
         let session = Session {
             app_id: ctx.app_id.clone(),
@@ -731,20 +763,27 @@ mod headless {
         contract: Address,
         wallet: Address,
     ) -> Result<(u64, U256), HeadlessError> {
-        let supply_cap =
-            rpc::supply_cap(&ctx.rpc_url, contract).map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+        let supply_cap = rpc::supply_cap(&ctx.rpc_url, contract)
+            .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
         let minted = rpc::next_token_id(&ctx.rpc_url, contract)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
         if supply_cap != 0 && minted >= supply_cap {
             return Err(HeadlessError::SoldOut { supply_cap, minted });
         }
 
-        let price =
-            rpc::token_price(&ctx.rpc_url, contract).map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+        let price = rpc::token_price(&ctx.rpc_url, contract)
+            .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
         let calldata = decode_calldata(&rpc::encode_purchase_calldata(wallet))?;
 
-        let tx_hash =
-            tx::send(&ctx.rpc_url, signer, &TxPlan { to: contract, value: price, input: calldata })?;
+        let tx_hash = tx::send(
+            &ctx.rpc_url,
+            signer,
+            &TxPlan {
+                to: contract,
+                value: price,
+                input: calldata,
+            },
+        )?;
 
         let receipt =
             rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash).map_err(|e| unconfirmed(&tx_hash, e))?;
@@ -818,15 +857,36 @@ mod tests {
                 11,
             ),
             (HeadlessError::InsufficientFunds { shortfall: None }, 11),
-            (HeadlessError::SoldOut { supply_cap: 10, minted: 10 }, 12),
-            (HeadlessError::CooldownActive { token_id: 3, blocks_remaining: 42 }, 13),
+            (
+                HeadlessError::SoldOut {
+                    supply_cap: 10,
+                    minted: 10,
+                },
+                12,
+            ),
+            (
+                HeadlessError::CooldownActive {
+                    token_id: 3,
+                    blocks_remaining: 42,
+                },
+                13,
+            ),
             (HeadlessError::ActivationFailed("reverted".into()), 14),
             (HeadlessError::VerificationFailed("bad sig".into()), 15),
             (HeadlessError::Rpc("offline".into()), 16),
             (HeadlessError::Persist("read-only fs".into()), 17),
-            (HeadlessError::ChainIdMismatch { expected: 8453, actual: 31337 }, 19),
             (
-                HeadlessError::TokenNotOwned { token_id: 7, wallet: "0x01".into() },
+                HeadlessError::ChainIdMismatch {
+                    expected: 8453,
+                    actual: 31337,
+                },
+                19,
+            ),
+            (
+                HeadlessError::TokenNotOwned {
+                    token_id: 7,
+                    wallet: "0x01".into(),
+                },
                 20,
             ),
             (HeadlessError::NoContract, 1),
@@ -866,7 +926,11 @@ mod tests {
         let mut sorted = codes.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), codes.len(), "duplicate exit code in the table");
+        assert_eq!(
+            sorted.len(),
+            codes.len(),
+            "duplicate exit code in the table"
+        );
         assert!(!codes.contains(&EXIT_OK));
         assert!(!codes.contains(&EXIT_GENERIC));
         // clap exits 2 on usage errors - nothing of ours may collide with it.
@@ -875,8 +939,13 @@ mod tests {
 
     #[test]
     fn cooldown_detail_reports_blocks_remaining() {
-        let err = HeadlessError::CooldownActive { token_id: 3, blocks_remaining: 42 };
-        let detail = err.machine_detail().expect("cooldown must carry a detail line");
+        let err = HeadlessError::CooldownActive {
+            token_id: 3,
+            blocks_remaining: 42,
+        };
+        let detail = err
+            .machine_detail()
+            .expect("cooldown must carry a detail line");
         assert!(detail.contains("blocks_remaining=42"), "{detail}");
         assert!(detail.contains("token_id=3"), "{detail}");
         // The prose message must carry it too, for a human reading the logs.
@@ -895,7 +964,10 @@ mod tests {
         let detail = err.machine_detail().unwrap();
         assert!(detail.contains("required_wei=1000000"), "{detail}");
         assert!(detail.contains("available_wei=12"), "{detail}");
-        assert!(detail.contains("required_covers=price_plus_gas"), "{detail}");
+        assert!(
+            detail.contains("required_covers=price_plus_gas"),
+            "{detail}"
+        );
     }
 
     /// The pre-flight shortfall is measured before gas can be estimated, so
@@ -912,7 +984,10 @@ mod tests {
         };
         let detail = err.machine_detail().unwrap();
         assert!(detail.contains("required_covers=price"), "{detail}");
-        assert!(!detail.contains("required_covers=price_plus_gas"), "{detail}");
+        assert!(
+            !detail.contains("required_covers=price_plus_gas"),
+            "{detail}"
+        );
         let rendered = err.to_string();
         assert!(rendered.contains("before gas"), "{rendered}");
         assert!(!rendered.contains("price + gas"), "{rendered}");
@@ -923,20 +998,25 @@ mod tests {
     /// needs nothing, so the detail line is omitted instead.
     #[test]
     fn insufficient_funds_with_unknown_amounts_emits_no_detail_line() {
-        let err: HeadlessError =
-            crate::tx::TxError::InsufficientFunds(None).into();
+        let err: HeadlessError = crate::tx::TxError::InsufficientFunds(None).into();
         assert_eq!(err.exit_code(), EXIT_INSUFFICIENT_FUNDS);
         assert!(err.machine_detail().is_none(), "{:?}", err.machine_detail());
         let rendered = err.to_string();
         assert!(rendered.contains("insufficient funds"), "{rendered}");
-        assert!(!rendered.contains('0'), "must not imply an amount: {rendered}");
+        assert!(
+            !rendered.contains('0'),
+            "must not imply an amount: {rendered}"
+        );
     }
 
     #[test]
     fn sold_out_detail_reports_supply() {
-        let detail = HeadlessError::SoldOut { supply_cap: 100, minted: 100 }
-            .machine_detail()
-            .unwrap();
+        let detail = HeadlessError::SoldOut {
+            supply_cap: 100,
+            minted: 100,
+        }
+        .machine_detail()
+        .unwrap();
         assert!(detail.contains("supply_cap=100"), "{detail}");
         assert!(detail.contains("minted=100"), "{detail}");
     }
@@ -964,7 +1044,11 @@ mod tests {
         let err = ensure_headless(&signer, &ctx).expect_err("a malformed contract cannot activate");
         assert!(matches!(err, HeadlessError::NoContract), "got {err:?}");
         assert_eq!(err.exit_code(), EXIT_GENERIC);
-        assert_ne!(err.exit_code(), EXIT_RPC, "an orchestrator would retry forever");
+        assert_ne!(
+            err.exit_code(),
+            EXIT_RPC,
+            "an orchestrator would retry forever"
+        );
     }
 
     /// The enumeration order of `tokensOfOwner` is arbitrary after any
@@ -1212,8 +1296,12 @@ mod tests {
 
     #[test]
     fn unclassified_failures_have_no_detail_line() {
-        assert!(HeadlessError::Rpc("offline".into()).machine_detail().is_none());
-        assert!(HeadlessError::ActivationFailed("x".into()).machine_detail().is_none());
+        assert!(HeadlessError::Rpc("offline".into())
+            .machine_detail()
+            .is_none());
+        assert!(HeadlessError::ActivationFailed("x".into())
+            .machine_detail()
+            .is_none());
     }
 
     /// Errors surface to stderr and to orchestrator logs; none of them may

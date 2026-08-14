@@ -53,9 +53,9 @@ const ERC721_TRANSFER_SIG: B256 =
 /// Minimal tx receipt — the fields the wrapper cares about.
 #[derive(Debug, Clone)]
 pub struct TxReceipt {
-    pub status:       bool,
+    pub status: bool,
     pub block_number: u64,
-    pub block_hash:   String,
+    pub block_hash: String,
     /// `to` address from the receipt, lowercased hex. Used by tier-3
     /// on-chain re-verification to confirm the tx hit the license contract.
     pub to: Option<String>,
@@ -233,11 +233,7 @@ pub fn cooldown_blocks(rpc_url: &str, contract: Address) -> Result<u64, RpcError
 
 /// Calls `activeSessionId(tokenId)` view. Used after an `activate()` tx lands
 /// to read the authoritative session id the contract assigned.
-pub fn active_session_id(
-    rpc_url: &str,
-    contract: Address,
-    token_id: u64,
-) -> Result<u64, RpcError> {
+pub fn active_session_id(rpc_url: &str, contract: Address, token_id: u64) -> Result<u64, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
         let instance = IRub3License::new(contract, provider);
@@ -255,7 +251,9 @@ pub fn active_session_id(
 /// Pure — no RPC. The wrapper shows this to the user so they can paste it
 /// into their wallet to send the tx themselves.
 pub fn encode_activate_calldata(token_id: u64) -> String {
-    let call = IRub3License::activateCall { tokenId: U256::from(token_id) };
+    let call = IRub3License::activateCall {
+        tokenId: U256::from(token_id),
+    };
     format!("0x{}", hex::encode(call.abi_encode()))
 }
 
@@ -276,7 +274,7 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
 
         let receipt = match maybe {
             Some(r) => r,
-            None    => return Ok(None),
+            None => return Ok(None),
         };
 
         let block_hash = receipt
@@ -289,7 +287,7 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
             .map(|a| format!("0x{}", hex::encode(a.as_slice())));
 
         Ok(Some(TxReceipt {
-            status:       receipt.status(),
+            status: receipt.status(),
             block_number,
             block_hash,
             to,
@@ -360,7 +358,10 @@ impl std::fmt::Display for ReceiptWaitError {
             ReceiptWaitError::Timeout { after_secs } => {
                 write!(f, "tx not confirmed within {after_secs}s")
             }
-            ReceiptWaitError::Transport { after_secs, message } => {
+            ReceiptWaitError::Transport {
+                after_secs,
+                message,
+            } => {
                 write!(f, "receipt query failed after {after_secs}s: {message}")
             }
         }
@@ -423,7 +424,10 @@ where
     }
     let after_secs = started.elapsed().as_secs();
     match last_transport_error {
-        Some(message) => Err(ReceiptWaitError::Transport { after_secs, message }),
+        Some(message) => Err(ReceiptWaitError::Transport {
+            after_secs,
+            message,
+        }),
         None => Err(ReceiptWaitError::Timeout { after_secs }),
     }
 }
@@ -582,9 +586,7 @@ pub fn mint_token_id(
 
 // ── Internals ─────────────────────────────────────────────────────────────────
 
-fn build_provider(
-    rpc_url: &str,
-) -> Result<impl alloy::providers::Provider, RpcError> {
+fn build_provider(rpc_url: &str) -> Result<impl alloy::providers::Provider, RpcError> {
     let url: url::Url = rpc_url
         .parse()
         .map_err(|e: url::ParseError| RpcError::Transport(e.to_string()))?;
@@ -726,7 +728,9 @@ mod tests {
     #[test]
     fn encode_purchase_calldata_matches_selector() {
         // keccak256("purchase(address)")[..4] = 0x25b31a97
-        let recipient: Address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".parse().unwrap();
+        let recipient: Address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+            .parse()
+            .unwrap();
         let data = encode_purchase_calldata(recipient);
         assert!(data.starts_with("0x25b31a97"), "got {data}");
         // selector (4) + 32-byte argument = 36 bytes = 72 hex chars, plus "0x" prefix.
@@ -740,8 +744,12 @@ mod tests {
 
     #[test]
     fn encode_purchase_calldata_differs_by_recipient() {
-        let a: Address = "0x0000000000000000000000000000000000000001".parse().unwrap();
-        let b: Address = "0x0000000000000000000000000000000000000002".parse().unwrap();
+        let a: Address = "0x0000000000000000000000000000000000000001"
+            .parse()
+            .unwrap();
+        let b: Address = "0x0000000000000000000000000000000000000002"
+            .parse()
+            .unwrap();
         assert_ne!(encode_purchase_calldata(a), encode_purchase_calldata(b));
     }
 
@@ -873,8 +881,8 @@ mod tests {
                 Ok(None)
             };
             // Nominal budget 1 x 3600s; one attempt that really takes ~1.1s.
-            let timeout = poll_for_receipt(slow, 1, Duration::from_secs(3600))
-                .expect_err("never mined");
+            let timeout =
+                poll_for_receipt(slow, 1, Duration::from_secs(3600)).expect_err("never mined");
             assert!(
                 (1..60).contains(&timeout.after_secs()),
                 "reported the budget, not the wait: {}",
@@ -886,8 +894,8 @@ mod tests {
                 Err(RpcError::Transport("offline".into()))
             };
             // Nominal budget 0s; the endpoint still burned ~1.1s answering.
-            let transport = poll_for_receipt(slow_and_broken, 1, Duration::ZERO)
-                .expect_err("never answered");
+            let transport =
+                poll_for_receipt(slow_and_broken, 1, Duration::ZERO).expect_err("never answered");
             assert!(
                 transport.after_secs() >= 1,
                 "a dead endpoint reported no wait at all: {}",

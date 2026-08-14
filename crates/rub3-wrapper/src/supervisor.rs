@@ -139,9 +139,16 @@ mod tests {
     }
 
     fn assert_no_agent_vars(seen: &str, secrets: &[&str]) {
-        let names: Vec<&str> = seen.lines().filter_map(|l| l.split_once('=')).map(|(k, _)| k).collect();
+        let names: Vec<&str> = seen
+            .lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(k, _)| k)
+            .collect();
         for stripped in AGENT_ENV_VARS {
-            assert!(!names.contains(&stripped), "{stripped} reached the wrapped binary");
+            assert!(
+                !names.contains(&stripped),
+                "{stripped} reached the wrapped binary"
+            );
         }
         for secret in secrets {
             assert!(

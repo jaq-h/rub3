@@ -97,7 +97,7 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 - `activation.html` — sign-session screen shows the identity model label, user_id, and (for account model) TBA address. Echoes all three back in the `session_signed` IPC message
 
 **Tests**
-- `identity.rs`: 11 tests — `IdentityModel` from_u8 / as_str / rejects-out-of-range; TBA determinism + sensitivity to each of `{implementation, chain_id, contract, token_id}`; `resolve_user_id` for both models + panic on missing TBA
+- `identity.rs`: 11 tests - `IdentityModel` from_u8 / as_str / rejects-out-of-range; TBA determinism + sensitivity to each of `{implementation, chain_id, contract, token_id}`; `resolve_user_id` for both models + panic on missing TBA
 - `session.rs`: 2 new preimage tests — differs by identity (access → account), differs by user_id alone; 1 new verify test — tampered identity fails `verify_local` with `AddressMismatch`; all existing tests updated to the new 10-arg `session_message()` signature
 - `rpc.rs`: 2 new transport-error tests for `identity_model()` + `tba_implementation()`
 - `tests/session_onchain_e2e.rs`: updated `forge create` to pass the new `tbaImplementation = address(0)` arg; `Session` struct literal updated. Passes against anvil.
