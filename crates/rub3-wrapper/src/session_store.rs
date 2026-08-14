@@ -75,6 +75,29 @@ pub fn save_session(session: &Session) -> Result<(), StoreError> {
 /// Solves the "don't know token_id at startup" problem: the fast path doesn't
 /// need to know which token to load — it just asks for the best available session.
 pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
+    latest_session_where(app_id, |_| true)
+}
+
+/// The most recently issued valid session **signed by `wallet`**.
+///
+/// One machine can hold sessions for several keys under the same `app_id` (a
+/// human activated interactively, a second agent runs with its own key). The
+/// wallet has to narrow the scan rather than filter its result: rejecting the
+/// single newest session because it belongs to another key would send a caller
+/// back on-chain while its own cached session sits unused one file over.
+///
+/// `wallet` is compared case-insensitively against the session's signed
+/// `wallet` field, which `verify_local` has already tied to the signature.
+pub fn load_latest_session_for_wallet(app_id: &str, wallet: &str) -> Result<Session, StoreError> {
+    latest_session_where(app_id, |s| s.wallet.eq_ignore_ascii_case(wallet))
+}
+
+/// Shared scan: every valid, non-expired session for `app_id` that `keep`
+/// accepts, newest first.
+fn latest_session_where(
+    app_id: &str,
+    keep: impl Fn(&Session) -> bool,
+) -> Result<Session, StoreError> {
     let dir = sessions_root()?.join(app_id);
 
     let entries = std::fs::read_dir(&dir).map_err(|e| {
@@ -91,6 +114,7 @@ pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
         .filter_map(|s| serde_json::from_str::<Session>(&s).ok())
         .filter(|s| !is_expired(s) && verify_local(s).is_ok())
+        .filter(|s| keep(s))
         .collect();
 
     if sessions.is_empty() {

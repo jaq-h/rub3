@@ -233,7 +233,7 @@ activation failure.
 | 11 | Insufficient funds for purchase + gas | Top up the wallet |
 | 12 | No token held and supply sold out | Terminal - try another contract |
 | 13 | Cooldown active | Back off `blocks_remaining` blocks, then retry |
-| 14 | `activate()` failed (reverted, or not confirmed in time) | Retry - nothing was paid |
+| 14 | `activate()` failed (reverted, or not confirmed in time) | Retry - a re-run re-reads ownership, so a purchase this run already completed is activated, not paid for twice |
 | 15 | Session verification failed | Signer/config bug - do not retry blindly |
 | 16 | Chain RPC / transport failure | Retry, or switch endpoint |
 | 17 | Session could not be persisted | Check the session dir is writable |

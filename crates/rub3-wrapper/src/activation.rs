@@ -151,7 +151,10 @@ fn interactive_slow_path(
 /// `require_wallet` narrows the match to sessions signed by one specific
 /// address. The interactive door passes `None` (whoever last activated on this
 /// machine is the user). The headless door passes its signer's address, so an
-/// agent never launches on a session belonging to a different key.
+/// agent never launches on a session belonging to a different key. Like
+/// `require_token` it **selects** rather than filters: the newest session
+/// signed by that wallet wins, even when a session for another key is newer,
+/// so a second agent on the same machine still reuses its own cache.
 ///
 /// `require_token` selects one specific token's session instead of the newest
 /// across all of them. The interactive door passes `None`; the headless door
@@ -166,9 +169,14 @@ fn try_session_fast_path(
     require_wallet: Option<Address>,
     require_token: Option<u64>,
 ) -> Option<crate::session::Session> {
-    let session = match require_token {
-        Some(token_id) => crate::session_store::load_session(app_id, token_id).ok()?,
-        None => crate::session_store::load_latest_session(app_id).ok()?,
+    let session = match (require_token, require_wallet) {
+        (Some(token_id), _) => crate::session_store::load_session(app_id, token_id).ok()?,
+        (None, Some(wallet)) => crate::session_store::load_latest_session_for_wallet(
+            app_id,
+            &crate::identity::format_addr(wallet),
+        )
+        .ok()?,
+        (None, None) => crate::session_store::load_latest_session(app_id).ok()?,
     };
 
     if crate::session::verify_local(&session).is_err() {
@@ -258,9 +266,10 @@ pub const EXIT_SOLD_OUT: i32 = 12;
 /// `activate()` is rate-limited; `blocks_remaining` says for how long.
 pub const EXIT_COOLDOWN_ACTIVE: i32 = 13;
 /// An `activate()` transaction reverted, or did not confirm inside the poll
-/// budget. Retryable: nothing was paid, and a re-send either lands or hits the
-/// cooldown gate. A `purchase()` that fails to confirm is
-/// `EXIT_PURCHASE_UNCONFIRMED` instead.
+/// budget. Retryable, but not because nothing was spent: the same run may
+/// already have completed a `purchase()`. A re-run re-reads ownership first,
+/// so it activates the token it now holds instead of buying a second one. A
+/// `purchase()` that fails to confirm is `EXIT_PURCHASE_UNCONFIRMED` instead.
 pub const EXIT_ACTIVATION_FAILED: i32 = 14;
 /// The assembled session failed local signature/expiry verification.
 pub const EXIT_VERIFICATION_FAILED: i32 = 15;
@@ -295,8 +304,9 @@ child is the child's status and not an activation failure.
   11  insufficient funds for purchase + gas
   12  no token held and supply is sold out
   13  cooldown active - stderr carries `blocks_remaining=N`
-  14  activate() reverted, or did not confirm in time - retryable, the
-      purchase price was not at stake
+  14  activate() reverted, or did not confirm in time - retryable: a
+      re-run re-reads ownership, so a purchase this run may already have
+      completed is activated rather than paid for twice
   15  session verification failed
   16  chain RPC / transport failure
   17  session could not be persisted
@@ -371,8 +381,10 @@ mod headless {
         /// `activate()` is rate-limited for this token for another N blocks.
         CooldownActive { token_id: u64, blocks_remaining: u64 },
         /// An `activate()` transaction reverted, or did not confirm inside
-        /// the poll budget. Retryable: nothing was paid, and a re-send either
-        /// lands or hits the cooldown gate. A `purchase()` that fails to
+        /// the poll budget. Retryable, but not because nothing was spent: the
+        /// same run may already have completed a `purchase()`. A re-run
+        /// re-reads ownership first, so it activates the token it now holds
+        /// instead of buying a second one. A `purchase()` that fails to
         /// confirm is `PurchaseUnconfirmed` instead.
         ActivationFailed(String),
         /// The session was assembled but failed local verification. Signals a
@@ -999,6 +1011,59 @@ mod tests {
         assert!(
             try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), Some(9)).is_none(),
             "a token with no cached session must be a miss",
+        );
+
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
+    /// Two keys share one machine and one `app_id`: a human activated
+    /// interactively, or a second agent runs alongside the first. The newest
+    /// session on disk belongs to the other key, but each signer still has a
+    /// valid session of its own, and going back on-chain for one it already
+    /// holds costs gas or a spurious cooldown back-off.
+    #[test]
+    fn each_wallet_reuses_its_own_session_when_another_key_activated_later() {
+        let _guard = crate::session_store::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        let app_id = "com.rub3.test.two-wallets";
+        let agent = crate::signer::LocalSigner::from_hex(
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+        let other = crate::signer::LocalSigner::from_hex(
+            "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+        )
+        .unwrap();
+
+        let agent_session = signed_session(app_id, 3, &agent, "2026-01-01T00:00:00+00:00");
+        let other_session = signed_session(app_id, 7, &other, "2026-06-01T00:00:00+00:00");
+        crate::session_store::save_session(&agent_session).unwrap();
+        crate::session_store::save_session(&other_session).unwrap();
+
+        let picked =
+            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(agent.address()), None)
+                .expect("the agent holds a valid session of its own");
+        assert_eq!(picked.token_id, 3);
+        assert_eq!(picked.nonce, agent_session.nonce);
+
+        let picked =
+            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(other.address()), None)
+                .expect("the other key holds one too");
+        assert_eq!(picked.token_id, 7);
+
+        // A wallet with nothing cached is still a miss, not someone else's session.
+        let stranger = crate::signer::LocalSigner::from_hex(
+            "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
+        )
+        .unwrap();
+        assert!(
+            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(stranger.address()), None)
+                .is_none(),
+            "a key with no session must not launch on another key's",
         );
 
         std::env::remove_var("RUB3_SESSION_DIR");

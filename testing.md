@@ -19,16 +19,17 @@ capabilities nor the headless front door. Cargo features are additive, so
 `--no-default-features` is mandatory when selecting another bundle:
 
 ```bash
-# tier-3 (adds onchain-write + cooldown): 66 lib tests
+# tier-3 (adds onchain-write + cooldown): 67 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
 
-# tier-3 + the headless (agent) front door: 110 lib tests
+# tier-3 + the headless (agent) front door: 112 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
 ```
 
-For reference, `--lib` counts per bundle: `tier-0` 28, `tier-1`/`tier-2` 58,
-`tier-3`/`tier-4` 66, `tier-3,headless` 110. Each includes one `#[ignore]`d
-network test.
+For reference, `--lib` counts per bundle: `tier-0` 29, `tier-1`/`tier-2` 59,
+`tier-3`/`tier-4` 67, `tier-3,headless` 112. Each total includes the one
+`#[ignore]`d network test, which a plain run skips, so a bundle reports one
+fewer as passed.
 
 Network-dependent tests (requires internet). `--ignored` runs *only* the ignored tests, so this replaces the suite above rather than adding to it:
 
@@ -50,11 +51,11 @@ scripts/test-e2e.sh
 - **`store::tests`** — proof save/load, directory creation, overwrite, missing file handling
 - **`rpc::tests`** — provider construction, contract call error paths, `encode_activate_calldata` selector + layout, `get_tx_receipt` / `get_block_number` error paths, ENS stub
 - **`session::tests`** (requires `session` feature) — message determinism, tier-diffing, expiry edge cases, sign/verify round-trip, wrong-wallet failure; with `cooldown` adds: `verify_onchain` missing-field + bad-URL paths, `should_reverify` distribution sanity
-- **`session_store::tests`** (requires `session` feature) — save/load round-trip, missing-session, `load_latest_session` picking the freshest valid session
+- **`session_store::tests`** (requires `session` feature) — save/load round-trip, missing-session, `load_latest_session` picking the freshest valid session (`load_latest_session_for_wallet` narrows the same scan to one signer, covered from `activation::tests`)
 - **`identity::tests`** - `IdentityModel` parsing and wire format, ERC-6551 TBA derivation determinism and sensitivity to each input, `resolve_user_id` for both models
 - **`signer::tests`** (requires `headless` feature) - hex key parsing (bare/prefixed/padded, and every rejection: wrong length, non-hex, zero and out-of-curve-order scalars), `Debug` redaction and error messages asserted not to echo the input, `personal_sign` / `sign_prehash` recovery, RFC-6979 determinism, keystore decrypt, password-file precedence, and the strict env-key-over-keystore resolution order with no fall-through on a malformed key
 - **`tx::tests`** (requires `headless` feature) - invalid-URL transport error, the node's `insufficient funds` classifier, and the shortfall message with and without known amounts
-- **`activation::tests`** (requires `headless` feature) - the exit-code table asserted value-by-value, all classified codes distinct and disjoint from 0/1/2, `machine_detail` contents, `lowest_token` selection, the token-scoped session fast path, and every unconfirmed-purchase outcome mapping to the terminal code 21
+- **`activation::tests`** (requires `headless` feature) - the exit-code table asserted value-by-value, all classified codes distinct and disjoint from 0/1/2, `machine_detail` contents, `lowest_token` selection, the token- and wallet-scoped session fast path, and every unconfirmed-purchase outcome mapping to the terminal code 21
 - **`rpc::tests::receipt_polling`** (requires `onchain-write` or `cooldown`) - the receipt poll loop driven over scripted answers: a transient transport failure does not end the wait, one that outlasts the budget is reported as `Transport`, a recovered poll ends as `Timeout`, and both report the elapsed budget
 
 ### Integration tests (`tests/integration.rs`)
