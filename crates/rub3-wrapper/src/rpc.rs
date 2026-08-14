@@ -288,26 +288,56 @@ pub const RECEIPT_POLL_ATTEMPTS: u32 = 10;
 #[cfg(any(feature = "onchain-write", feature = "cooldown"))]
 pub const RECEIPT_POLL_INTERVAL_SECS: u64 = 3;
 
+/// Why [`wait_for_receipt`] gave up.
+///
+/// The two cases mean very different things to a caller that just spent money:
+/// a transport failure says nothing landed as far as we can tell, while a
+/// timeout says the transaction is still pending and may yet be mined. Callers
+/// that broadcast a payment need to tell them apart, so the distinction is
+/// carried in the type instead of being flattened into a string.
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+#[derive(Debug)]
+pub enum ReceiptWaitError {
+    /// The budget ran out with the transaction still unmined.
+    Timeout { after_secs: u64 },
+    /// The receipt query itself failed.
+    Transport(String),
+}
+
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+impl std::fmt::Display for ReceiptWaitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReceiptWaitError::Timeout { after_secs } => {
+                write!(f, "tx not confirmed within {after_secs}s")
+            }
+            ReceiptWaitError::Transport(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+#[cfg(any(feature = "onchain-write", feature = "cooldown"))]
+impl std::error::Error for ReceiptWaitError {}
+
 /// Polls `get_tx_receipt` until the transaction is mined or the budget runs out.
 ///
 /// Shared by both front doors: the webview poller thread and the headless
 /// flow call this rather than each keeping their own loop.
 #[cfg(any(feature = "onchain-write", feature = "cooldown"))]
-pub fn wait_for_receipt(rpc_url: &str, tx_hash: &str) -> Result<TxReceipt, String> {
+pub fn wait_for_receipt(rpc_url: &str, tx_hash: &str) -> Result<TxReceipt, ReceiptWaitError> {
     for attempt in 0..RECEIPT_POLL_ATTEMPTS {
         match get_tx_receipt(rpc_url, tx_hash) {
             Ok(Some(r)) => return Ok(r),
             Ok(None) => {}
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(ReceiptWaitError::Transport(e.to_string())),
         }
         if attempt + 1 < RECEIPT_POLL_ATTEMPTS {
             std::thread::sleep(std::time::Duration::from_secs(RECEIPT_POLL_INTERVAL_SECS));
         }
     }
-    Err(format!(
-        "tx not confirmed within {}s",
-        RECEIPT_POLL_ATTEMPTS as u64 * RECEIPT_POLL_INTERVAL_SECS
-    ))
+    Err(ReceiptWaitError::Timeout {
+        after_secs: RECEIPT_POLL_ATTEMPTS as u64 * RECEIPT_POLL_INTERVAL_SECS,
+    })
 }
 
 // ── Identity model ────────────────────────────────────────────────────────────

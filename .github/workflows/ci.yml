@@ -25,13 +25,14 @@ jobs:
   # Rust wrapper, one job per tier bundle.
   #
   # WHY --no-default-features IS NON-NEGOTIABLE:
-  #   Cargo features are additive. The crate sets `default = ["tier-2"]`, so
-  #   `--features tier-0` means tier-2 PLUS tier-0, not tier-0. Verified on this
-  #   repo: `cargo tree --features tier-0` still lists `rand` (the dependency
-  #   that only the `session` feature pulls in), and `cargo test --features
-  #   tier-0` runs 68 tests, exactly the tier-2 count, instead of tier-0's 38.
-  #   Without `--no-default-features` this matrix would test tier-2 five times
-  #   and look like coverage while proving nothing.
+  #   Cargo features are additive. The crate sets
+  #   `default = ["tier-2", "webview"]`, so `--features tier-0` means tier-2 plus
+  #   the webview front door PLUS tier-0, not tier-0. Measured on this branch:
+  #   `cargo tree --features tier-0` still lists `rand` (the dependency that only
+  #   the `session` feature pulls in), and `cargo test -p rub3-wrapper --features
+  #   tier-0 --lib` runs 58 tests, exactly the default count, instead of tier-0's
+  #   28. Without `--no-default-features` this matrix would test the default
+  #   bundle every time and look like coverage while proving nothing.
   # ---------------------------------------------------------------------------
   rust:
     name: rust (${{ matrix.bundle }})
@@ -52,6 +53,10 @@ jobs:
             features: tier-4
           - bundle: tier-3 + headless
             features: tier-3,headless
+          # The interactive front door. Tier bundles no longer imply it, so
+          # without this entry nothing blocking compiles src/webview.rs.
+          - bundle: tier-2 + webview
+            features: tier-2,webview
 
     steps:
       - uses: actions/checkout@v7.0.1

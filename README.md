@@ -240,6 +240,12 @@ activation failure.
 | 18 | Headless not compiled into this build | Use a `headless` build |
 | 19 | Chain id mismatch between endpoint and build | Fix `RPC_URL` |
 | 20 | `--token-id` names a token this signer does not hold | Fix the id, or drop the flag to purchase |
+| 21 | Purchase broadcast but not confirmed in time | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
+
+Code 21 is deliberately not 14: the price may already have left the wallet, so
+a blind retry can buy a second license. Once the named transaction has mined,
+re-running takes the ordinary `tokensOfOwner` path and activates the token that
+was bought; once it has been dropped, re-running purchases exactly once.
 
 Failures with structured parameters also print one parseable line:
 

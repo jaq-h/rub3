@@ -175,6 +175,15 @@ fn try_session_fast_path(
         return None;
     }
 
+    // The session directory is user-writable, so the filename a session was
+    // loaded from proves nothing about the token it was issued for. Only the
+    // signed field counts.
+    if let Some(token_id) = require_token {
+        if session.token_id != token_id {
+            return None;
+        }
+    }
+
     if let Some(wallet) = require_wallet {
         let expected = crate::identity::format_addr(wallet);
         if !session.wallet.eq_ignore_ascii_case(&expected) {
@@ -262,6 +271,10 @@ pub const EXIT_HEADLESS_UNSUPPORTED: i32 = 18;
 pub const EXIT_CHAIN_MISMATCH: i32 = 19;
 /// `--token-id N` names a token the signer does not hold.
 pub const EXIT_TOKEN_NOT_OWNED: i32 = 20;
+/// A `purchase()` transaction was broadcast but did not confirm inside the
+/// receipt budget. Deliberately distinct from `EXIT_ACTIVATION_FAILED`: the
+/// money may already be spent, so this one must not be retried blindly.
+pub const EXIT_PURCHASE_UNCONFIRMED: i32 = 21;
 
 /// The exit-code table rendered for `--help`, so the contract is discoverable
 /// from the binary itself and not only from the docs.
@@ -285,6 +298,9 @@ child is the child's status and not an activation failure.
   18  headless mode not compiled into this build
   19  chain id mismatch between the RPC endpoint and this build
   20  --token-id names a token this signer does not hold
+  21  purchase broadcast but not confirmed in time - do NOT retry blindly:
+      stderr carries `tx_hash=0x...`; resolve that transaction first, then
+      re-run once it has mined or been dropped
 
 Signer sources, highest precedence first:
   RUB3_AGENT_KEY                        raw hex private key (dev / CI only)
@@ -361,6 +377,11 @@ mod headless {
         ChainIdMismatch { expected: u64, actual: u64 },
         /// `--token-id N` names a token this signer does not hold.
         TokenNotOwned { token_id: u64, wallet: String },
+        /// A `purchase()` transaction was broadcast but no receipt arrived
+        /// inside the poll budget. It may still be mined, so the price may
+        /// already have been paid: retrying before resolving `tx_hash` can buy
+        /// a second license.
+        PurchaseUnconfirmed { tx_hash: String, after_secs: u64 },
         /// Headless activation needs a real license contract; this build points
         /// at the zero address, or at something that is not an address at all.
         NoContract,
@@ -409,6 +430,12 @@ mod headless {
                 HeadlessError::TokenNotOwned { token_id, wallet } => {
                     write!(f, "token {token_id} is not owned by {wallet}")
                 }
+                HeadlessError::PurchaseUnconfirmed { tx_hash, after_secs } => write!(
+                    f,
+                    "purchase() tx {tx_hash} was broadcast but did not confirm within \
+                     {after_secs}s: it may still be mined, so check it before re-running \
+                     rather than retrying blindly"
+                ),
                 HeadlessError::NoContract => write!(
                     f,
                     "headless activation requires a usable license contract, but this build has none configured"
@@ -437,6 +464,7 @@ mod headless {
                 HeadlessError::Persist(_) => EXIT_PERSIST,
                 HeadlessError::ChainIdMismatch { .. } => EXIT_CHAIN_MISMATCH,
                 HeadlessError::TokenNotOwned { .. } => EXIT_TOKEN_NOT_OWNED,
+                HeadlessError::PurchaseUnconfirmed { .. } => EXIT_PURCHASE_UNCONFIRMED,
                 HeadlessError::NoContract => EXIT_GENERIC,
             }
         }
@@ -469,6 +497,9 @@ mod headless {
                 }
                 HeadlessError::TokenNotOwned { token_id, .. } => {
                     Some(format!("token_id={token_id}"))
+                }
+                HeadlessError::PurchaseUnconfirmed { tx_hash, after_secs } => {
+                    Some(format!("tx_hash={tx_hash} waited_secs={after_secs}"))
                 }
                 _ => None,
             }
@@ -590,8 +621,9 @@ mod headless {
             &TxPlan { to: contract, value: U256::ZERO, input: calldata },
         )?;
 
-        let receipt = rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash)
-            .map_err(HeadlessError::ActivationFailed)?;
+        let receipt = rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash).map_err(|e| {
+            HeadlessError::ActivationFailed(format!("activate() tx {tx_hash}: {e}"))
+        })?;
         if !receipt.status {
             return Err(HeadlessError::ActivationFailed(format!(
                 "activate() reverted on-chain (tx {tx_hash})"
@@ -681,8 +713,17 @@ mod headless {
         let tx_hash =
             tx::send(&ctx.rpc_url, signer, &TxPlan { to: contract, value: price, input: calldata })?;
 
-        let receipt =
-            rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash).map_err(HeadlessError::ActivationFailed)?;
+        let receipt = rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash).map_err(|e| match e {
+            // The price has left the wallet if this lands later, so this is not
+            // the same failure as a reverted or unbroadcast purchase.
+            rpc::ReceiptWaitError::Timeout { after_secs } => HeadlessError::PurchaseUnconfirmed {
+                tx_hash: tx_hash.clone(),
+                after_secs,
+            },
+            rpc::ReceiptWaitError::Transport(m) => {
+                HeadlessError::ActivationFailed(format!("purchase() tx {tx_hash}: {m}"))
+            }
+        })?;
         if !receipt.status {
             return Err(HeadlessError::ActivationFailed(format!(
                 "purchase() reverted on-chain (tx {tx_hash})"
@@ -751,6 +792,13 @@ mod tests {
                 20,
             ),
             (HeadlessError::NoContract, 1),
+            (
+                HeadlessError::PurchaseUnconfirmed {
+                    tx_hash: "0xfeed".into(),
+                    after_secs: 30,
+                },
+                21,
+            ),
         ];
 
         for (err, expected) in cases {
@@ -774,6 +822,7 @@ mod tests {
             EXIT_HEADLESS_UNSUPPORTED,
             EXIT_CHAIN_MISMATCH,
             EXIT_TOKEN_NOT_OWNED,
+            EXIT_PURCHASE_UNCONFIRMED,
         ];
         let mut sorted = codes.to_vec();
         sorted.sort_unstable();
@@ -972,6 +1021,59 @@ mod tests {
             session_id: None,
             device_pubkey: None,
         }
+    }
+
+    /// A purchase that broadcast but did not confirm may already have spent the
+    /// price. It gets its own terminal code, and the detail line must carry the
+    /// hash, or an orchestrator cannot resolve the pending transaction before
+    /// deciding whether re-running is safe.
+    #[test]
+    fn unconfirmed_purchase_is_terminal_and_names_its_transaction() {
+        let err = HeadlessError::PurchaseUnconfirmed {
+            tx_hash: "0xabc123".into(),
+            after_secs: 30,
+        };
+        assert_eq!(err.exit_code(), EXIT_PURCHASE_UNCONFIRMED);
+        assert_ne!(
+            err.exit_code(),
+            EXIT_ACTIVATION_FAILED,
+            "the retryable code would send an orchestrator into a second purchase",
+        );
+        let detail = err.machine_detail().expect("must carry a detail line");
+        assert!(detail.contains("tx_hash=0xabc123"), "{detail}");
+        assert!(detail.contains("waited_secs=30"), "{detail}");
+        assert!(err.to_string().contains("0xabc123"), "{err}");
+    }
+
+    /// A session file whose signed `token_id` disagrees with the filename it
+    /// was loaded from must not satisfy a request for that filename's token.
+    #[test]
+    fn token_scoped_fast_path_rejects_a_session_for_another_token() {
+        let _guard = crate::session_store::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        let app_id = "com.rub3.test.mislabelled-session";
+        let signer = crate::signer::LocalSigner::from_hex(
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+        let wallet = signer.address();
+
+        // Signed for token 3, but written where token 7's session belongs.
+        let session = signed_session(app_id, 3, &signer, "2026-01-01T00:00:00+00:00");
+        let path = crate::session_store::session_path(app_id, 7).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string(&session).unwrap()).unwrap();
+
+        assert!(
+            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), Some(7)).is_none(),
+            "a session issued for token 3 must not stand in for token 7",
+        );
+
+        std::env::remove_var("RUB3_SESSION_DIR");
     }
 
     #[test]
