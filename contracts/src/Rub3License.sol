@@ -13,9 +13,12 @@ interface IRub3Predecessor {
     function ownerOf(uint256 tokenId) external view returns (address);
     function successor() external view returns (address);
 
-    /// Subscription terms a successor carries across in `_afterClaim`. Absent on
-    /// a predecessor that is not a subscription, which is what the
-    /// {Rub3Subscription} constructor probe detects.
+    /// The subscription slice, absent on a predecessor that is not a
+    /// subscription. `period()` is read only by the {Rub3Subscription}
+    /// constructor probe, as the discriminator between a subscription and an
+    /// access license; it is immutable per contract and never carries across a
+    /// claim. `expiresAt` / `renewPrice` are the per-token terms `_afterClaim`
+    /// actually carries.
     function period() external view returns (uint256);
     function expiresAt(uint256 tokenId) external view returns (uint256);
     function renewPrice(uint256 tokenId) external view returns (uint256);

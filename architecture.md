@@ -529,7 +529,7 @@ Covers contract bugs, paid major versions, and chain migration. Three hard guara
 
 The distinction matters because an agent can verify the first list before buying and can only trust the second.
 
-**Bytecode** - check these against the deployed runtime code. The 24 selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, and exactly the set the copy-pasteable loop in `contracts/contracts.md` scans for:
+**Bytecode** - check these against the deployed runtime code. The 25 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, and exactly the set the copy-pasteable loop in `contracts/contracts.md` scans for. (The rows also name `renewPrice(tokenId)` and `wrapperHashList()`, which are functions that *do* exist and are read as part of the check.)
 
 | Property | How an agent checks it |
 |---|---|

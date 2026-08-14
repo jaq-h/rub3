@@ -718,7 +718,7 @@ contract Rub3InvariantsTest is Test {
             address(_deploySuccessor(address(nft)))
         ];
 
-        string[24] memory forbidden = [
+        string[25] memory forbidden = [
             // Burn - nothing may destroy an issued token.
             "burn(uint256)",
             "burn(address,uint256)",
@@ -734,12 +734,16 @@ contract Rub3InvariantsTest is Test {
             "unpause()",
             "paused()",
             "setPaused(bool)",
-            // Direct invalidation of a token or its terms.
+            // Direct invalidation of a token or its terms. `period` is
+            // immutable per contract, which is what freezes the renewal term a
+            // held token buys; a setter for it would reprice that term for
+            // every existing holder at once.
             "revoke(uint256)",
             "revokeToken(uint256)",
             "invalidate(uint256)",
             "setExpiresAt(uint256,uint256)",
             "setRenewPrice(uint256,uint256)",
+            "setPeriod(uint256)",
             // Proxies / upgrade hooks - code is frozen at deploy.
             "upgradeTo(address)",
             "upgradeToAndCall(address,bytes)",
