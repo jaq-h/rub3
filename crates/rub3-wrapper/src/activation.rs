@@ -945,6 +945,7 @@ mod tests {
     /// make it parse, so it must not land on the retryable RPC code.
     #[test]
     fn malformed_contract_address_is_terminal() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ctx = HeadlessContext {
             // Unique per test run so no cached session can satisfy the fast
             // path before the address is parsed.
@@ -981,9 +982,7 @@ mod tests {
     /// when another token was activated more recently.
     #[test]
     fn explicit_token_reuses_its_own_session_when_another_is_newer() {
-        let _guard = crate::session_store::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 
@@ -1023,9 +1022,7 @@ mod tests {
     /// holds costs gas or a spurious cooldown back-off.
     #[test]
     fn each_wallet_reuses_its_own_session_when_another_key_activated_later() {
-        let _guard = crate::session_store::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 
@@ -1188,9 +1185,7 @@ mod tests {
     /// was loaded from must not satisfy a request for that filename's token.
     #[test]
     fn token_scoped_fast_path_rejects_a_session_for_another_token() {
-        let _guard = crate::session_store::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 

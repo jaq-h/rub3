@@ -25,6 +25,10 @@
 //!     input, so no key byte can land in a panic payload.
 //!   * The decoded key bytes and the keystore password are zeroized as soon as
 //!     they have been consumed.
+//!   * The wrapped binary does not inherit them either: `supervisor::spawn`
+//!     strips `RUB3_AGENT_KEY` and `RUB3_AGENT_KEYSTORE_PASSWORD` from the
+//!     child's environment before launching it, unconditionally. The licensed
+//!     product runs under the license, not under the wallet that paid for it.
 //!
 //! # Sources, in order of precedence
 //!
@@ -389,18 +393,18 @@ fn read_keystore_password() -> Result<String, SignerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     // Anvil account #0 - deterministic, documented, holds nothing real.
     const ANVIL_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     const ANVIL_ADDR: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
-    // These tests mutate process-wide env vars.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     /// Clears every signer env var so each test starts from a known state.
+    ///
+    /// Takes the crate-wide lock, not a local one: these tests share a binary
+    /// with every other test that reads the environment.
     fn env_guard() -> MutexGuard<'static, ()> {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for k in [
             ENV_AGENT_KEY,
             ENV_AGENT_KEYSTORE,
@@ -410,6 +414,21 @@ mod tests {
             std::env::remove_var(k);
         }
         guard
+    }
+
+    /// `supervisor` cannot name these constants (it is compiled into builds
+    /// with no `signer` module), so it repeats the strings. If they drift, the
+    /// wrapped binary silently regains the key.
+    #[test]
+    fn the_supervisor_strips_exactly_the_secret_bearing_env_vars() {
+        assert!(
+            crate::supervisor::STRIPPED_ENV.contains(&ENV_AGENT_KEY),
+            "the agent key must not reach the wrapped binary",
+        );
+        assert!(
+            crate::supervisor::STRIPPED_ENV.contains(&ENV_AGENT_KEYSTORE_PASSWORD),
+            "the keystore password must not reach the wrapped binary",
+        );
     }
 
     /// `Box<dyn Signer>` is deliberately not `Debug` - the trait must stay

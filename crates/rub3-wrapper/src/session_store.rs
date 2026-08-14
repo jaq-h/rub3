@@ -128,11 +128,6 @@ fn latest_session_where(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/// `RUB3_SESSION_DIR` is process-global, so every test that points it at a
-/// tmpdir has to take this first, including the ones in `activation`.
-#[cfg(test)]
-pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,7 +173,7 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 
@@ -195,7 +190,7 @@ mod tests {
 
     #[test]
     fn load_session_not_found() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 
@@ -207,7 +202,7 @@ mod tests {
 
     #[test]
     fn load_latest_returns_most_recent_valid() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 
@@ -225,7 +220,7 @@ mod tests {
 
     #[test]
     fn load_latest_not_found_when_all_expired() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 

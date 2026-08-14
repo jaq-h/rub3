@@ -197,6 +197,13 @@ rub3-wrapper --headless --token-id 3 --binary /path/to/your/app
 
 `--headless` requires a build with the `headless` feature; other builds exit 18.
 
+The wrapped binary never inherits the key. Before launching it the wrapper
+removes `RUB3_AGENT_KEY` and `RUB3_AGENT_KEYSTORE_PASSWORD` from the child's
+environment, so the licensed product (and anything it spawns) cannot read the
+agent key or the keystore password and spend from the wallet that paid for it.
+This is unconditional: there is no flag to pass them through, and it applies to
+every build, not only headless ones.
+
 ### Signer sources
 
 Highest precedence first. A malformed `RUB3_AGENT_KEY` is a hard error, never a
@@ -212,7 +219,9 @@ silent fall-through to a keystore.
 For KMS, HSM, or enclave-backed keys, implement the `Signer` trait and pass it
 to `activation::ensure_headless` directly. Its only primitive is "sign this
 32-byte digest", so no key material ever enters the wrapper's process. Exactly
-one type in the crate - `signer::LocalSigner` - holds a raw key at all.
+one type in the crate - `signer::LocalSigner` - holds a raw key at all, and
+neither the key nor the keystore password survives into the wrapped binary's
+environment.
 
 ### Exit codes
 

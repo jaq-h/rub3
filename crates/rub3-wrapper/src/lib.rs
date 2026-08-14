@@ -28,6 +28,16 @@ mod supervisor;
 #[cfg(feature = "webview")]
 mod webview;
 
+/// One process-wide guard for every unit test that touches process
+/// environment variables.
+///
+/// `std::env::set_var` mutates state shared by the whole test binary, and
+/// libtest runs tests on parallel threads, so a `setenv` racing a `getenv`
+/// elsewhere is a genuine data race. Modules must not keep their own locks:
+/// two lock domains do not exclude each other, which is the race in a costume.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub use activation::{ensure, ActivationError};
 pub use supervisor::run as supervisor_run;
 

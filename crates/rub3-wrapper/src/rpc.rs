@@ -304,9 +304,18 @@ pub enum ReceiptWaitError {
     Transport { after_secs: u64, message: String },
 }
 
+// `after_secs` on both variants is wall-clock time actually spent waiting, not
+// the nominal budget: it is what an operator reads off the exit-21 detail line
+// to reconstruct how long a committed purchase went unresolved, and a dead
+// endpoint that blocks on every call can burn far more than the budget.
+
 #[cfg(any(feature = "onchain-write", feature = "cooldown"))]
 impl ReceiptWaitError {
-    /// The wait budget that elapsed before giving up, in seconds.
+    /// Wall-clock seconds actually spent waiting before giving up.
+    ///
+    /// Measured, not derived from `attempts * interval`: the loop sleeps only
+    /// between attempts, and a slow endpoint can make each attempt cost far
+    /// more than the interval.
     pub fn after_secs(&self) -> u64 {
         match self {
             ReceiptWaitError::Timeout { after_secs }
@@ -371,6 +380,7 @@ fn poll_for_receipt<F>(
 where
     F: FnMut() -> Result<Option<TxReceipt>, RpcError>,
 {
+    let started = std::time::Instant::now();
     let mut last_transport_error: Option<String> = None;
     for attempt in 0..attempts {
         match poll() {
@@ -384,7 +394,7 @@ where
             std::thread::sleep(interval);
         }
     }
-    let after_secs = attempts as u64 * interval.as_secs();
+    let after_secs = started.elapsed().as_secs();
     match last_transport_error {
         Some(message) => Err(ReceiptWaitError::Transport { after_secs, message }),
         None => Err(ReceiptWaitError::Timeout { after_secs }),
@@ -788,17 +798,30 @@ mod tests {
 
         /// Both outcomes report the budget they consumed, so a caller can say
         /// how long it waited regardless of which one it got.
+        /// `waited_secs` on the exit-21 detail line is how an operator sizes
+        /// up an unresolved purchase, so it has to be the time really spent,
+        /// not `attempts * interval`. Both directions are wrong under the
+        /// nominal figure: the loop sleeps one interval fewer than it has,
+        /// and a slow endpoint can outrun the whole budget in one attempt.
         #[test]
-        fn both_outcomes_report_the_elapsed_budget() {
-            // One attempt, so the budget is reported without any sleeping.
-            let budget = Duration::from_secs(30);
-            let timeout = poll_for_receipt(|| Ok(None), 1, budget).expect_err("never mined");
-            assert_eq!(timeout.after_secs(), 30);
+        fn both_outcomes_report_wall_clock_time_not_the_nominal_budget() {
+            let slow = || {
+                std::thread::sleep(Duration::from_millis(1_100));
+                Ok(None)
+            };
+            // Nominal budget 1 x 3600s; one attempt that really takes ~1.1s.
+            let timeout = poll_for_receipt(slow, 1, Duration::from_secs(3600))
+                .expect_err("never mined");
+            assert_eq!(timeout.after_secs(), 1, "reported the budget, not the wait");
 
-            let transport =
-                poll_for_receipt(|| Err(RpcError::Transport("offline".into())), 1, budget)
-                    .expect_err("never answered");
-            assert_eq!(transport.after_secs(), 30);
+            let slow_and_broken = || {
+                std::thread::sleep(Duration::from_millis(1_100));
+                Err(RpcError::Transport("offline".into()))
+            };
+            // Nominal budget 0s; the endpoint still burned ~1.1s answering.
+            let transport = poll_for_receipt(slow_and_broken, 1, Duration::ZERO)
+                .expect_err("never answered");
+            assert_eq!(transport.after_secs(), 1, "a dead endpoint reported no wait at all");
         }
     }
 }
