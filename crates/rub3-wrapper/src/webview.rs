@@ -198,6 +198,11 @@ struct IpcState {
     chain_id: u64,
     rpc_url: String,
     developer_ens: Option<String>,
+    // Only the cooldown-gated activate() poller builds a session draft, so
+    // without that feature nothing reads the TTL. Kept unconditionally so the
+    // field does not have to be cfg'd back out through every caller of
+    // `interactive_slow_path`.
+    #[cfg_attr(not(feature = "cooldown"), allow(dead_code))]
     session_ttl_secs: i64,
     cmd_tx: mpsc::Sender<Cmd>,
     result_tx: mpsc::Sender<ActivationResult>,

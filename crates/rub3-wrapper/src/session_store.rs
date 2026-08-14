@@ -112,7 +112,7 @@ fn latest_session_where(
 
     let mut sessions: Vec<Session> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
         .filter_map(|s| serde_json::from_str::<Session>(&s).ok())
         .filter(|s| !is_expired(s) && verify_local(s).is_ok())

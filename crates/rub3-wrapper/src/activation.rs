@@ -755,8 +755,8 @@ mod headless {
     /// Buys a token for `wallet` and returns `(token_id, price_wei)`.
     ///
     /// Mirrors the interactive purchase flow (§1.7) exactly - same supply
-    /// check, same calldata, same `Transfer` log parse to recover the minted id
-    /// - with the broadcast done by the signer instead of a human's wallet.
+    /// check, same calldata, same `Transfer` log parse to recover the minted
+    /// id - with the broadcast done by the signer instead of a human's wallet.
     fn purchase(
         signer: &dyn Signer,
         ctx: &HeadlessContext,

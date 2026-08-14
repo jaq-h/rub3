@@ -1,3 +1,8 @@
+// Shared by several integration test binaries via `mod helpers;`. Each one
+// compiles the whole module but uses only part of it, so anything not needed by
+// the binary currently being built is legitimately dead within that unit.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 
 use k256::ecdsa::{SigningKey, VerifyingKey};

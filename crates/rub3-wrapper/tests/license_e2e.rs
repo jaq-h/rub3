@@ -10,8 +10,7 @@ const TOKEN_ID: u64 = 1;
 
 // Deterministic test keypair (32 bytes, hex-encoded).
 // This is a throwaway key used only for testing — it holds no value.
-const STATIC_PRIVKEY_HEX: &str =
-    "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const STATIC_PRIVKEY_HEX: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 fn static_signing_key() -> SigningKey {
     let bytes = hex::decode(STATIC_PRIVKEY_HEX).unwrap();
@@ -177,5 +176,8 @@ fn wrapper_forwards_sigterm() {
     signal::kill(pid, Signal::SIGTERM).expect("failed to send SIGTERM");
 
     let status = child.wait().unwrap();
-    assert!(!status.success(), "wrapper should exit non-zero after SIGTERM");
+    assert!(
+        !status.success(),
+        "wrapper should exit non-zero after SIGTERM"
+    );
 }

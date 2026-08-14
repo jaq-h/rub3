@@ -407,7 +407,7 @@ without `activate()` + cooldown + purchase), so `--features headless` and
 - All five tier bundles (`tier-0`/`1`/`2`/`3`/`4`) compile clean, plus `headless` alone, `tier-3,headless` and `tier-2,webview`. CI's matrix covers both front doors: `tier-3,headless` and `tier-2,webview` are blocking jobs, so neither door can break green
 - **No GUI in a headless build**: `cargo tree --no-default-features --features tier-3,headless` contains neither `wry` nor `tao`, nor any of the 20 GUI crates the webview build pulls (`cocoa`, `core-graphics`, `objc`, `dpi`, `raw-window-handle`, …). On macOS the release binary links no WebKit, AppKit, QuartzCore, or `libobjc` - only `Security`, `CoreFoundation`, `libiconv`, `libSystem`
 - Anvil-gated headless e2e: 7 pass, run without `--test-threads=1`, and now run in CI as a second step of the existing `onchain-e2e` job. Existing `session_verify_onchain_e2e` still passes untouched
-- No new clippy warnings in any changed or added file
+- `cargo clippy -p rub3-wrapper --all-targets -- -D warnings`: exit 0 under the default bundle and under `tier-0`/`1`/`2`/`3`/`4`, `tier-3,binary-encryption`, `tier-2,webview` and `tier-3,headless`. The six warnings `main` carried are fixed at the root, so CI's lint job now runs clippy as a blocking gate. `cargo fmt --all -- --check` is clean on every file except `tests/session_onchain_e2e.rs`, which §2.4 owns and is reformatting, so that step stays advisory until §2.4 lands
 
 **Deferred to §2.2**
 - USDC via EIP-3009. The headless purchase path is ETH-only today; §2.2 adds `purchaseWithAuthorization` and has headless prefer it when the contract advertises it

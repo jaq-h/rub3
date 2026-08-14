@@ -86,12 +86,15 @@ mod libc_signal {
 
     pub unsafe fn register<F: Fn() + Send + 'static>(signum: i32, f: F) {
         HANDLER = Some(Box::new(f));
-        libc::signal(signum, trampoline as libc::sighandler_t);
+        libc::signal(
+            signum,
+            trampoline as extern "C" fn(i32) as libc::sighandler_t,
+        );
     }
 
     extern "C" fn trampoline(_: i32) {
         unsafe {
-            if let Some(h) = (*(&raw const HANDLER)).as_ref() {
+            if let Some(h) = (&raw const HANDLER).as_ref().and_then(|h| h.as_ref()) {
                 h();
             }
         }

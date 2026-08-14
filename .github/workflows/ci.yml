@@ -77,46 +77,53 @@ jobs:
         run: cargo test -p rub3-wrapper --no-default-features --features ${{ matrix.features }}
 
   # ---------------------------------------------------------------------------
-  # Formatting and lint. NON-BLOCKING on purpose: both fail on main today, so
-  # gating on them would block every unrelated PR.
+  # Formatting and lint. Clippy is now a REAL GATE; fmt is still advisory.
   #
-  # Measured on this branch. Every file this branch touched is now rustfmt-clean;
-  # the drift that remains predates it (main was at 112 hunks across 11 files on
-  # fee0124) and its cleanup is deferred, see below. Clippy is unchanged - no
-  # warning comes from new or changed code:
+  # Measured on this branch at the commit that made clippy clean:
   #
-  #   cargo fmt --all -- --check                 exit 1, 29 diff hunks across 5
-  #                                              files, none of them touched by
-  #                                              this branch: identity.rs,
-  #                                              license.rs, tests/integration.rs,
-  #                                              tests/license_e2e.rs,
-  #                                              tests/session_onchain_e2e.rs
-  #                                              (hand-aligned struct literals
-  #                                              and match arms that rustfmt
-  #                                              wants to collapse)
+  #   cargo clippy -p rub3-wrapper                exit 0, no warnings, under the
+  #     --all-targets -- -D warnings              default bundle and under
+  #                                               tier-0/1/2/3/4,
+  #                                               tier-3,binary-encryption,
+  #                                               tier-2,webview and
+  #                                               tier-3,headless.
+  #                                               The 6 warnings main carried are
+  #                                               fixed at the root: the
+  #                                               conditionally-dead IpcState TTL
+  #                                               field, map_or -> is_some_and,
+  #                                               deref_addrof and the function
+  #                                               item cast in supervisor's
+  #                                               signal trampoline, the shared
+  #                                               tests/helpers module that each
+  #                                               test binary only partly uses,
+  #                                               and the ten-field session
+  #                                               preimage builder (allowed with
+  #                                               a stated reason - one parameter
+  #                                               per hashed field is the point).
   #
-  #   cargo clippy --all-targets -- -D warnings  exit 101, 6 warnings, the same
-  #                                              6 main already had:
-  #                                                too_many_arguments (10/7)
-  #                                                map_or can be simplified
-  #                                                immediately dereferencing a ref
-  #                                                function item cast to integer
-  #                                                unread field session_ttl_secs
-  #                                                unused fn generate_wallet
+  #   cargo fmt --all -- --check                  exit 1, 11 diff hunks in a
+  #                                               single file:
+  #                                               tests/session_onchain_e2e.rs
+  #                                               (hand-aligned argument lists
+  #                                               rustfmt wants to explode one
+  #                                               per line). Every other file in
+  #                                               the workspace is rustfmt-clean.
   #
-  # Cleanup is deliberately deferred to its own task (rub3-fmt-clippy): a
-  # whole-repo reformat would conflict with every branch currently open against
-  # crates/rub3-wrapper/. When that task lands, delete the `continue-on-error`
-  # below and these become real gates.
+  # That last file is owned by the concurrent section-2.4 branch, which is
+  # rewriting its constructor-argument list - exactly the region rustfmt would
+  # reflow. Formatting it here would hand that branch a pointless conflict, so
+  # the fmt step stays `continue-on-error` until 2.4 lands and its owner runs
+  # rustfmt over it. At that point drop the `continue-on-error` below and fmt
+  # becomes a real gate too.
   #
-  # clippy runs with `-D warnings` on purpose: plain `cargo clippy` exits 0 even
-  # when it emits warnings, so a permissive clippy job would sit green forever
-  # and prove nothing.
+  # The fmt failure is scoped to the STEP, not the job, so clippy regressions now
+  # turn this check red. clippy runs with `-D warnings` on purpose: plain
+  # `cargo clippy` exits 0 even when it emits warnings, so a permissive clippy
+  # job would sit green forever and prove nothing.
   # ---------------------------------------------------------------------------
   lint:
-    name: lint (non-blocking, failing on main today)
+    name: lint (clippy blocking, fmt advisory)
     runs-on: macos-15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -124,10 +131,13 @@ jobs:
         with:
           key: lint
 
-      - name: cargo fmt --check
+      # Advisory: one pre-existing file is deliberately left unformatted, see
+      # above. The log still shows the drift.
+      - name: cargo fmt --check (advisory)
+        continue-on-error: true
         run: cargo fmt --all -- --check
 
-      # always() so a fmt failure does not hide the clippy result.
+      # always() so the advisory fmt step never short-circuits the real gate.
       - name: cargo clippy
         if: always()
         run: cargo clippy -p rub3-wrapper --all-targets -- -D warnings

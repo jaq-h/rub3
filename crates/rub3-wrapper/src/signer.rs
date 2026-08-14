@@ -340,8 +340,8 @@ fn address_of(key: &SigningKey) -> Address {
 /// Resolves a signer from the environment, in the documented precedence order:
 /// `RUB3_AGENT_KEY`, then an encrypted keystore file.
 ///
-/// Precedence is strict: when `RUB3_AGENT_KEY` is set, a keystore is never read
-/// - even if the key turns out to be malformed. An operator who sets both
+/// Precedence is strict: when `RUB3_AGENT_KEY` is set, a keystore is never
+/// read - even if the key turns out to be malformed. An operator who sets both
 /// should get a hard error about the one they set most recently, not a silent
 /// fall-through to the other identity.
 ///

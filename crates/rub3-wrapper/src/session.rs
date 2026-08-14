@@ -150,6 +150,11 @@ impl std::fmt::Display for VerifyError {
 ///   1-2: app_id, token_id, identity, user_id, wallet, nonce, expires_at
 ///   3:   + activation_block_hash, session_id
 ///   4:   + device_pubkey (expires_at is None for tier 4)
+//
+// One parameter per preimage field is the point: the hash commits to each one
+// individually, and the tier mapping above is the signature. Bundling them into
+// a struct would only move the same ten fields behind another name.
+#[allow(clippy::too_many_arguments)]
 pub fn session_message(
     app_id: &str,
     token_id: u64,
