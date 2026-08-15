@@ -9,6 +9,11 @@
 # agent will later compare an on-chain contract against, so it must not move
 # unless the contracts really changed.
 #
+# It is NOT sha256(eth_getCode(addr)). A live deploy returns those immutable
+# slots filled with the constructor's values, so a comparator MUST first zero
+# every byte range the manifest publishes as `immutable_ranges` before hashing.
+# This script publishes those ranges; it deliberately implements no comparison.
+#
 # Usage, from anywhere in the repo:
 #   scripts/canonical-bytecode-hashes.sh check    # compare against the manifest (default)
 #   scripts/canonical-bytecode-hashes.sh update   # rewrite the manifest from the current build
@@ -39,11 +44,16 @@ cd "$contracts_dir"
 # because `forge build` honours whatever the active profile or a FOUNDRY_*
 # override selects. Reading them anywhere else would let this script hash
 # artifacts from a build it did not perform.
-foundry_src="$(forge config --json | jq -er '.src')" || {
+foundry_config="$(forge config --json)" || {
+  echo "error: 'forge config --json' failed, so the source and artifact directories" >&2
+  echo "       behind this build cannot be resolved." >&2
+  exit 1
+}
+foundry_src="$(jq -er '.src' <<<"$foundry_config")" || {
   echo "error: could not read the source directory from 'forge config --json'." >&2
   exit 1
 }
-foundry_out="$(forge config --json | jq -er '.out')" || {
+foundry_out="$(jq -er '.out' <<<"$foundry_config")" || {
   echo "error: could not read the artifact directory from 'forge config --json'." >&2
   exit 1
 }
@@ -89,6 +99,34 @@ MSG
     return 1
   fi
   printf '%s' "${object#0x}" | xxd -r -p | shasum -a 256 | cut -d' ' -f1
+}
+
+# The byte ranges solc reserved for this contract's immutables, flattened out of
+# .deployedBytecode.immutableReferences and sorted. They are published so that a
+# third party comparing a live deploy can zero exactly these bytes of
+# eth_getCode(addr) before hashing; without them the published fingerprint can
+# never be reproduced from chain data, because a real deploy carries the
+# constructor's values in these slots while deployedBytecode.object has them
+# zeroed. The AST-node keys solc groups them under are dropped: they are compiler
+# internals with no meaning outside this artifact, and a masker needs the ranges
+# themselves. Validated against the object's own length so a malformed or
+# out-of-bounds range is a hard failure rather than a published lie.
+immutable_ranges_of() {
+  local name="$1" source="$2" artifact object size
+  artifact="$(artifact_of "$name" "$source")"
+  object="$(jq -r '.deployedBytecode.object // ""' "$artifact")"
+  size=$(( (${#object} - 2) / 2 ))
+  jq -e --argjson size "$size" '
+    (.deployedBytecode.immutableReferences // {})
+    | if type != "object" then error("immutableReferences is not an object") else . end
+    | [ .[] | if type != "array" then error("immutableReferences entry is not an array") else .[] end ]
+    | map(
+        if (.start | type) != "number" or (.length | type) != "number"
+           or (.start | floor) != .start or (.length | floor) != .length
+           or .start < 0 or .length <= 0 or (.start + .length) > $size
+        then error("immutable range outside the deployed bytecode")
+        else {start: .start, length: .length} end)
+    | sort_by(.start, .length)' "$artifact" 2>/dev/null
 }
 
 # The deployable set is every concrete contract under src/, at any depth.
@@ -144,13 +182,24 @@ fi
 names=()
 sources=()
 hashes=()
+ranges=()
 for entry in "${entries[@]}"; do
   name="${entry%%$'\t'*}"
   source="${entry#*$'\t'}"
   hash="$(hash_of "$name" "$source")" || exit 1
+  range="$(immutable_ranges_of "$name" "$source")" || {
+    echo "error: contracts/$(artifact_of "$name" "$source") has a" >&2
+    echo "       .deployedBytecode.immutableReferences block that is missing, malformed, or" >&2
+    echo "       names a byte range outside the deployed bytecode, so the immutable slots a" >&2
+    echo "       comparator must zero before hashing an on-chain deploy cannot be published." >&2
+    echo "       A contract with no immutables yields an empty object here, which is fine;" >&2
+    echo "       anything else means forge is not emitting usable artifact output." >&2
+    exit 1
+  }
   names+=("$name")
   sources+=("$source")
   hashes+=("$hash")
+  ranges+=("$range")
 done
 
 # Build settings are read out of the emitted artifacts' own solc metadata, not
@@ -391,13 +440,14 @@ generated="$(
     --argjson contracts "$(
       for i in "${!names[@]}"; do
         jq -n --arg n "${names[$i]}" --arg s "${sources[$i]}" --arg h "${hashes[$i]}" \
-          '{key: $n, value: {source: $s, deployed_bytecode_sha256: $h}}'
+          --argjson r "${ranges[$i]}" \
+          '{key: $n, value: {source: $s, deployed_bytecode_sha256: $h, immutable_ranges: $r}}'
       done | jq -s 'from_entries'
     )" \
     '{
       schema: 1,
       algorithm: "sha256(deployedBytecode.object)",
-      note: "Regenerate with scripts/canonical-bytecode-hashes.sh update. See contracts/contracts.md -> Reproducible builds.",
+      note: "Regenerate with scripts/canonical-bytecode-hashes.sh update. deployed_bytecode_sha256 covers deployedBytecode.object, which has every immutable slot zeroed. A live deploy carries the constructor values in those slots, so zero the byte ranges listed in immutable_ranges (start and length, in bytes, into the runtime code) before hashing eth_getCode(addr) and comparing. See contracts/contracts.md -> Reproducible builds.",
       build: ($build + {dependencies: $deps}),
       contracts: $contracts
     }'

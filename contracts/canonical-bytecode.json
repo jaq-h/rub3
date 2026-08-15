@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256(deployedBytecode.object)",
-  "note": "Regenerate with scripts/canonical-bytecode-hashes.sh update. See contracts/contracts.md -> Reproducible builds.",
+  "note": "Regenerate with scripts/canonical-bytecode-hashes.sh update. deployed_bytecode_sha256 covers deployedBytecode.object, which has every immutable slot zeroed. A live deploy carries the constructor values in those slots, so zero the byte ranges listed in immutable_ranges (start and length, in bytes, into the runtime code) before hashing eth_getCode(addr) and comparing. See contracts/contracts.md -> Reproducible builds.",
   "build": {
     "solc_settings": {
       "evmVersion": "cancun",
@@ -23,11 +23,135 @@
   "contracts": {
     "Rub3Access": {
       "source": "src/Rub3Access.sol",
-      "deployed_bytecode_sha256": "57ef9e36db4238988a9015f2478146e9b1ceccca8ccee7837170a221dd9ac3ce"
+      "deployed_bytecode_sha256": "57ef9e36db4238988a9015f2478146e9b1ceccca8ccee7837170a221dd9ac3ce",
+      "immutable_ranges": [
+        {
+          "start": 916,
+          "length": 32
+        },
+        {
+          "start": 1257,
+          "length": 32
+        },
+        {
+          "start": 1645,
+          "length": 32
+        },
+        {
+          "start": 1793,
+          "length": 32
+        },
+        {
+          "start": 2074,
+          "length": 32
+        },
+        {
+          "start": 4050,
+          "length": 32
+        },
+        {
+          "start": 4691,
+          "length": 32
+        },
+        {
+          "start": 4748,
+          "length": 32
+        },
+        {
+          "start": 4921,
+          "length": 32
+        },
+        {
+          "start": 4965,
+          "length": 32
+        },
+        {
+          "start": 5440,
+          "length": 32
+        },
+        {
+          "start": 6091,
+          "length": 32
+        },
+        {
+          "start": 6133,
+          "length": 32
+        }
+      ]
     },
     "Rub3Subscription": {
       "source": "src/Rub3Subscription.sol",
-      "deployed_bytecode_sha256": "7c0284b465647e3862c079b55b0452e90bb4cdd88cacc2b5bc7d9f0b2bc4a028"
+      "deployed_bytecode_sha256": "7c0284b465647e3862c079b55b0452e90bb4cdd88cacc2b5bc7d9f0b2bc4a028",
+      "immutable_ranges": [
+        {
+          "start": 1046,
+          "length": 32
+        },
+        {
+          "start": 1430,
+          "length": 32
+        },
+        {
+          "start": 1880,
+          "length": 32
+        },
+        {
+          "start": 2028,
+          "length": 32
+        },
+        {
+          "start": 2309,
+          "length": 32
+        },
+        {
+          "start": 2601,
+          "length": 32
+        },
+        {
+          "start": 3718,
+          "length": 32
+        },
+        {
+          "start": 4385,
+          "length": 32
+        },
+        {
+          "start": 4708,
+          "length": 32
+        },
+        {
+          "start": 5348,
+          "length": 32
+        },
+        {
+          "start": 5405,
+          "length": 32
+        },
+        {
+          "start": 5578,
+          "length": 32
+        },
+        {
+          "start": 5622,
+          "length": 32
+        },
+        {
+          "start": 6097,
+          "length": 32
+        },
+        {
+          "start": 6442,
+          "length": 32
+        },
+        {
+          "start": 6484,
+          "length": 32
+        },
+        {
+          "start": 6893,
+          "length": 32
+        }
+      ]
     }
   }
 }

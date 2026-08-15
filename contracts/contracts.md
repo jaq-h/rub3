@@ -235,6 +235,30 @@ It spans exactly one hop, by construction: each contract compares the address yo
 
 The canonical fingerprint of a rub3 contract is the `sha256` of the compiler's `deployedBytecode.object`: the runtime code with every immutable slot left zeroed. Because the immutables are zeroed, the fingerprint is a function of the contract's compiled semantics alone, not of the constructor arguments a particular deploy chose - two deploys of the same code with different `supplyCap` share it. That is the number a buyer's agent compares an on-chain contract against, so it has to be reproducible by somebody who is not the deployer.
 
+### Read this first: the fingerprint is not `sha256(eth_getCode(addr))`
+
+**Any comparator checking a live deploy MUST zero the immutable byte ranges of the code it fetched before hashing it.** `eth_getCode(addr)` returns the runtime code with every immutable slot filled in with the value that deploy's constructor supplied, while `deployedBytecode.object` has those same slots zeroed. Hashing what the chain returns therefore never equals a published fingerprint, on any real deploy, no matter how correct the build is. This is a property of Solidity immutables, not a defect in the contracts or in the manifest.
+
+The ranges to zero are published per contract, so nobody has to derive them:
+
+```bash
+jq '.contracts.Rub3Access.immutable_ranges' contracts/canonical-bytecode.json
+```
+
+Each entry is a `{"start": <byte offset into the runtime code>, "length": <bytes>}` pair, flattened out of solc's `deployedBytecode.immutableReferences` and sorted by offset. Every slot is 32 bytes wide, one EVM word. The comparison a buyer's agent performs is therefore three steps, in this order:
+
+1. `code = eth_getCode(addr)`, stripped of its `0x` prefix and decoded to bytes.
+2. For each published range, overwrite `code[start : start + length]` with zero bytes.
+3. `sha256(code)` and compare against `deployed_bytecode_sha256`.
+
+Step 2 is not optional and it is not a refinement. Skipping it fails 100% of the time.
+
+Measured on this branch, `Rub3Access` declares five immutables (`identityModel`, `tbaImplementation`, `supplyCap`, `predecessor`, `cooldownBlocks`) inherited from `Rub3License`, and `Rub3Subscription` declares those five plus its own `period`, six in total. Because a single immutable is read at several places in the runtime code, the slot count is higher than the variable count: `Rub3Access` carries 13 ranges (416 bytes) and `Rub3Subscription` 17 (544 bytes). Those numbers move whenever the code that reads an immutable moves, which is also whenever the fingerprint moves, so the manifest records both together and the drift gate compares both.
+
+Zeroing an immutable range destroys the constructor argument it held, which is the point: the fingerprint answers "is this the code I expect", not "was this deployed with the terms I expect". Read the terms separately from the contract's own getters (`supplyCap()`, `period()`, `predecessor()`, and the rest), which is where they are authoritative anyway.
+
+Nothing in this repository performs that comparison today. This section, and the ranges in the manifest, exist so that the follow-on work implementing it has an unambiguous contract to implement against.
+
 ### The reproducibility contract
 
 To arrive at the same fingerprint from a checkout of this repository at a given commit, a third party must match all of these. They are all pinned in-tree, so "match" means "do not override them".
@@ -290,7 +314,7 @@ scripts/canonical-bytecode-hashes.sh print
 
 ### The expected values, and the drift gate
 
-The current fingerprints live in [`canonical-bytecode.json`](canonical-bytecode.json), alongside the build inputs they were produced under. Those inputs are read back out of the emitted artifacts' own solc `metadata` blocks rather than out of `foundry.toml` text, so they describe the build that actually produced the hashes: a `[profile.*]` selection or a `FOUNDRY_*` environment override cannot record one set of inputs next to hashes compiled under another. The `bytecode_hash = "none"` guard is driven off that same artifact metadata for the same reason. Because the manifest publishes a single build block covering every fingerprint, the gate reads the compiler version and settings from every discovered contract's artifact and fails, naming both contracts and the field, if any two disagree; one set of build inputs has to hold for the whole of `contracts/src/`. It is JSON because it is consumed by machines as much as by people: the CI gate diffs against it, and the wrapper will later compile the same table into the binary, so a `serde`-shaped file beats a prose table or a bare checksum list.
+The current fingerprints live in [`canonical-bytecode.json`](canonical-bytecode.json), alongside the build inputs they were produced under. Those inputs are read back out of the emitted artifacts' own solc `metadata` blocks rather than out of `foundry.toml` text, so they describe the build that actually produced the hashes: a `[profile.*]` selection or a `FOUNDRY_*` environment override cannot record one set of inputs next to hashes compiled under another. The `bytecode_hash = "none"` guard is driven off that same artifact metadata for the same reason. Because the manifest publishes a single build block covering every fingerprint, the gate reads the compiler version and settings from every discovered contract's artifact and fails, naming both contracts and the field, if any two disagree; one set of build inputs has to hold for the whole of `contracts/src/`. It is JSON because it is consumed by machines as much as by people: the CI gate diffs against it, and the wrapper will later compile the same table into the binary, so a `serde`-shaped file beats a prose table or a bare checksum list. Each contract entry carries its `immutable_ranges` alongside its hash for the same reason: a consumer needs both to compare anything against a live deploy, and the gate diffs the whole manifest, so a change in the immutable layout is drift like any other rather than something the check silently ignores. The AST-node keys solc groups those ranges under are dropped, because they are compiler internals with no meaning outside one artifact and a masker needs only the offsets.
 
 CI runs `scripts/canonical-bytecode-hashes.sh check` as a **blocking** job (`.github/workflows/ci.yml` -> `bytecode-fingerprints`). It rebuilds from scratch and fails if any fingerprint, or any pinned build input, differs from the manifest. When a contract change is intended, regenerate and commit the manifest in the same pull request:
 

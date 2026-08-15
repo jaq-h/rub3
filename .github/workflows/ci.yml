@@ -172,6 +172,13 @@ jobs:
   # on-chain contract against exactly this number, so it must never move without
   # somebody noticing.
   #
+  # It is NOT sha256(eth_getCode(addr)). A live deploy returns those slots filled
+  # with its constructor's values, so a comparator MUST first zero every range
+  # published as `immutable_ranges` in contracts/canonical-bytecode.json before
+  # hashing; without that step the comparison fails on every real deploy. This
+  # job publishes and pins those ranges. It implements no comparison, and neither
+  # does the wrapper yet - see contracts/contracts.md -> "Read this first".
+  #
   # contracts/foundry.toml sets bytecode_hash = "none" to make that possible.
   # Measured on this branch, with the default ("ipfs") and without it:
   #
