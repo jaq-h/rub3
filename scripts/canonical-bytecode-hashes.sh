@@ -145,12 +145,16 @@ if [ "$mode" = "print" ]; then
   exit 0
 fi
 
-# Build settings are read out of an emitted artifact's own solc metadata, not
+# Build settings are read out of the emitted artifacts' own solc metadata, not
 # out of foundry.toml text, so the recorded inputs describe the build that
 # actually produced these hashes. A `[profile.*]` selection or a FOUNDRY_* env
-# override changes the artifact too, and is therefore visible here.
-ref_artifact="$(artifact_of "${names[0]}" "${sources[0]}")"
-build_settings="$(
+# override changes the artifacts too, and is therefore visible here. The manifest
+# records one build block for all contracts, so every artifact has to agree on
+# it: solc resolves a compiler per pragma when solc_version is unpinned, and
+# per-path compilation restrictions can settle a sibling contract differently.
+settings_of() {
+  local name="$1" source="$2" artifact
+  artifact="$(artifact_of "$name" "$source")"
   jq -e '{
     solc_version: .metadata.compiler.version,
     optimizer: .metadata.settings.optimizer.enabled,
@@ -158,13 +162,53 @@ build_settings="$(
     evm_version: .metadata.settings.evmVersion,
     bytecode_hash: .metadata.settings.metadata.bytecodeHash
   } | if any(.[]; . == null) then error("missing build settings") else . end' \
-    "$ref_artifact"
-)" || {
-  echo "error: contracts/$ref_artifact carries no complete solc .metadata block, so the" >&2
-  echo "       build inputs behind these fingerprints cannot be recorded. Ensure forge" >&2
-  echo "       is emitting artifact metadata (do not disable it in foundry.toml)." >&2
-  exit 1
+    "$artifact" 2>/dev/null
 }
+
+build_settings=""
+ref_name=""
+for i in "${!names[@]}"; do
+  settings="$(settings_of "${names[$i]}" "${sources[$i]}")" || {
+    echo "error: contracts/$(artifact_of "${names[$i]}" "${sources[$i]}") carries no complete solc" >&2
+    echo "       .metadata block, so the build inputs behind ${names[$i]}'s fingerprint cannot be" >&2
+    echo "       recorded. Ensure forge is emitting artifact metadata (do not disable it in" >&2
+    echo "       contracts/foundry.toml)." >&2
+    exit 1
+  }
+  if [ -z "$build_settings" ]; then
+    build_settings="$settings"
+    ref_name="${names[$i]}"
+    continue
+  fi
+  differing="$(
+    jq -n --argjson ref "$build_settings" --argjson other "$settings" \
+      '[ $ref | keys[] | select($ref[.] != $other[.]) | {field: ., ref: $ref[.], other: $other[.]} ]'
+  )"
+  if [ "$(printf '%s' "$differing" | jq 'length')" -ne 0 ]; then
+    {
+      echo "error: ${names[$i]} was compiled under different build inputs than $ref_name:"
+      echo
+      printf '%s' "$differing" | jq -r --arg ref "$ref_name" --arg other "${names[$i]}" '.[] |
+        "    \(.field)\n      \($ref): \(.ref | tostring)\n      \($other): \(.other | tostring)"'
+      cat <<'MSG'
+
+The manifest records a single build block for every fingerprint it publishes, so
+a third party following it would reproduce one of these contracts under inputs
+that never applied to it. This happens when solc_version is unpinned, so solc
+resolves a compiler per pragma, or when per-path compilation restrictions settle
+part of contracts/src differently.
+
+Give the whole of contracts/src one set of build inputs, then run
+
+    scripts/canonical-bytecode-hashes.sh update
+
+and commit the updated contracts/canonical-bytecode.json in the same pull
+request.
+MSG
+    } >&2
+    exit 1
+  fi
+done
 
 bch="$(printf '%s' "$build_settings" | jq -r '.bytecode_hash')"
 if [ "$bch" != "none" ]; then
@@ -188,8 +232,13 @@ cannot be recorded. It is checked in; restore it with
 
     git checkout -- contracts/foundry.lock
 
-The same two revisions are also readable from the submodule gitlinks, which are
-the git-authoritative record:
+`forge build` never writes the lock, but `forge install` does write it when it is
+absent, so this also rebuilds it from the checked-out submodules:
+
+    (cd contracts && forge install)
+
+The same revisions are readable from the submodule gitlinks, which are the
+git-authoritative record:
 
     git ls-tree HEAD contracts/lib/
 MSG
@@ -206,9 +255,11 @@ if [ -n "$missing_revs" ]; then
 
 Every dependency revision is a build input behind the recorded fingerprints, so
 the manifest cannot record a null for one. This usually means forge changed the
-lock file's schema; regenerate it with
+lock file's schema. `forge build` never writes the lock, and `forge install`
+writes it only when it is absent, so regenerate it from the checked-out
+submodules by removing it first:
 
-    cd contracts && forge build
+    rm contracts/foundry.lock && (cd contracts && forge install)
 
 If the regenerated lock still has no rev for those keys, read the revisions off
 the submodule gitlinks instead:
@@ -267,9 +318,12 @@ contracts/contracts.md publishes both records as pinning the same revisions. If
 they disagree, that published reproducibility claim is false, so this gate is red
 on purpose. Reconcile them in this pull request, whichever record is right:
 
-  - if the submodule gitlinks are right, regenerate the lock from the
-    checked-out submodules with `cd contracts && forge build`, then commit
-    contracts/foundry.lock
+  - if the submodule gitlinks are right, check the submodules out at them and
+    rebuild the lock from what is on disk. `forge build` never writes the lock,
+    and `forge install` writes it only when it is absent, so remove it first:
+        git submodule update --init --recursive
+        rm contracts/foundry.lock && (cd contracts && forge install)
+    then commit contracts/foundry.lock
 
   - if the lock is right, check each submodule out at the locked revision and
     stage the gitlink:
