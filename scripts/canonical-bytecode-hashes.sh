@@ -155,13 +155,14 @@ fi
 settings_of() {
   local name="$1" source="$2" artifact
   artifact="$(artifact_of "$name" "$source")"
-  jq -e '{
+  jq -e -S '{
     solc_version: .metadata.compiler.version,
-    optimizer: .metadata.settings.optimizer.enabled,
-    optimizer_runs: .metadata.settings.optimizer.runs,
-    evm_version: .metadata.settings.evmVersion,
-    bytecode_hash: .metadata.settings.metadata.bytecodeHash
-  } | if any(.[]; . == null) then error("missing build settings") else . end' \
+    solc_settings: (.metadata.settings | del(.compilationTarget))
+  }
+  | if (.solc_version | type) != "string"
+       or (.solc_settings | type) != "object"
+       or (.solc_settings.metadata.bytecodeHash | type) != "string"
+    then error("missing build settings") else . end' \
     "$artifact" 2>/dev/null
 }
 
@@ -182,14 +183,20 @@ for i in "${!names[@]}"; do
   fi
   differing="$(
     jq -n --argjson ref "$build_settings" --argjson other "$settings" \
-      '[ $ref | keys[] | select($ref[.] != $other[.]) | {field: ., ref: $ref[.], other: $other[.]} ]'
+      'def flat:
+         {solc_version: .solc_version}
+         + (.solc_settings | with_entries(.key = "solc_settings." + .key));
+       (($ref | flat) as $a | ($other | flat) as $b
+        | [ (($a | keys) + ($b | keys) | unique)[]
+            | select($a[.] != $b[.])
+            | {field: ., ref: $a[.], other: $b[.]} ])'
   )"
   if [ "$(printf '%s' "$differing" | jq 'length')" -ne 0 ]; then
     {
       echo "error: ${names[$i]} was compiled under different build inputs than $ref_name:"
       echo
       printf '%s' "$differing" | jq -r --arg ref "$ref_name" --arg other "${names[$i]}" '.[] |
-        "    \(.field)\n      \($ref): \(.ref | tostring)\n      \($other): \(.other | tostring)"'
+        "    \(.field)\n      \($ref): \(.ref | tojson)\n      \($other): \(.other | tojson)"'
       cat <<'MSG'
 
 The manifest records a single build block for every fingerprint it publishes, so
@@ -210,7 +217,7 @@ MSG
   fi
 done
 
-bch="$(printf '%s' "$build_settings" | jq -r '.bytecode_hash')"
+bch="$(printf '%s' "$build_settings" | jq -r '.solc_settings.metadata.bytecodeHash')"
 if [ "$bch" != "none" ]; then
   cat >&2 <<MSG
 error: contracts were compiled with bytecode_hash = "$bch"; it must be "none".
@@ -237,21 +244,16 @@ absent, so this also rebuilds it from the checked-out submodules:
 
     (cd contracts && forge install)
 
-The same revisions are readable from the submodule gitlinks, which are the
-git-authoritative record:
+The same revisions are readable from the submodule records git keeps, which are
+the git-authoritative pin:
 
-    git ls-tree HEAD contracts/lib/
+    git ls-files -s contracts/lib/
 MSG
   exit 1
 fi
 
-missing_revs="$(jq -r 'to_entries | map(select((.value.rev | type) != "string" or .value.rev == "")) | .[].key' foundry.lock)"
-if [ -n "$missing_revs" ]; then
-  {
-    echo "error: contracts/foundry.lock records no revision for:"
-    echo
-    printf '    %s\n' $missing_revs
-    cat <<'MSG'
+lock_schema_help() {
+  cat >&2 <<'MSG'
 
 Every dependency revision is a build input behind the recorded fingerprints, so
 the manifest cannot record a null for one. This usually means forge changed the
@@ -261,40 +263,59 @@ submodules by removing it first:
 
     rm contracts/foundry.lock && (cd contracts && forge install)
 
-If the regenerated lock still has no rev for those keys, read the revisions off
-the submodule gitlinks instead:
+If the regenerated lock still has no usable revision, read the revisions off the
+submodule records in git instead:
 
-    git ls-tree HEAD contracts/lib/
+    git ls-files -s contracts/lib/
 
 Fix this and commit the refreshed contracts/foundry.lock together with a
 regenerated contracts/canonical-bytecode.json in the same pull request.
 MSG
-  } >&2
   exit 1
+}
+
+if ! jq -e 'type == "object"' foundry.lock >/dev/null 2>&1; then
+  echo "error: contracts/foundry.lock is not a JSON object mapping each dependency path" >&2
+  echo "       to a record carrying its revision." >&2
+  lock_schema_help
+fi
+
+missing_revs="$(jq -r 'to_entries | map(select((.value | type) != "object" or (.value.rev | type) != "string" or .value.rev == "")) | .[].key' foundry.lock)"
+if [ -n "$missing_revs" ]; then
+  {
+    echo "error: contracts/foundry.lock records no usable revision for:"
+    echo
+    printf '    %s\n' $missing_revs
+  } >&2
+  lock_schema_help
 fi
 
 lock_deps="$(jq 'with_entries(.value = .value.rev)' foundry.lock)"
 
-if ! git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+if ! git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   cat >&2 <<'MSG'
 error: cannot read the submodule gitlinks, because this tree is not a git
-checkout with a commit at HEAD. The gate cross-checks contracts/foundry.lock
-against the git-authoritative record of the pinned dependency revisions,
+checkout. The gate cross-checks contracts/foundry.lock against the record git
+keeps of the pinned dependency revisions,
 
-    git ls-tree HEAD contracts/lib/
+    git ls-files -s contracts/lib/
 
 so it cannot run here. Run it from a clone of this repository.
 MSG
   exit 1
 fi
 
+# The index, not HEAD: after a checkout the two are identical, so CI compares
+# against exactly what is committed, while locally a staged submodule bump is
+# accepted. That lets a contributor regenerate the manifest in the same pull
+# request as the bump, which is the workflow this gate documents.
 gitlink_deps="$(
-  git -C "$repo_root" ls-tree HEAD contracts/lib/ \
-    | awk '$2 == "commit" { path = $4; sub(/^contracts\//, "", path); print path "\t" $3 }' \
+  git -C "$repo_root" ls-files -s contracts/lib/ \
+    | awk '$1 == "160000" { path = $4; sub(/^contracts\//, "", path); print path "\t" $2 }' \
     | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: .[1]}) | from_entries'
 )"
 
-# contracts.md advertises `git ls-tree HEAD contracts/lib/` as the independent
+# contracts.md advertises `git ls-files -s contracts/lib/` as the independent
 # confirmation path for the pinned revisions. Now that foundry.lock is tracked
 # rather than regenerated into every fresh clone, the two can disagree in git,
 # so the gate enforces the claim instead of asserting it.
@@ -307,10 +328,10 @@ dependency_disagreements="$(
 )"
 if [ "$(printf '%s' "$dependency_disagreements" | jq 'length')" -ne 0 ]; then
   {
-    echo "error: contracts/foundry.lock and the submodule gitlinks at HEAD disagree:"
+    echo "error: contracts/foundry.lock and the submodule revisions git records disagree:"
     echo
     printf '%s' "$dependency_disagreements" | jq -r '.[] |
-      "    \(.key)\n      contracts/foundry.lock: \(.lock // "(not recorded)")\n      git ls-tree HEAD:       \(.gitlink // "(no gitlink at contracts/\(.key))")"'
+      "    \(.key)\n      contracts/foundry.lock: \(.lock // "(not recorded)")\n      git ls-files -s:        \(.gitlink // "(no submodule recorded at contracts/\(.key))")"'
     cat <<'MSG'
 
 The dependency revisions are a build input behind the recorded fingerprints, and
@@ -318,15 +339,20 @@ contracts/contracts.md publishes both records as pinning the same revisions. If
 they disagree, that published reproducibility claim is false, so this gate is red
 on purpose. Reconcile them in this pull request, whichever record is right:
 
-  - if the submodule gitlinks are right, check the submodules out at them and
-    rebuild the lock from what is on disk. `forge build` never writes the lock,
-    and `forge install` writes it only when it is absent, so remove it first:
+  - if you are bumping a dependency and the submodule is already checked out at
+    the revision you want, stage it so git records it too:
+        git add contracts/lib/<dep>
+
+  - if the revisions git records are right, check the submodules out at them
+    (`git submodule update` reads the same index this gate compares against) and
+    rebuild the lock. `forge build` never writes the lock, and `forge install`
+    writes it only when it is absent, so remove it first:
         git submodule update --init --recursive
         rm contracts/foundry.lock && (cd contracts && forge install)
     then commit contracts/foundry.lock
 
   - if the lock is right, check each submodule out at the locked revision and
-    stage the gitlink:
+    stage it:
         git -C contracts/lib/<dep> checkout <rev> && git add contracts/lib/<dep>
 
 Then run

@@ -3,11 +3,25 @@
   "algorithm": "sha256(deployedBytecode.object)",
   "note": "Regenerate with scripts/canonical-bytecode-hashes.sh update. See contracts/contracts.md -> Reproducible builds.",
   "build": {
+    "solc_settings": {
+      "evmVersion": "cancun",
+      "libraries": {},
+      "metadata": {
+        "bytecodeHash": "none"
+      },
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      },
+      "remappings": [
+        "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+        "erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/",
+        "forge-std/=lib/forge-std/src/",
+        "halmos-cheatcodes/=lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/",
+        "openzeppelin-contracts/=lib/openzeppelin-contracts/"
+      ]
+    },
     "solc_version": "0.8.28+commit.7893614a",
-    "optimizer": true,
-    "optimizer_runs": 200,
-    "evm_version": "cancun",
-    "bytecode_hash": "none",
     "dependencies": {
       "lib/forge-std": "0844d7e1fc5e60d77b68e469bff60265f236c398",
       "lib/openzeppelin-contracts": "b8c7b9e82d2b340cf82f2913c38e3a0bac2f96ae"
