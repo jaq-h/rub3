@@ -357,7 +357,7 @@ for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
 done
 ```
 
-Silence means exactly one thing: none of those 25 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical template built from this repo at the same deploy configuration. That comparison is not set up yet.
+Silence means exactly one thing: none of those 25 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical fingerprint of the template built from this repo, after zeroing the immutable ranges published for it. Those fingerprints and ranges are now pinned - see "Reproducible builds and canonical fingerprints" above - but nothing in this repository performs the comparison yet.
 
 Sanity-check the method itself against a selector that *is* there - `cast sig "activate(uint256)"` should be found.
 

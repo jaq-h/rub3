@@ -436,7 +436,9 @@ if [ -n "$missing_revs" ]; then
   {
     echo "error: contracts/foundry.lock records no usable revision for:"
     echo
-    printf '    %s\n' $missing_revs
+    printf '%s\n' "$missing_revs" | while IFS= read -r dep; do
+      printf '    %s\n' "$dep"
+    done
   } >&2
   lock_schema_help
 fi
