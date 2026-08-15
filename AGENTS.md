@@ -25,7 +25,7 @@ cd contracts && forge test                # in-process EVM: no network, no .env
 
 `forge` resolves `contracts/foundry.toml`, so it must run from `contracts/`; it fails at the repo root. OpenZeppelin and forge-std are git submodules, and `forge test` clones them at the pinned revisions on first run, so `git submodule update --init --recursive` is optional.
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: the wrapper matrix for `tier-0` through `tier-4` plus the `headless` and `webview` front doors, `forge test`, the anvil-gated e2e, and a lint job where `cargo clippy -- -D warnings` is a blocking gate and `cargo fmt --check` is advisory. Read it for the exact invocations. It is macOS-only, and it does **not** build `tier-3,binary-encryption`, the only bundle that compiles `src/decrypt.rs`, so running the full local matrix below is still the contributor's job.
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: the wrapper matrix for `tier-0` through `tier-4` plus the `headless` and `webview` front doors, `forge test`, the blocking canonical-bytecode-fingerprint job (see `contracts/contracts.md` -> "Reproducible builds and canonical fingerprints"), the anvil-gated e2e, and a lint job where `cargo clippy -- -D warnings` is a blocking gate and `cargo fmt --check` is advisory. Read it for the exact invocations. It is macOS-only, and it does **not** build `tier-3,binary-encryption`, the only bundle that compiles `src/decrypt.rs`, so running the full local matrix below is still the contributor's job.
 
 ## Tier feature bundles (read before touching the wrapper)
 

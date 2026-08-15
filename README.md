@@ -65,12 +65,17 @@ rub3/
 │   ├── script/
 │   │   └── Deploy.s.sol              # Deploy either contract to any EVM chain
 │   ├── foundry.toml
+│   ├── remappings.txt                # Import remappings pinned in-tree (a reproducibility input)
+│   ├── foundry.lock                  # Pinned dependency revisions, mirrors the submodule gitlinks
+│   ├── canonical-bytecode.json       # Expected sha256 of each contract's deployedBytecode + immutable ranges
 │   ├── .env.example
-│   └── contracts.md                  # Local (Anvil) + on-chain (Base Sepolia) setup guide
+│   └── contracts.md                  # Setup guide (Anvil, Base Sepolia) + reproducible builds
 ├── licenses/
 │   └── com.rub3.example.json         # Example license proof with valid signature
 ├── scripts/
-│   └── test-e2e.sh                   # Convenience script — runs cargo test
+│   ├── canonical-bytecode-hashes.sh  # check/update/print the canonical fingerprints
+│   ├── seed-license.sh               # Generate a signed license proof for local testing
+│   └── test-e2e.sh                   # Convenience script - runs cargo test
 ├── architecture.md                   # System design, session model, security tiers
 ├── implementation.md                 # Phased development plan with status
 ├── ideation.md                       # Project vision and design principles
@@ -165,7 +170,7 @@ cd contracts
 forge test
 ```
 
-See [contracts/contracts.md](contracts/contracts.md) for local Anvil setup and Base Sepolia deployment.
+See [contracts/contracts.md](contracts/contracts.md) for local Anvil setup, Base Sepolia deployment, and the reproducible-build contract behind the canonical bytecode fingerprints.
 
 ## Running the wrapper
 
