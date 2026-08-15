@@ -163,6 +163,89 @@ jobs:
         run: forge test -vv
 
   # ---------------------------------------------------------------------------
+  # Canonical bytecode fingerprints. BLOCKING, not advisory.
+  #
+  # The canonical fingerprint of a rub3 contract is sha256 of the compiler's
+  # `deployedBytecode.object` - the runtime code with immutable slots zeroed, so
+  # it depends on the contract's compiled semantics and not on the constructor
+  # arguments a given deploy chose. A buyer's agent will later compare an
+  # on-chain contract against exactly this number, so it must never move without
+  # somebody noticing.
+  #
+  # It is NOT sha256(eth_getCode(addr)). A live deploy returns those slots filled
+  # with its constructor's values, so a comparator MUST first zero every range
+  # published as `immutable_ranges` in contracts/canonical-bytecode.json before
+  # hashing; without that step the comparison fails on every real deploy. This
+  # job publishes and pins those ranges. It implements no comparison, and neither
+  # does the wrapper yet - see contracts/contracts.md -> "Read this first".
+  #
+  # contracts/foundry.toml sets bytecode_hash = "none" to make that possible.
+  # Measured on this branch, with the default ("ipfs") and without it:
+  #
+  #   adding one comment line to Rub3License.sol   ipfs: e5590970... (moved)
+  #                                                none: 57ef9e36... (unchanged)
+  #   renaming contracts/src -> contracts_src      ipfs: 60c76f0f... (moved)
+  #                                                none: 57ef9e36... (unchanged)
+  #
+  # The script self-checks that setting and fails loudly if it is ever reverted.
+  # It discovers the deployable contracts from the artifacts of the build it
+  # just ran, keeping the ones whose compilationTarget sits under contracts/src,
+  # so a contract added on another branch is fingerprinted here without anybody
+  # editing the script. Abstract bases and interfaces drop out on their empty
+  # deployedBytecode, libraries on their AST contractKind: a library's runtime
+  # code carries a self-address placeholder, so no honest fingerprint can be
+  # published for one.
+  # When the contracts legitimately change, this job stays red until the
+  # regenerated contracts/canonical-bytecode.json is committed in the same pull
+  # request. That is the intended workflow, not a nuisance.
+  #
+  # WHY THIS ONE JOB PINS forge AND ITS SIBLINGS DO NOT
+  # The other foundry jobs here care only about what forge *compiles*, and
+  # foundry.toml pins solc_version, so any forge builds the same bytecode. This
+  # job also cares about what forge *emits*: the manifest records solc's own
+  # settings object as forge assembled it, and the check diffs the whole
+  # manifest. A forge release that starts passing an extra standard-json setting
+  # to the pinned solc, or stops passing one, would therefore turn this blocking
+  # job red on an unrelated pull request with no repo change and byte-identical
+  # fingerprints. A blocking check people learn to ignore is worse than no
+  # check, so this job alone pins the version. Leave the sibling jobs unpinned.
+  #
+  # HOW TO BUMP THE PIN
+  # Deliberately, and never on its own: raise the `version:` below, run
+  #
+  #     scripts/canonical-bytecode-hashes.sh update
+  #
+  # and commit the regenerated contracts/canonical-bytecode.json in the SAME
+  # pull request, so the recorded build inputs and the forge that produced them
+  # move together. This is the same workflow the index-based lock/gitlink
+  # cross-check already supports for a dependency bump. The fingerprints
+  # themselves should not move across a forge bump; if one does, the contracts
+  # or the pinned solc changed too, and that is worth understanding first.
+  # ---------------------------------------------------------------------------
+  bytecode-fingerprints:
+    name: canonical bytecode fingerprints (blocking)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+
+      # Pinned on purpose; see HOW TO BUMP THE PIN above. This is the forge that
+      # produced the checked-in contracts/canonical-bytecode.json.
+      - uses: foundry-rs/foundry-toolchain@v1.9.1
+        with:
+          version: v1.5.1
+
+      # foundry.toml pins solc_version, so forge fetches that exact compiler
+      # regardless of its own version; solc is the load-bearing pin for the
+      # fingerprints, and the forge pin above is for the recorded settings.
+      - name: Show toolchain
+        run: forge --version
+
+      - name: Check canonical fingerprints
+        run: scripts/canonical-bytecode-hashes.sh check
+
+  # ---------------------------------------------------------------------------
   # Anvil-gated on-chain E2E, both #[ignore]d suites.
   # session_onchain_e2e.rs spawns a local anvil, deploys Rub3Access with
   # `forge create` from contracts/, runs purchase + activate, then asserts

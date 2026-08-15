@@ -372,6 +372,108 @@ cast call <NEW_CONTRACT> "honorsContract(address,uint256)(bool)" <OLD_CONTRACT> 
 
 It spans exactly one hop, by construction: each contract compares the address you pass against its own immutable `predecessor` and looks no further back. After a second migration (v1 -> v2 -> v3), `v3.honorsContract(v1, <V3_TOKEN_ID>)` is false, so a wrapper still pinned to v1 does not honor the v3 token. Nobody is stranded by that - no token is ever burned, so the holder's v1 token (and their v2 token, if they claimed one) keeps validating forever on its own contract, which is exactly what a v1-pinned wrapper checks.
 
+## Reproducible builds and canonical fingerprints
+
+The canonical fingerprint of a rub3 contract is the `sha256` of the compiler's `deployedBytecode.object`: the runtime code with every immutable slot left zeroed. Because the immutables are zeroed, the fingerprint is a function of the contract's compiled semantics alone, not of the constructor arguments a particular deploy chose - two deploys of the same code with different `supplyCap` share it. That is the number a buyer's agent compares an on-chain contract against, so it has to be reproducible by somebody who is not the deployer.
+
+### Read this first: the fingerprint is not `sha256(eth_getCode(addr))`
+
+**Any comparator checking a live deploy MUST zero the immutable byte ranges of the code it fetched before hashing it.** `eth_getCode(addr)` returns the runtime code with every immutable slot filled in with the value that deploy's constructor supplied, while `deployedBytecode.object` has those same slots zeroed. Hashing what the chain returns therefore never equals a published fingerprint, on any real deploy, no matter how correct the build is. This is a property of Solidity immutables, not a defect in the contracts or in the manifest.
+
+The ranges to zero are published per contract, so nobody has to derive them:
+
+```bash
+jq '.contracts.Rub3Access.immutable_ranges' contracts/canonical-bytecode.json
+```
+
+Each entry is a `{"start": <byte offset into the runtime code>, "length": <bytes>}` pair, flattened out of solc's `deployedBytecode.immutableReferences` and sorted by offset. Every slot is 32 bytes wide, one EVM word. The comparison a buyer's agent performs is therefore three steps, in this order:
+
+1. `code = eth_getCode(addr)`, stripped of its `0x` prefix and decoded to bytes.
+2. For each published range, overwrite `code[start : start + length]` with zero bytes.
+3. `sha256(code)` and compare against `deployed_bytecode_sha256`.
+
+Step 2 is not optional and it is not a refinement. Skipping it fails 100% of the time.
+
+Measured on this branch, `Rub3Access` declares five immutables (`identityModel`, `tbaImplementation`, `supplyCap`, `predecessor`, `cooldownBlocks`) inherited from `Rub3License`, and `Rub3Subscription` declares those five plus its own `period`, six in total. Because a single immutable is read at several places in the runtime code, the slot count is higher than the variable count: `Rub3Access` carries 13 ranges (416 bytes) and `Rub3Subscription` 17 (544 bytes). Those numbers move whenever the code that reads an immutable moves, which is also whenever the fingerprint moves, so the manifest records both together and the drift gate compares both.
+
+Zeroing an immutable range destroys the constructor argument it held, which is the point: the fingerprint answers "is this the code I expect", not "was this deployed with the terms I expect". Read the terms separately from the contract's own getters (`supplyCap()`, `period()`, `predecessor()`, and the rest), which is where they are authoritative anyway.
+
+Nothing in this repository performs that comparison today. This section, and the ranges in the manifest, exist so that the follow-on work implementing it has an unambiguous contract to implement against.
+
+### The reproducibility contract
+
+To arrive at the same fingerprint from a checkout of this repository at a given commit, a third party must match all of these. They are all pinned in-tree, so "match" means "do not override them".
+
+| Input | Value | Where it is pinned |
+|---|---|---|
+| `solc_version` | `0.8.28` (recorded as `0.8.28+commit.7893614a`) | `contracts/foundry.toml` |
+| `optimizer` | `true` | `contracts/foundry.toml` |
+| `optimizer_runs` | `200` | `contracts/foundry.toml` |
+| `evm_version` | `cancun` | `contracts/foundry.toml` |
+| `bytecode_hash` | `none` | `contracts/foundry.toml` |
+| `openzeppelin-contracts` | `b8c7b9e82d2b340cf82f2913c38e3a0bac2f96ae` | `contracts/foundry.lock` |
+| `forge-std` | `0844d7e1fc5e60d77b68e469bff60265f236c398` | `contracts/foundry.lock` |
+| dependency revisions, cross-check | the same two revisions | the submodule records in git, `git ls-files -s contracts/lib/` (enforced by the gate) |
+| import remappings | `@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/`, `forge-std/=lib/forge-std/src/` | `contracts/remappings.txt` |
+
+`contracts/foundry.lock` is checked in and is a convenient mirror of the submodule gitlinks; the gitlinks are the git-authoritative record, so `git ls-files -s contracts/lib/` is an independent confirmation path that does not require trusting a generated file. Because the lock is tracked rather than regenerated into every fresh clone, the two could in principle drift apart in git, so the gate cross-checks them: it fails, showing both values, if any recorded revision disagrees with its gitlink or is missing a revision entirely. The confirmation path is enforced, not merely asserted. The gate reads the index rather than `HEAD` so that a staged dependency bump can be regenerated into the manifest in the same pull request; after a checkout the two are identical, so CI compares against exactly what is committed.
+
+One limitation is worth stating plainly. `contracts/foundry.lock` and `git ls-files -s contracts/lib/` both pin only the two top-level dependencies; the revisions of OpenZeppelin's own nested submodules (`erc4626-tests`, `halmos-cheatcodes`, its vendored `forge-std`) are pinned by neither, so they are outside the reproducibility contract described here. This is currently inert: no contract under `contracts/src/` imports any of those paths, so no published fingerprint depends on them. It would need closing before anything under `contracts/src/` did.
+
+The manifest records `solc_version` as the full compiler string including its `+commit` suffix, for example `0.8.28+commit.7893614a`, because the compiler build is part of the build identity and exact reproduction is the whole point. `foundry.toml` pins the `0.8.28` half; `forge` resolves it to that exact commit.
+
+The table is the human-readable summary of the inputs that matter in practice. The authoritative and complete record is the `build` block of [`canonical-bytecode.json`](canonical-bytecode.json), which carries the compiler version alongside solc's own settings object as the compiler itself reported it, so a setting this table does not name (`viaIR`, say, or one a future solc adds) is still recorded next to the fingerprints it produced. That block will churn when solc or forge changes what it emits; the churn is the manifest explaining why a fingerprint moved, which is the point of keeping it.
+
+Two keys are dropped from that settings object. `compilationTarget` is per-contract, not a build input. `remappings` is excluded because only part of it is pinned here. `contracts/remappings.txt` fixes the two remappings the rub3 contracts actually import through, `@openzeppelin/contracts/=` and `forge-std/=`, and those are in the table above. On top of them forge appends three of its own, `erc4626-tests/=`, `halmos-cheatcodes/=` and `openzeppelin-contracts/=`, derived from how deep the submodules happen to be initialised; the artifact's `remappings` array is all five together. Those three describe the environment rather than the build contract, so recording the array would let a checkout difference fail the gate while the fingerprints themselves are byte-identical. Nothing is lost: a remapping that actually changes compiled output moves the fingerprint, which is what the gate exists to catch.
+
+Beyond those recorded inputs nothing else moves the fingerprint: not the `forge` version (it fetches and drives the pinned `solc` rather than compiling anything itself), not the checkout path, not comments in the source.
+
+The `forge` version earns one caveat, because it is the only entry on that list that can still turn the blocking gate red. forge assembles the standard-json input it hands to solc, so a forge release that starts passing an extra setting, or stops passing one, changes the `solc_settings` block the manifest records even though every fingerprint is byte-identical. The gate diffs the whole manifest, so that reads as drift. `.github/workflows/ci.yml` therefore pins `foundry-rs/foundry-toolchain` to a fixed forge version for the `bytecode-fingerprints` job alone, so an unrelated pull request cannot go red because a new forge shipped that morning. Bumping that pin is a deliberate act: raise it and commit the regenerated manifest in the same pull request.
+
+The checkout path and the comments in the source are the reason `bytecode_hash = "none"` is set. With solc's default (`ipfs`) the compiler appends a CBOR metadata trailer that hashes the metadata JSON, and that JSON covers comment text and source file paths. Measured on these contracts:
+
+| Perturbation | Default `ipfs` | With `bytecode_hash = "none"` |
+|---|---|---|
+| Add one comment line to `Rub3License.sol` | fingerprint moves | unchanged |
+| Rename the source directory `src/` to `contracts_src/` | fingerprint moves | unchanged |
+| `optimizer_runs` 200 to 999 | fingerprint moves | fingerprint moves |
+
+The third row is correct behaviour: `optimizer_runs` changes the emitted code, so it is a real input, which is why it is in the table above.
+
+### Reproducing it
+
+```bash
+cd contracts && forge build
+python3 -c "import json,hashlib; a=json.load(open('out/Rub3Access.sol/Rub3Access.json'));
+print(hashlib.sha256(bytes.fromhex(a['deployedBytecode']['object'][2:])).hexdigest())"
+```
+
+or, for every deployable contract at once, from the repo root:
+
+```bash
+scripts/canonical-bytecode-hashes.sh print
+```
+
+`print` applies the same guards as `check`: it reads the source and artifact directories from the resolved foundry config, so it cannot report on a build it did not perform, and it refuses to emit a fingerprint compiled under anything but `bytecode_hash = "none"`. A number it prints is therefore one you can compare against the manifest, not merely whatever the local environment happened to produce.
+
+### The expected values, and the drift gate
+
+The current fingerprints live in [`canonical-bytecode.json`](canonical-bytecode.json), alongside the build inputs they were produced under. Those inputs are read back out of the emitted artifacts' own solc `metadata` blocks rather than out of `foundry.toml` text, so they describe the build that actually produced the hashes: a `[profile.*]` selection or a `FOUNDRY_*` environment override cannot record one set of inputs next to hashes compiled under another. The `bytecode_hash = "none"` guard is driven off that same artifact metadata for the same reason. Because the manifest publishes a single build block covering every fingerprint, the gate reads the compiler version and settings from every discovered contract's artifact and fails, naming both contracts and the field, if any two disagree; one set of build inputs has to hold for the whole of `contracts/src/`. It is JSON because it is consumed by machines as much as by people: the CI gate diffs against it, and the wrapper will later compile the same table into the binary, so a `serde`-shaped file beats a prose table or a bare checksum list. Each contract entry carries its `immutable_ranges` alongside its hash for the same reason: a consumer needs both to compare anything against a live deploy, and the gate diffs the whole manifest, so a change in the immutable layout is drift like any other rather than something the check silently ignores. The AST-node keys solc groups those ranges under are dropped, because they are compiler internals with no meaning outside one artifact and a masker needs only the offsets.
+
+CI runs `scripts/canonical-bytecode-hashes.sh check` as a **blocking** job (`.github/workflows/ci.yml` -> `bytecode-fingerprints`). It rebuilds from scratch and fails if any fingerprint, or any pinned build input, differs from the manifest. When a contract change is intended, regenerate and commit the manifest in the same pull request:
+
+```bash
+scripts/canonical-bytecode-hashes.sh update
+```
+
+Splitting that into a separate commit or pull request defeats the gate, which exists so that a fingerprint can never move without a reviewer seeing it move.
+
+New contracts under `contracts/src/` are picked up automatically, at any depth and including a second contract declared inside an existing file. Discovery never reads Solidity: it walks the artifacts `forge build --force` just wrote and keeps every one whose `.metadata.settings.compilationTarget` names a file under `contracts/src/`, which is also where the manifest's `source` field comes from. That set is the build's own account of what it compiled, so a declaration written in an unusual style cannot go unfingerprinted, a contract in `test/` or `script/` cannot leak in, and a contract deleted in the same commit cannot linger (the `--force` build clears the artifact directory first). Abstract bases such as `Rub3License` and interfaces such as `IRub3Predecessor` appear there too, but compile to an empty `deployedBytecode` object and are dropped on that basis rather than by looking for the `abstract` keyword.
+
+Libraries are excluded as well, and deliberately so: the manifest covers the deployable license contracts an agent verifies, and a library is not one. It also could not be published honestly here. A library compiles to real runtime code whose leading 20 bytes are a zeroed self-address placeholder that the deployer patches with the library's own address, and that placeholder is not an immutable, so it would appear in no `immutable_ranges` list and the three-step comparison above would fail every time with nothing in the manifest to explain it. An empty `deployedBytecode` object does not catch this case, so the gate reads each artifact's AST and drops anything whose `contractKind` is `library`. That is what `ast = true` in [`foundry.toml`](foundry.toml) is for. It selects extra output rather than changing a compilation input: it is absent from solc's `.metadata.settings`, and enabling it left both fingerprints byte-identical, measured rather than assumed. If the AST is ever missing the gate stops rather than guessing, since guessing would mean publishing a library.
+
+The manifest keys contracts by name, so a name declared in two different files under `contracts/src/` fails the gate, naming both files, rather than being silently collapsed to whichever one sorted last. Give every contract under `contracts/src/` a unique name; the migration path is a new deploy of a differently named contract behind the successor pointer, not a second `Rub3Access` in a `v2/` directory.
+
 ## Auditing the invariants before buying
 
 An agent can verify the ownership guarantees against the deployed bytecode rather than trusting the source. `test/Rub3Invariants.t.sol` runs exactly this audit; the full property-by-property breakdown, including which properties are convention rather than bytecode, is in [../architecture.md](../architecture.md#ownership-invariants-all-license-contracts).
@@ -397,7 +499,7 @@ for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
 done
 ```
 
-Silence means exactly one thing: none of those 27 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical template built from this repo at the same deploy configuration. That comparison is not set up yet.
+Silence means exactly one thing: none of those 27 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical fingerprint of the template built from this repo, after zeroing the immutable ranges published for it. Those fingerprints and ranges are now pinned - see "Reproducible builds and canonical fingerprints" above - but nothing in this repository performs the comparison yet.
 
 Sanity-check the method itself against a selector that *is* there - `cast sig "activate(uint256)"` should be found.
 

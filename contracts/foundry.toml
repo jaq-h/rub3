@@ -8,6 +8,19 @@ solc_version = "0.8.28"
 optimizer = true
 optimizer_runs = 200
 evm_version = "cancun"
+# Omit the CBOR metadata trailer from compiled output. With the default ("ipfs")
+# solc appends a hash of the metadata JSON, which covers comment text and source
+# file paths, so the canonical fingerprint would move on edits that change no
+# behaviour. See contracts/contracts.md -> "Reproducible builds".
+bytecode_hash = "none"
+# Emit each artifact's AST. The fingerprint gate reads .ast to tell a library
+# from a contract structurally rather than by parsing Solidity for keywords; a
+# library belongs in no published fingerprint, because its runtime code carries
+# a self-address placeholder the deployer patches. This selects extra output
+# rather than changing a compilation input: it is absent from solc's
+# .metadata.settings and moves no fingerprint, both measured. See
+# contracts/contracts.md -> "Reproducible builds".
+ast = true
 
 [rpc_endpoints]
 base         = "${BASE_RPC_URL}"
