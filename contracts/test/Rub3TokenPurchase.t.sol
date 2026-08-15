@@ -69,6 +69,21 @@ contract Rub3TokenPurchaseTest is Test {
 
     // ── Fixtures ──────────────────────────────────────────────────────────────
 
+    function _identity(uint8 model, address tbaImplementation)
+        internal
+        pure
+        returns (Rub3License.IdentityTerms memory)
+    {
+        return Rub3License.IdentityTerms({model: model, tbaImplementation: tbaImplementation});
+    }
+
+    /// No protocol fee - what a direct (non-factory) deploy carries, and what
+    /// every fixture in this suite uses. The fee split has its own suite in
+    /// `Rub3Factory.t.sol`.
+    function _noFee() internal pure returns (Rub3License.FeeTerms memory) {
+        return Rub3License.FeeTerms({feeBps: 0, treasury: address(0)});
+    }
+
     function _hashes(bytes32 h) internal pure returns (bytes32[] memory out) {
         out = new bytes32[](1);
         out[0] = h;
@@ -84,8 +99,8 @@ contract Rub3TokenPurchaseTest is Test {
 
     function _deployAccess(Rub3License.SaleTerms memory sale) internal returns (Rub3Access) {
         return new Rub3Access(
-            "Rub3 Test", "R3T", 0, address(0),
-            _hashes(WRAPPER_HASH), sale, 0, COOLDOWN_BLOCKS, address(0), owner
+            "Rub3 Test", "R3T", _identity(0, address(0)),
+            _hashes(WRAPPER_HASH), sale, _noFee(), 0, COOLDOWN_BLOCKS, address(0), owner
         );
     }
 
@@ -94,8 +109,8 @@ contract Rub3TokenPurchaseTest is Test {
         returns (Rub3Subscription)
     {
         return new Rub3Subscription(
-            "Rub3 Sub", "R3S", 0, address(0),
-            _hashes(WRAPPER_HASH), sale, 0, PERIOD, COOLDOWN_BLOCKS, address(0), owner
+            "Rub3 Sub", "R3S", _identity(0, address(0)),
+            _hashes(WRAPPER_HASH), sale, _noFee(), 0, PERIOD, COOLDOWN_BLOCKS, address(0), owner
         );
     }
 
@@ -300,8 +315,8 @@ contract Rub3TokenPurchaseTest is Test {
     /// The supply cap is a property of the licence, not of the rail.
     function test_purchase_respectsSupplyCap() public {
         Rub3Access capped = new Rub3Access(
-            "Capped", "CAP", 0, address(0),
-            _hashes(WRAPPER_HASH), _sale(PRICE, address(usdc), USDC_PRICE),
+            "Capped", "CAP", _identity(0, address(0)),
+            _hashes(WRAPPER_HASH), _sale(PRICE, address(usdc), USDC_PRICE), _noFee(),
             1, COOLDOWN_BLOCKS, address(0), owner
         );
 

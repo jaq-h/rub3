@@ -115,6 +115,43 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         uint256 priceAmount;
     }
 
+    /// @notice How this collection derives a user identity, and what backs it.
+    ///
+    ///         Grouped because the two fields are not independent: the
+    ///         constructor requires a TBA implementation for the account model
+    ///         and forbids one for the access model, so "which model" and "which
+    ///         implementation" are one decision made once. Grouping also keeps
+    ///         {Rub3Subscription}'s constructor inside solc's stack limit, which
+    ///         a twelfth loose argument would push it past.
+    struct IdentityTerms {
+        /// 0 = access (user_id = wallet), 1 = account (user_id = TBA).
+        uint8 model;
+        /// ERC-6551 account implementation. Required iff `model == 1`.
+        address tbaImplementation;
+    }
+
+    /// @notice The protocol's cut of every payment this contract takes, frozen
+    ///         at deploy.
+    ///
+    ///         Grouped for the same reasons as {SaleTerms}: it names the
+    ///         concept, and it costs the concrete constructors one stack slot
+    ///         rather than two. Both fields become `immutable`, so what a
+    ///         developer's economics are is settled before the first buyer
+    ///         looks and can never move afterwards - see {feeBps}.
+    ///
+    ///         A direct (non-factory) deploy passes `FeeTerms(0, address(0))`
+    ///         and carries no fee at all. That is deliberate: the templates are
+    ///         open source and deploying one directly stays possible. What a
+    ///         factory deploy buys is being *listable* in the registry and
+    ///         marketplace, which trust only what {Rub3Factory} recorded.
+    struct FeeTerms {
+        /// Protocol fee in basis points of every payment received. `0` disables
+        /// the fee, which requires `treasury` to be `address(0)` too.
+        uint16 feeBps;
+        /// Where the fee accrues to. Must be set iff `feeBps` is non-zero.
+        address treasury;
+    }
+
     /// @notice The EIP-3009 authorization a buyer signs, minus the three fields
     ///         this contract derives rather than accepts.
     ///
@@ -178,6 +215,43 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///         Independent of `price`, not converted from it: the contract holds
     ///         no oracle, so the developer quotes each rail separately.
     uint256 public priceAmount;
+
+    // ── Protocol fee (§2.3) ───────────────────────────────────────────────────
+
+    /// @notice Basis-point denominator. A fee of `feeBps` on `amount` is
+    ///         `amount * feeBps / BPS_DENOMINATOR`.
+    uint256 public constant BPS_DENOMINATOR = 10_000;
+
+    /// @notice The protocol's share of every payment this contract takes, in
+    ///         basis points. `0` on a directly deployed contract.
+    ///
+    ///         **Immutable, and that is the product promise rather than an
+    ///         implementation detail.** A developer's economics are settled the
+    ///         moment their contract is deployed: there is no setter here, none
+    ///         in {Rub3Factory}, and no path of any kind - owner, factory, or
+    ///         protocol - that can raise, lower, or redirect this contract's fee
+    ///         afterwards. rub3 changes its take only by shipping a new factory
+    ///         version, which affects deploys made after it and nothing else.
+    uint16 public immutable feeBps;
+
+    /// @notice Where the protocol fee accrues. `address(0)` iff `feeBps == 0`.
+    ///         Immutable for the same reason as {feeBps}: a redirectable
+    ///         recipient is a changed deal.
+    address public immutable treasury;
+
+    /// @notice Protocol fee in wei taken from ETH payments and not yet swept to
+    ///         {treasury}. Held here rather than pushed on the money path -
+    ///         see {_accrueFee}.
+    ///
+    ///         {withdraw} pays the developer `address(this).balance` *minus*
+    ///         this, so the two shares are disjoint and neither can be spent
+    ///         twice.
+    uint256 public feesAccrued;
+
+    /// @notice Per-ERC-20 protocol fee taken on the stablecoin rail and not yet
+    ///         swept to {treasury}. The ETH counterpart of {feesAccrued}, and
+    ///         subtracted from {withdrawToken} exactly the same way.
+    mapping(address => uint256) public tokenFeesAccrued;
 
     /// @notice Max mintable tokens. `0` disables the cap.
     uint256 public immutable supplyCap;
@@ -267,6 +341,22 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         address newToken,
         uint256 newAmount
     );
+    /// @notice A payment was split. `token` is `address(0)` when the payment was
+    ///         in ETH and `amount`/`fee` are wei; otherwise both are in that
+    ///         ERC-20's smallest unit.
+    ///
+    ///         `developerAmount` is stated rather than left to be derived, so
+    ///         the two shares and their sum are all readable from one log.
+    event ProtocolFeeAccrued(
+        address indexed token,
+        uint256 amount,
+        uint256 fee,
+        uint256 developerAmount
+    );
+
+    /// @notice Accrued fee swept to {treasury}. `token` is `address(0)` for ETH.
+    event ProtocolFeeWithdrawn(address indexed token, address indexed treasury, uint256 amount);
+
     event WrapperHashAdded(bytes32 indexed hash);
     event WrapperHashRevoked(bytes32 indexed hash, string reason);
     event SuccessorUpdated(address indexed oldSuccessor, address indexed newSuccessor);
@@ -289,6 +379,9 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     error TokenPaymentUnavailable();
     error IncompatiblePriceToken(address token);
     error TokenPriceInconsistent(address token, uint256 amount);
+    error FeeBpsTooHigh(uint16 feeBps, uint256 maximum);
+    error FeeTermsInconsistent(uint16 feeBps, address treasury);
+    error NoFeeConfigured();
     error WithdrawFailed();
     error NotTokenOwner(address caller, address owner);
     error CooldownActive(uint256 blocksRemaining);
@@ -303,29 +396,48 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     error PredecessorTokenAlreadyClaimed(uint256 predecessorTokenId);
 
     constructor(
-        string    memory name_,
-        string    memory symbol_,
-        uint8            identityModel_,
-        address          tbaImplementation_,
-        bytes32[] memory wrapperHashes_,
-        SaleTerms memory sale_,
-        uint256          supplyCap_,
-        uint256          cooldownBlocks_,
-        address          predecessor_,
-        address          owner_
+        string        memory name_,
+        string        memory symbol_,
+        IdentityTerms memory identity_,
+        bytes32[]     memory wrapperHashes_,
+        SaleTerms     memory sale_,
+        FeeTerms      memory fee_,
+        uint256              supplyCap_,
+        uint256              cooldownBlocks_,
+        address              predecessor_,
+        address              owner_
     ) ERC721(name_, symbol_) Ownable(owner_) {
-        if (identityModel_ > 1) revert InvalidIdentityModel(identityModel_);
+        if (identity_.model > 1) revert InvalidIdentityModel(identity_.model);
         if (cooldownBlocks_ < MIN_COOLDOWN_BLOCKS) {
             revert CooldownTooSmall(cooldownBlocks_, MIN_COOLDOWN_BLOCKS);
         }
         // Account model must pick a TBA implementation; access model must not.
-        if (identityModel_ == 1 && tbaImplementation_ == address(0)) {
+        if (identity_.model == 1 && identity_.tbaImplementation == address(0)) {
             revert TbaImplementationRequired();
         }
-        if (identityModel_ == 0 && tbaImplementation_ != address(0)) {
+        if (identity_.model == 0 && identity_.tbaImplementation != address(0)) {
             revert TbaImplementationForbidden();
         }
         if (predecessor_ == address(this)) revert SelfReference();
+
+        // The fee is frozen from here on, so both ways of getting it wrong are
+        // rejected at the only moment they can still be corrected.
+        //
+        // The bound is arithmetic, not economic: at or below 100% the fee can
+        // never exceed the payment it is taken from, which is what makes "the
+        // two shares sum to what arrived" true by construction rather than by
+        // argument. The *protocol's* range - 200 to 300 bps - is a narrower rule
+        // about what rub3 charges, and it belongs to {Rub3Factory}, which is the
+        // thing that has an economics policy. This base is the open-source
+        // template anyone may deploy, and a deployer who charges themselves is
+        // only reducing their own take.
+        if (fee_.feeBps > BPS_DENOMINATOR) revert FeeBpsTooHigh(fee_.feeBps, BPS_DENOMINATOR);
+        // Both or neither. A fee with no recipient would strand every buyer's
+        // money in the contract with no one able to move it; a recipient with no
+        // fee advertises a claim on revenue that does not exist.
+        if ((fee_.feeBps == 0) != (fee_.treasury == address(0))) {
+            revert FeeTermsInconsistent(fee_.feeBps, fee_.treasury);
+        }
 
         // `predecessor` is immutable and {claimFromPredecessor} reads the
         // {IRub3Predecessor} slice off it, so an address that cannot answer that
@@ -342,9 +454,11 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
 
         _setTokenPrice(sale_.priceToken, sale_.priceAmount);
 
-        identityModel     = identityModel_;
-        tbaImplementation = tbaImplementation_;
+        identityModel     = identity_.model;
+        tbaImplementation = identity_.tbaImplementation;
         price             = sale_.price;
+        feeBps            = fee_.feeBps;
+        treasury          = fee_.treasury;
         supplyCap         = supplyCap_;
         cooldownBlocks    = cooldownBlocks_;
         predecessor       = predecessor_;
@@ -418,9 +532,56 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         successor = newSuccessor;
     }
 
+    /// @notice Sweep the developer's ETH balance to `to`.
+    ///
+    /// That balance is everything the contract holds *except* the protocol fee
+    /// already accrued against it. The subtraction is what keeps the two shares
+    /// disjoint: fees are held here rather than pushed at payment time, so
+    /// without it the developer would be able to withdraw rub3's cut, and rub3
+    /// the developer's. Anything force-sent to this contract (a `selfdestruct`
+    /// beneficiary, a coinbase payout) is the developer's, since no fee was ever
+    /// taken on it.
     function withdraw(address payable to) external onlyOwner {
-        (bool ok, ) = to.call{value: address(this).balance}("");
+        uint256 amount = address(this).balance - feesAccrued;
+        (bool ok, ) = to.call{value: amount}("");
         if (!ok) revert WithdrawFailed();
+    }
+
+    /// @notice Sweep the accrued ETH protocol fee to {treasury}.
+    ///
+    /// **Permissionless on purpose.** The destination is immutable, so the only
+    /// thing a caller decides is *when*, and rub3 collecting should not depend
+    /// on rub3 sending a transaction on every contract that ever sold a licence.
+    /// A developer, an indexer, or a keeper may settle it. It cannot be aimed
+    /// anywhere else, and it cannot touch the developer's share.
+    function withdrawFees() external returns (uint256 amount) {
+        address to = treasury;
+        if (to == address(0)) revert NoFeeConfigured();
+
+        amount = feesAccrued;
+        // Zeroed before the call: checks-effects-interactions, so a treasury
+        // that re-enters finds nothing left to claim.
+        feesAccrued = 0;
+
+        (bool ok, ) = payable(to).call{value: amount}("");
+        if (!ok) revert WithdrawFailed();
+
+        emit ProtocolFeeWithdrawn(address(0), to, amount);
+    }
+
+    /// @notice Sweep the accrued protocol fee in `token` to {treasury}. The
+    ///         stablecoin counterpart of {withdrawFees}, permissionless for the
+    ///         same reason.
+    function withdrawTokenFees(address token) external returns (uint256 amount) {
+        address to = treasury;
+        if (to == address(0)) revert NoFeeConfigured();
+
+        amount = tokenFeesAccrued[token];
+        tokenFeesAccrued[token] = 0;
+
+        SafeERC20.safeTransfer(IERC20(token), to, amount);
+
+        emit ProtocolFeeWithdrawn(token, to, amount);
     }
 
     /// @notice Sweep the contract's whole balance of an ERC-20 to `to`.
@@ -430,9 +591,14 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     /// moves ERC-20 balances only and cannot touch a license token: this
     /// contract's own ERC-721 exposes no `transfer(address,uint256)`, so passing
     /// its address reverts rather than doing anything.
+    /// Like {withdraw}, it moves the developer's share only: whatever this
+    /// contract holds of `token` less the protocol fee accrued in it. For a
+    /// token nobody ever paid in - one somebody transferred here by mistake -
+    /// nothing is reserved and the whole balance sweeps, since no fee was taken.
     function withdrawToken(address token, address to) external onlyOwner {
         IERC20 erc20 = IERC20(token);
-        SafeERC20.safeTransfer(erc20, to, erc20.balanceOf(address(this)));
+        uint256 amount = erc20.balanceOf(address(this)) - tokenFeesAccrued[token];
+        SafeERC20.safeTransfer(erc20, to, amount);
     }
 
     // ── Wrapper hash views ────────────────────────────────────────────────────
@@ -640,11 +806,13 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///      money, so there is nothing to move, only a floor to check.
     ///
     ///      This and {_payWithAuthorization} are the only two places in the
-    ///      contracts where a payment is taken. The §2.3 protocol fee splits
-    ///      what has just arrived, so it lands in these two functions and
-    ///      nowhere else - no entry point and no mint path has to change for it.
-    function _payEth(uint256 due) internal view {
+    ///      contracts where a payment is taken, which is why the §2.3 protocol
+    ///      fee lands in exactly these two functions: no entry point and no mint
+    ///      path changed for it, and neither rail can acquire a payment the
+    ///      other's fee rule does not reach.
+    function _payEth(uint256 due) internal {
         if (msg.value < due) revert InsufficientPayment(msg.value, due);
+        _accrueFee(address(0), msg.value);
     }
 
     /// @dev The stablecoin leg: pull exactly `amount` of `token` from
@@ -699,6 +867,53 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
 
         uint256 received = erc20.balanceOf(address(this)) - balanceBefore;
         if (received < amount) revert InsufficientPayment(received, amount);
+
+        // The fee is taken on what measurably arrived, exactly as the ETH rail
+        // takes it on `msg.value`, so the split is the same rule on both rails
+        // rather than two rules that happen to agree.
+        _accrueFee(token, received);
+    }
+
+    /// @dev Split a payment that has just arrived: `feeBps` of it to
+    ///      {treasury}, everything else to the developer.
+    ///
+    ///      **The fee is charged on the amount received, not on the listed
+    ///      price.** Charging the listed price would leave a hole wide enough to
+    ///      drive the whole protocol fee through: a developer lists at 0 (or at
+    ///      1 wei), publishes a client that pays the real price as
+    ///      "overpayment", and the fee on every sale is zero while the money
+    ///      still lands in `withdraw`. Charging what arrived closes it, and it
+    ///      is also the reading that makes the arithmetic exact - `fee` plus the
+    ///      developer's share is the payment, with nothing left over and no
+    ///      rounding to account for anywhere else.
+    ///
+    ///      Rounding is integer division, so it favours the developer: a fee
+    ///      that comes to less than one wei (or one of the token's smallest
+    ///      units) is zero, never one. The whole payment is then the
+    ///      developer's, which is the correct total either way.
+    ///
+    ///      **Accrued, not pushed.** The alternative - transferring the fee to
+    ///      {treasury} inside the purchase - puts an external call the protocol
+    ///      chose on every buyer's money path, and `treasury` is immutable: a
+    ///      recipient that reverts on receipt, or that one day costs more gas
+    ///      than a buyer sent, would break every purchase on that contract
+    ///      forever with no way to fix it. Accruing keeps the money path free of
+    ///      calls out and leaves collection to {withdrawFees}, where a failure
+    ///      is rub3's problem and not the buyer's.
+    function _accrueFee(address token, uint256 amount) private {
+        uint256 bps = feeBps;
+        if (bps == 0) return;
+
+        // `bps <= BPS_DENOMINATOR` is frozen by the constructor, so the fee can
+        // never exceed `amount` and the developer's share can never underflow.
+        uint256 fee = (amount * bps) / BPS_DENOMINATOR;
+        if (token == address(0)) {
+            feesAccrued += fee;
+        } else {
+            tokenFeesAccrued[token] += fee;
+        }
+
+        emit ProtocolFeeAccrued(token, amount, fee, amount - fee);
     }
 
     /// @dev Shared by the constructor and {setTokenPrice}.

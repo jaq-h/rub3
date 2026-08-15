@@ -13,19 +13,19 @@ contract Rub3Access is Rub3License {
     event Purchased(uint256 indexed tokenId, address indexed recipient, address indexed payer);
 
     constructor(
-        string    memory name_,
-        string    memory symbol_,
-        uint8            identityModel_,
-        address          tbaImplementation_,
-        bytes32[] memory wrapperHashes_,
-        SaleTerms memory sale_,
-        uint256          supplyCap_,
-        uint256          cooldownBlocks_,
-        address          predecessor_,
-        address          owner_
+        string        memory name_,
+        string        memory symbol_,
+        IdentityTerms memory identity_,
+        bytes32[]     memory wrapperHashes_,
+        SaleTerms     memory sale_,
+        FeeTerms      memory fee_,
+        uint256              supplyCap_,
+        uint256              cooldownBlocks_,
+        address              predecessor_,
+        address              owner_
     ) Rub3License(
-        name_, symbol_, identityModel_, tbaImplementation_, wrapperHashes_,
-        sale_, supplyCap_, cooldownBlocks_, predecessor_, owner_
+        name_, symbol_, identity_, wrapperHashes_,
+        sale_, fee_, supplyCap_, cooldownBlocks_, predecessor_, owner_
     ) {
         // Succession is same-model only, and that is enforced here rather than
         // left to the deployer. {Rub3License} has already established that a

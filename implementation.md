@@ -494,7 +494,7 @@ The same two extra values pushed `Deploy.run()` itself over the stack limit, so 
 
 **Ownership invariants (§2.4) swept in the same pass**
 
-- Forbidden-selector list grows 25 → 27: `setRenewPriceToken(uint256,address)` and `setRenewPriceAmount(uint256,uint256)`, the setters that would unfreeze the new per-token snapshots. Every stated count updated together - `test/Rub3Invariants.t.sol`, the copy-pasteable loop in `contracts/contracts.md`, `architecture.md`'s bytecode table, and §2.4 below
+- Forbidden-selector list grows 25 → 27: `setRenewPriceToken(uint256,address)` and `setRenewPriceAmount(uint256,uint256)`, the setters that would unfreeze the new per-token snapshots (§2.3 takes it to 29). Every stated count updated together - `test/Rub3Invariants.t.sol`, the copy-pasteable loop in `contracts/contracts.md`, `architecture.md`'s bytecode table, and §2.4 below
 - `test_audit_scannerIsSound` gained `purchaseWithAuthorization` as a positive control
 - Both "owner does its worst" tests now also exercise `setTokenPrice` and `withdrawToken`; the subscription one deploys with both rails listed and asserts the held token's `renewPriceToken` / `renewPriceAmount` survive the owner repointing and sweeping everything
 - No new external function is a revocation surface: none of them can change `ownerOf`, `isValid`, or `activate` for an issued token
@@ -518,29 +518,85 @@ The same two extra values pushed `Deploy.run()` itself over the stack limit, so 
 **Deliberately not done**
 - No hardcoded USDC address anywhere. `priceToken` is per-deploy and the wrapper reads it off the contract, so "which USDC deployment" is the developer's choice on any chain, not rub3's
 - No `transferWithAuthorization` fallback for x402 clients that sign the other typehash. It would reintroduce the front-running hole and be a second payment path to drift; an x402 facilitator that speaks EIP-3009 can sign `ReceiveWithAuthorization` just as easily
-- No fee split, no fee plumbing, no hook interface (§2.3 owns that)
+- No fee split, no fee plumbing, no hook interface (§2.3 owns that, and landed on exactly the two functions this section shaped for it)
 - The buyer is gasless, but the *wrapper* is not a facilitator: it signs the authorization and submits it itself, so it still needs gas for `purchaseWithAuthorization` and `activate`. What §2.2 removes is the need to hold ETH for the **price**. Fully gasless agents need a third-party submitter, which the contracts already permit and §4.2 builds
 
 
-### 2.3 — Rub3Factory + protocol fee `[not started]`
+### 2.3 - Rub3Factory + protocol fee `[complete]`
 
-The revenue mechanism, stamped at deploy time and immutable thereafter.
+The revenue mechanism, stamped at deploy time and immutable thereafter. Contracts only; the wrapper needed no change at all, which is itself the result - it buys from a fee-bearing contract with the same code that buys from a fee-free one.
 
-```solidity
-contract Rub3Factory {
-    uint16  public immutable feeBps;    // 200–300; frozen per factory version
-    address public immutable treasury;  // rub3 fee recipient
-    mapping(address => bool) public isDeployed;  // registry + marketplace trust only these
+**The fee lives on the licence contract, not on the factory** - `Rub3License.sol`
 
-    function deployAccess(...) external returns (address);
-    function deploySubscription(...) external returns (address);
-}
-```
+`uint16 public immutable feeBps` + `address public immutable treasury`, passed in as one `FeeTerms` struct and frozen at construction. The factory stamps its own values into every contract it deploys; a direct deploy passes `FeeTerms(0, address(0))` and carries no fee.
 
-- Fee split executes on-chain inside `purchase()` / `renew()`: `feeBps` to `treasury`, remainder to the developer's `withdraw()` balance. **Immutable per contract** — a developer's economics can never change after deploy; rub3 changes its take only by shipping a new factory version, which affects future deploys only.
-- Direct (non-factory) deployment of the open-source contracts stays possible — it just isn't listable in the registry or marketplace. The fee buys distribution, verification, and liquidity, priced so routing around it costs more than paying it.
-- `rub3 deploy` (§2.5) goes through the factory by default.
-- Never charged: deploys, CLI, SDK, wrapper. No token.
+Reading the fee off a `factory` pointer at payment time was the alternative, and it is worse in both directions: it puts an external call on the money path, and it makes "immutable per contract" depend on the factory staying honest rather than on the deployed bytecode. As immutables, `feeBps()` and `treasury()` are what a buyer reads before purchasing and what that contract charges for as long as it exists. No setter exists on either side, and both setter names are now on the §2.4 forbidden list.
+
+Validation splits by who is being protected. `Rub3License` rejects `feeBps > 10000` (`FeeBpsTooHigh`) - an arithmetic bound, so the fee can never exceed the payment it is taken from - and rejects a fee without a treasury or a treasury without a fee (`FeeTermsInconsistent`), because the first strands every buyer's money unreachably and the second advertises a claim on revenue that does not exist. The protocol's own 200-300 bps range is a rule about what *rub3* charges, so it lives on `Rub3Factory`, where it is checked in the constructor while the rate is still choosable. **The rate itself is a deploy-time decision and is not chosen anywhere in this repository**: `script/DeployFactory.s.sol` requires `FEE_BPS` with no default.
+
+**The split runs on the amount received, not the listed price** - `Rub3License.sol`
+
+`_accrueFee(token, amount)` is called from `_payEth` and `_payWithAuthorization`, the two functions §2.2 shaped for exactly this, and from nowhere else. §2.2's prediction held: no entry point, no mint path, and no test fixture had to be restructured a second time.
+
+Charging the *listed* price instead would have left the fee trivially avoidable - list at zero, publish a client that pays the real price as "overpayment", collect it through `withdraw`, pay nothing - so the fee is taken on `msg.value` on the ETH rail and on the measured balance delta on the stablecoin rail. That also makes the arithmetic exact by construction rather than by argument: the two shares *are* the payment. Rounding is integer division and therefore favours the developer; a fee that rounded up could exceed the payment at the smallest amounts.
+
+**Accrued, not pushed** - `Rub3License.sol`
+
+`uint256 public feesAccrued` and `mapping(address => uint256) public tokenFeesAccrued`; `withdraw` and `withdrawToken` pay the balance *less* the accrual, and new permissionless `withdrawFees()` / `withdrawTokenFees(address)` sweep the accrual to `treasury`. The two balances are disjoint and neither side can reach the other's, in either withdrawal order.
+
+Transferring the fee inside `purchase()` was the obvious alternative and it is unfixably fragile: `treasury` is immutable, so a recipient that reverts on receipt - or that one day costs more gas than a buyer sent - would break every purchase on that contract forever. Accruing keeps the buyer's money path free of calls out, and a collection failure becomes rub3's problem rather than the buyer's. `test_accrual_rejectingTreasuryCannotBlockPurchases` is that scenario end to end: buyers still buy, the developer is still paid in full, and only rub3's own sweep fails.
+
+The sweeps are permissionless because their destination is immutable - the caller decides nothing but the timing, and rub3 collecting should not require rub3 to send a transaction on every contract that ever sold a licence. On a fee-free contract they revert `NoFeeConfigured` rather than burning the balance to `address(0)`.
+
+**`Rub3Factory`, and why it deploys through two helper contracts** - `Rub3Factory.sol` (new)
+
+`deployAccess(Rub3LicenseParams)` and `deploySubscription(Rub3LicenseParams, uint256 period)`, both recording `isDeployed[license] = true` plus an insertion-ordered `deployments()` list, so the registry (§3.2) and marketplace (§4.3) can enumerate the canonical set without replaying logs. `MIN_FEE_BPS` / `MAX_FEE_BPS` are `constant` (200 / 300) and `feeBps` / `treasury` `immutable`. The factory has no owner, no admin, and no way to touch or un-record anything it deployed - a listing that could be withdrawn would be a revocation surface pointed at the registry.
+
+A single factory **cannot** `new` both licence contracts: a contract's runtime code carries the creation code of everything it deploys, and the two are 16.7 KB + 18.4 KB against a 24,576-byte runtime limit. A `new` reached only from a *constructor* lands in the creation code, which is discarded after deployment, so the factory builds one `Rub3AccessDeployer` and one `Rub3SubscriptionDeployer` in its own constructor and holds their addresses as immutables. Its runtime is then 3.3 KB. Three consequences, all documented rather than hidden:
+
+- **The factory's fingerprint does not pin the implementations.** Verifying a factory means also fetching the code at `accessDeployer()` / `subscriptionDeployer()` and comparing those against the canonical manifest, where they now appear
+- **The deployers are callable by anyone**, and that is not a hole: calling one directly yields a licence contract no factory recorded, which is what deploying the template directly already gets you. Trust comes from `isDeployed`, never from who created the contract
+- **The factory's initcode is 42.0 KB against EIP-3860's 49,152**, so growing the licence contracts eats into it. `test_factory_initcodeFitsUnderEip3860` guards the margin, because the first sign of trouble would otherwise be an undeployable factory on mainnet
+
+**Constructor: `IdentityTerms`, forced by the stack** - both concrete contracts
+
+`FeeTerms` was a twelfth argument on `Rub3Subscription` and put it back over solc's stack limit in the constructor ABI decoder - the exact wall §2.2 hit and solved with `SaleTerms`. `identityModel` and `tbaImplementation` are now one `IdentityTerms` struct, which is the right grouping independently: the constructor already requires a TBA implementation for the account model and forbids one for the access model, so "which model" and "which implementation" were always one decision. `Rub3Access` is back to 10 constructor arguments and `Rub3Subscription` to 11. `forge create` takes it as `"(<identityModel>,<tbaImplementation>)"`, alongside the `SaleTerms` and `FeeTerms` tuples.
+
+Threaded through `script/Deploy.s.sol`, all four Foundry fixtures, and both wrapper e2e tests. The deployer contracts take their params as `memory` rather than `calldata` for the same stack reason.
+
+**`script/Deploy.s.sol` and `script/DeployFactory.s.sol`**
+
+- New optional `FACTORY` on `Deploy.s.sol`: set it and the deploy goes through that factory (fee-stamped and recorded), leave it and the deploy is direct (no fee, unrecorded). The fee is not an input either way - the factory reads it off itself. The summary prints which path was taken and the stamped terms
+- New `DeployFactory.s.sol` takes `FEE_BPS` and `TREASURY`, both required. `FEE_BPS` deliberately has no default: it decides rub3's take for every contract that factory will ever deploy
+
+**Ownership invariants (§2.4) swept in the same pass**
+
+- Forbidden-selector list grows 27 -> 29: `setFeeBps(uint16)` and `setTreasury(address)`, the setters that would unfreeze the economics of every contract a factory ever deployed. Every stated count updated together - `test/Rub3Invariants.t.sol`, the copy-pasteable loop in `contracts/contracts.md`, `architecture.md`'s bytecode table, and §2.4 below
+- The audit now runs against **four** targets rather than three: `Rub3Factory` joins the two licence contracts and the successor, because the factory is where the terms are chosen and a setter there would unfreeze them just as surely
+- `test_audit_scannerIsSound` gained `feeBps()` and `treasury()` as positive controls - the getters exist while every setter for them is absent, which is the shape "immutable per contract" has in the bytecode
+- `architecture.md`'s convention table loses a row: "the protocol fee is immutable per deploy" moves from convention to bytecode, which is the whole point of putting the terms on the licence contract
+
+**Tests** - 174 forge tests, up from 131; wrapper e2e 21, up from 18
+
+- `test/Rub3Factory.t.sol` (new): 43 tests in seven groups. The factory (terms stamped on both models, `isDeployed` + ordered enumeration, owner defaulting to the caller and an explicit owner honored, the `LicenseDeployed` log carrying the terms that deploy is frozen at, both ends of the fee range accepted and either side of it rejected, zero treasury rejected, and the two size limits); immutability (a *newer factory at a different rate* leaving an older deploy's terms and money untouched, the two factories' registries disjoint, and the contract owner running every power it has - reprice both rails, add a hash, repoint the successor, hand ownership to an attacker who then renounces - with the fee unmoved and still splitting afterwards); ETH arithmetic (exact split, either withdrawal order, no double-sweep, accumulation, the boundaries: 1 wei, the 39/40 wei rounding edge at 250 bps, a deliberately indivisible amount, 1,000,000 ether, and a 256-run fuzz over amount x rate asserting the shares sum to the payment and strand nothing); stablecoin arithmetic (the same set, plus unaccrued balance sweeping whole to the developer); **`test_bothRails_chargeIdenticallyForTheSameAmount`**, which prices one contract at the same *number* in wei and in the token's smallest unit and asserts `feesAccrued() == tokenFeesAccrued(usdc)` - the one-rule-two-rails claim as an equation; direct deployment (works, no fee, unrecorded, `NoFeeConfigured` on both sweeps, unpenalised on both rails); constructor validation; and the accrual rationale, including the rejecting treasury
+- Fee-evasion has its own test either side of the design choice: `test_eth_feeIsChargedOnWhatArrivedNotOnTheListedPrice` and `test_eth_zeroPriceListingCannotAvoidTheFee`
+- `tests/headless_e2e.rs`: 3 new anvil tests - a factory-deployed contract completing a real purchase on the **ETH rail** and on the **stablecoin rail**, each asserting the terms were stamped, the factory recorded the contract, the accrual matches the rate, and that after both sweeps the treasury and the developer between them hold the whole payment with nothing left in the contract; plus the counterweight, a direct deploy selling identically, accruing nothing, and reporting `isDeployed == false`. Balances are read with `cast`, not through the code under test
+- All 131 pre-§2.3 forge tests pass with their bodies unchanged; only constructor fixtures moved, to the `IdentityTerms` and `FeeTerms` tuples
+
+**Verification**
+- `forge test`: 174 pass, 0 failed
+- **Mutation-tested**: 14 deliberate regressions applied one at a time, each caught by a named test - neither rail taking a fee, either withdrawal ignoring the accrual, the fee charged on the listed price instead of what arrived, rounding flipped to favour the protocol, the fee pushed to the treasury on the money path, the factory's range check removed, the factory not recording its deploys, the factory stamping no fee, both constructor validations dropped, and `feeBps` / `treasury` made mutable with a setter (caught by the audit). No mutation survived
+- Wrapper matrix, all eight bundles: pass. `cargo clippy --all-targets -- -D warnings`: clean
+- Anvil e2e: `headless` 21/21 including the three new arms, `session_verify_onchain_e2e` 1/1
+- `contracts/canonical-bytecode.json` regenerated with `scripts/canonical-bytecode-hashes.sh update`; the blocking `check` gate passes. Five contracts are now fingerprinted, up from two
+- The audit snippet in `contracts/contracts.md` run verbatim against a live factory deployment: all 29 forbidden selectors absent, positive control found
+
+**Deliberately not done**
+- **No fee anywhere but `purchase()` and `renew()`.** Deploys are free (the factory charges nothing and the developer pays only gas), and the CLI, SDK, and wrapper are untouched. There is no token
+- No un-record, no delist, no owner on the factory. A listing that could be withdrawn is a revocation surface pointed at the registry, and the factory holding privilege over its deploys would undo the thing the fee's immutability is for
+- No fee on secondary transfers. The marketplace (§4.3) is its own mechanism with its own fee; ERC-721 transfer stays untouched, because a royalty hook on `_update` would be a call the holder cannot avoid on a token they already own
+- No discount, override, or exemption path. One rate per factory, applied to everything it deploys - anything else is a mutable fee wearing a different name
+- **No charge on value that did not arrive through a payment function.** A direct ERC-20 transfer, a `selfdestruct` beneficiary, or a coinbase payout is never accrued against, and `withdraw` / `withdrawToken` release it whole to the developer - so a developer who lists at zero and takes payment out of band pays no fee. Accepted on the economics, not left open by accident: the fee is an economic argument rather than a technical lock, a developer can already sell entirely off-chain and mint free licences, and charging on unaccounted balance would take a cut of mistaken transfers and airdrops, which are not revenue. What the fee buys is distribution, verification, and liquidity, priced so routing around it costs more than paying it. Documented in `contracts/contracts.md` → "The protocol fee" and `architecture.md` → "Rub3Factory", pinned by `test_token_unaccruedBalanceSweepsEntirelyToTheDeveloper`
 
 ### 2.4 - Ownership invariants `[complete]`
 
@@ -582,7 +638,7 @@ contract Rub3Factory {
 
 **No-revocation audit** - `test/Rub3Invariants.t.sol`
 - `_bytecodeHasSelector` scans deployed runtime code for a selector constant (solc emits each external function's selector as a literal `PUSH4` in the dispatcher, so absence from the code is absence from the ABI). `_assertNoFunction` asserts absence two independent ways: not in the bytecode, *and* a raw call carrying the selector reverts (there is no fallback to swallow it)
-- 27 forbidden signatures × 3 deployed contracts (`Rub3Access`, `Rub3Subscription`, and a successor `Rub3Access`) - 25 at §2.4, plus the two §2.2 added for its own per-token snapshots: burn, admin transfer / seizure, pause, direct invalidation of a token or its terms (including `setPeriod(uint256)`, whose absence is what keeps the renewal term a held token buys frozen), proxy/upgrade hooks, the removed `setWrapperHash` and any way to rewrite the set, forced migration, and `setPredecessor`
+- 29 forbidden signatures × 4 deployed contracts (`Rub3Access`, `Rub3Subscription`, a successor `Rub3Access`, and the §2.3 `Rub3Factory`) - 25 at §2.4, plus the two §2.2 added for its own per-token snapshots and the two §2.3 added for the fee terms: burn, admin transfer / seizure, pause, direct invalidation of a token or its terms (including `setPeriod(uint256)`, whose absence is what keeps the renewal term a held token buys frozen), proxy/upgrade hooks, the removed `setWrapperHash` and any way to rewrite the set, forced migration, `setPredecessor`, and the fee setters `setFeeBps` / `setTreasury`
 - A positive control (`test_audit_scannerIsSound`) proves the scanner finds selectors that *do* exist and that an unknown selector really reverts - without it the absence assertions prove nothing
 - Behavioural companions: the contract owner cannot `transferFrom` / `safeTransferFrom` / `approve` a token it does not hold; and an "owner does its worst" test runs every owner-only function that exists (max out the price, add a hash, revoke every hash, repoint the successor, drain the balance, hand ownership to an attacker, who repeats it and then renounces) and asserts `ownerOf`, `isValid`, `activate`, `renewPrice`, and transfer all survive
 
@@ -768,9 +824,10 @@ rub3/
 │   ├── src/
 │   │   ├── Rub3License.sol           # Abstract base: ERC-721 + Enumerable + Ownable, activation
 │   │   ├── Rub3Access.sol            # One-time purchase license
-│   │   └── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
+│   │   ├── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
+│   │   └── Rub3Factory.sol           # §2.3 - fee-stamping deploys + isDeployed
 │   ├── test/
-│   ├── script/Deploy.s.sol
+│   ├── script/                       # Deploy.s.sol, DeployFactory.s.sol
 │   └── contracts.md
 ├── licenses/com.rub3.example.json
 ├── scripts/
@@ -788,7 +845,6 @@ Planned (not yet created):
 │   ├── rub3-cli/                # §2.5 — pack, deploy, fetch, register
 │   └── tauri-plugin-rub3/       # §5.3
 ├── contracts/src/
-│   ├── Rub3Factory.sol          # §2.3 — fee-stamping deploys
 │   ├── Rub3Metered.sol          # §4.1 — per-launch billing
 │   └── Rub3Registry.sol         # §3.2 — discovery + agent cards
 ├── llms.txt                     # §3.3

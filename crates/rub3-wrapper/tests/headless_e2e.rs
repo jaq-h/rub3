@@ -168,13 +168,16 @@ fn deploy_access(price_wei: &str, supply_cap: &str, cooldown_blocks: &str) -> St
 
 /// Deploys `Rub3Access` with both rails configured.
 ///
-/// Constructor args (10): name, symbol, identityModel, tbaImplementation,
-/// wrapperHashes, sale, supplyCap, cooldownBlocks, predecessor, owner.
+/// Constructor args (10): name, symbol, identity, wrapperHashes, sale, fee,
+/// supplyCap, cooldownBlocks, predecessor, owner.
 ///
-/// `sale` is the `SaleTerms` tuple of contracts §2.2 - `(price, priceToken,
-/// priceAmount)` - which `forge create` takes as a parenthesised tuple. A zero
-/// `priceToken` advertises no stablecoin rail, which is what the wrapper reads
-/// to decide which currency to pay in.
+/// Three are tuples, which `forge create` takes parenthesised. `identity` is
+/// `(identityModel, tbaImplementation)`. `sale` is the `SaleTerms` of contracts
+/// §2.2 - `(price, priceToken, priceAmount)` - where a zero `priceToken`
+/// advertises no stablecoin rail, which is what the wrapper reads to decide
+/// which currency to pay in. `fee` is the `FeeTerms` of §2.3 -
+/// `(feeBps, treasury)` - and `(0, 0x0)` is a direct deploy carrying no
+/// protocol fee, which is what every arm here except the factory ones uses.
 ///
 /// `wrapperHashes` is the append-only hash set (contracts §2.4), seeded with a
 /// single stand-in release hash - the zero hash is rejected on-chain because it
@@ -186,17 +189,16 @@ fn deploy_access_with_rail(
     supply_cap: &str,
     cooldown_blocks: &str,
 ) -> String {
-    let wrapper_hashes = "[0x1111111111111111111111111111111111111111111111111111111111111111]";
     let sale = format!("({price_wei},{price_token},{price_amount})");
     forge_create(
         "src/Rub3Access.sol:Rub3Access",
         &[
             "Rub3 Headless Test",
             "RUB3H",
-            "0",
-            ZERO_ADDR,
-            wrapper_hashes,
+            NO_TBA_IDENTITY,
+            WRAPPER_HASHES,
             &sale,
+            NO_FEE,
             supply_cap,
             cooldown_blocks,
             ZERO_ADDR,
@@ -204,6 +206,17 @@ fn deploy_access_with_rail(
         ],
     )
 }
+
+/// The `IdentityTerms` tuple for the access model: model 0, no TBA
+/// implementation (the constructor forbids one for that model).
+const NO_TBA_IDENTITY: &str = "(0,0x0000000000000000000000000000000000000000)";
+
+/// The `FeeTerms` tuple a direct (non-factory) deploy carries: no fee, no
+/// treasury. The constructor rejects one without the other.
+const NO_FEE: &str = "(0,0x0000000000000000000000000000000000000000)";
+
+/// The append-only wrapper hash set, seeded with one stand-in release hash.
+const WRAPPER_HASHES: &str = "[0x1111111111111111111111111111111111111111111111111111111111111111]";
 
 /// Deploys the EIP-3009 stand-in for USDC from the Foundry test tree.
 ///
@@ -384,6 +397,119 @@ fn mine(n: u32) {
     assert!(
         output.status.success(),
         "anvil_mine failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+// ── The protocol fee (§2.3) ───────────────────────────────────────────────────
+
+/// Protocol fee the factory fixtures charge, in basis points (2.50%).
+///
+/// Inside the range `Rub3Factory` enforces and deliberately not either end of
+/// it: the rate is chosen per factory deploy, and a test naming 200 or 300
+/// would read as if one of them were settled.
+const FEE_BPS: u128 = 250;
+
+/// Where the fee accrues in the factory fixtures. Any address will do; it only
+/// has to be able to receive ETH, which a plain EOA can.
+const TREASURY_ADDR: &str = "0x00000000000000000000000000000000000EA5E7";
+
+/// Deploys a `Rub3Factory` at [`FEE_BPS`] paying [`TREASURY_ADDR`].
+fn deploy_factory() -> String {
+    forge_create(
+        "src/Rub3Factory.sol:Rub3Factory",
+        &[&FEE_BPS.to_string(), TREASURY_ADDR],
+    )
+}
+
+/// Deploys a `Rub3Access` *through* the factory, which is what stamps the fee.
+///
+/// `deployAccess` returns the address, but a transaction's return value is not
+/// in its receipt, so the address is read back off the factory's own
+/// insertion-ordered `deploymentAt(0)`. That also exercises the enumeration the
+/// registry will read.
+///
+/// The `Rub3LicenseParams` tuple mirrors the struct field for field, including
+/// the two nested tuples (`identity`, `sale`). `owner` is passed as the zero
+/// address, which the factory resolves to the caller.
+fn factory_deploy_access(
+    factory: &str,
+    price_wei: &str,
+    price_token: &str,
+    price_amount: &str,
+) -> String {
+    let params = format!(
+        "(\"Rub3 Headless Test\",\"RUB3H\",{NO_TBA_IDENTITY},{WRAPPER_HASHES},({price_wei},{price_token},{price_amount}),0,15,{ZERO_ADDR},{ZERO_ADDR})"
+    );
+    let output = Command::new("cast")
+        .args([
+            "send",
+            factory,
+            "deployAccess((string,string,(uint8,address),bytes32[],(uint256,address,uint256),uint256,uint256,address,address))",
+            &params,
+            "--private-key",
+            DEPLOYER_KEY,
+            "--rpc-url",
+            &rpc_url(),
+        ])
+        .output()
+        .expect("failed to run cast send deployAccess");
+    assert!(
+        output.status.success(),
+        "deployAccess failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    cast_call(factory, "deploymentAt(uint256)(address)", &["0"])
+}
+
+/// Reads a `uint256` getter through `cast`, so the fee assertions do not go
+/// through the code under test.
+fn cast_call_uint(contract: &str, sig: &str, args: &[&str]) -> u128 {
+    cast_call(contract, sig, args)
+        .parse()
+        .expect("getter did not return a number")
+}
+
+/// One `cast call`, returning the first whitespace-separated word of the output
+/// - which for a single-value return is the value.
+fn cast_call(contract: &str, sig: &str, args: &[&str]) -> String {
+    let url = rpc_url();
+    let mut argv = vec!["call", contract, sig];
+    argv.extend_from_slice(args);
+    argv.extend_from_slice(&["--rpc-url", &url]);
+
+    let output = Command::new("cast")
+        .args(&argv)
+        .output()
+        .expect("failed to run cast call");
+    assert!(
+        output.status.success(),
+        "cast call {sig} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .expect("empty cast call output")
+        .to_string()
+}
+
+/// Sends a transaction from the deployer key, used to settle the two halves of
+/// a split after the agent has bought.
+fn cast_send(contract: &str, sig: &str, args: &[&str]) {
+    let url = rpc_url();
+    let mut argv = vec!["send", contract, sig];
+    argv.extend_from_slice(args);
+    argv.extend_from_slice(&["--private-key", DEPLOYER_KEY, "--rpc-url", &url]);
+
+    let output = Command::new("cast")
+        .args(&argv)
+        .output()
+        .expect("failed to run cast send");
+    assert!(
+        output.status.success(),
+        "cast send {sig} failed:\n{}",
         String::from_utf8_lossy(&output.stderr),
     );
 }
@@ -865,6 +991,207 @@ fn headless_chain_id_mismatch_e2e() {
         other => panic!("expected ChainIdMismatch, got {other:?}"),
     }
     assert_eq!(err.exit_code(), 19);
+}
+
+// ── The protocol fee, end to end (§2.3) ───────────────────────────────────────
+
+/// A factory-deployed contract completing a real purchase on the **ETH rail**,
+/// with the fee landing in the right two places.
+///
+/// The forge suite proves the arithmetic; this proves the whole path holds
+/// against a real chain and a real agent: the wrapper, which knows nothing about
+/// the fee, buys exactly as it does from a fee-free contract, and afterwards the
+/// treasury and the developer between them hold the entire price with nothing
+/// stranded in the contract.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_factory_deploy_splits_the_eth_payment_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let factory = deploy_factory();
+    let contract = factory_deploy_access(&factory, PRICE_WEI, ZERO_ADDR, "0");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    // The terms really are stamped on the deployed contract, and the factory
+    // really did record it.
+    assert_eq!(cast_call_uint(&contract, "feeBps()(uint16)", &[]), FEE_BPS);
+    assert_eq!(
+        cast_call(&factory, "isDeployed(address)(bool)", &[&contract]),
+        "true",
+    );
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    let (session, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("headless activation against a factory deploy should succeed");
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { token_id, paid } => {
+            assert_eq!(*token_id, 0);
+            assert!(
+                matches!(paid, PaymentRail::Eth { price_wei } if *price_wei == PRICE_WEI),
+                "expected the ETH rail at the listed price, got {paid:?}",
+            );
+        }
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    let price: u128 = PRICE_WEI.parse().unwrap();
+    let expected_fee = price * FEE_BPS / 10_000;
+
+    assert_eq!(
+        cast_call_uint(&contract, "feesAccrued()(uint256)", &[]),
+        expected_fee,
+        "the protocol's share is accrued against the payment",
+    );
+    assert_eq!(
+        eth_balance(contract_addr),
+        price,
+        "and nothing has left yet"
+    );
+
+    // Settle both halves and check they add up to the payment exactly.
+    let treasury: Address = TREASURY_ADDR.parse().expect("malformed treasury address");
+    let developer: Address = DEPLOYER_ADDR.parse().expect("malformed deployer address");
+    let treasury_before = eth_balance(treasury);
+    let developer_before = eth_balance(developer);
+
+    cast_send(&contract, "withdrawFees()", &[]);
+    cast_send(&contract, "withdraw(address)", &[DEPLOYER_ADDR]);
+
+    assert_eq!(
+        eth_balance(treasury) - treasury_before,
+        expected_fee,
+        "the fee reached the treasury",
+    );
+    // The developer pays gas out of the same account, so their share is checked
+    // as "at least" - gas can only reduce it, never inflate it.
+    assert!(
+        eth_balance(developer) > developer_before,
+        "the developer's share reached them",
+    );
+    assert_eq!(
+        eth_balance(contract_addr),
+        0,
+        "nothing is stranded: the two shares are the whole payment",
+    );
+
+    // And it is a real licence, indistinguishable from a fee-free one.
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address()
+    );
+    session::verify_onchain(&session, &rpc_url()).expect("session must verify on-chain");
+}
+
+/// The same, on the **stablecoin rail**. The fee applies identically on both,
+/// and this is the arm that proves it against a chain rather than in the EVM
+/// test harness.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_factory_deploy_splits_the_stablecoin_payment_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let factory = deploy_factory();
+    let contract = factory_deploy_access(&factory, PRICE_WEI, &usdc, USDC_PRICE);
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    let (_session, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("headless activation on the stablecoin rail should succeed");
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { paid, .. } => match paid {
+            PaymentRail::Erc3009 { token, amount } => {
+                assert!(token.eq_ignore_ascii_case(&usdc));
+                assert_eq!(amount, USDC_PRICE);
+            }
+            other => panic!("expected the stablecoin rail, got {other:?}"),
+        },
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    let amount: u128 = USDC_PRICE.parse().unwrap();
+    let expected_fee = amount * FEE_BPS / 10_000;
+
+    assert_eq!(
+        cast_call_uint(&contract, "tokenFeesAccrued(address)(uint256)", &[&usdc]),
+        expected_fee,
+        "the protocol's share is accrued in the payment token",
+    );
+    assert_eq!(usdc_balance(&usdc, contract_addr), amount);
+
+    let treasury: Address = TREASURY_ADDR.parse().expect("malformed treasury address");
+    let developer: Address = DEPLOYER_ADDR.parse().expect("malformed deployer address");
+
+    cast_send(&contract, "withdrawTokenFees(address)", &[&usdc]);
+    cast_send(
+        &contract,
+        "withdrawToken(address,address)",
+        &[&usdc, DEPLOYER_ADDR],
+    );
+
+    assert_eq!(usdc_balance(&usdc, treasury), expected_fee);
+    assert_eq!(usdc_balance(&usdc, developer), amount - expected_fee);
+    assert_eq!(
+        usdc_balance(&usdc, contract_addr),
+        0,
+        "nothing is stranded on this rail either",
+    );
+    assert_eq!(
+        usdc_balance(&usdc, treasury) + usdc_balance(&usdc, developer),
+        amount,
+        "the two shares are the whole payment",
+    );
+}
+
+/// Direct deployment stays possible, is not penalised, and is simply
+/// unrecorded. The counterweight to the two arms above: the wrapper's behaviour
+/// is identical, no fee is taken, and the factory does not know the contract.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_direct_deploy_pays_no_fee_and_is_unrecorded_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let factory = deploy_factory();
+    let contract = deploy_access(PRICE_WEI, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    assert_eq!(cast_call_uint(&contract, "feeBps()(uint16)", &[]), 0);
+    assert_eq!(
+        cast_call(&factory, "isDeployed(address)(bool)", &[&contract]),
+        "false",
+        "a direct deploy is not listable, which is the whole difference",
+    );
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a direct deploy must still sell licences");
+
+    assert_eq!(cast_call_uint(&contract, "feesAccrued()(uint256)", &[]), 0);
+    assert_eq!(
+        eth_balance(contract_addr),
+        PRICE_WEI.parse::<u128>().unwrap(),
+        "the whole price is the developer's",
+    );
 }
 
 // ── The stablecoin rail (§2.2) ────────────────────────────────────────────────

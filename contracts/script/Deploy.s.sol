@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {Rub3Access}       from "../src/Rub3Access.sol";
+import {Rub3Factory, Rub3LicenseParams} from "../src/Rub3Factory.sol";
 import {Rub3License}      from "../src/Rub3License.sol";
 import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 
@@ -42,6 +43,14 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 ///                     migrations accepted). Frozen at deploy. The predecessor's
 ///                     owner must also point its `successor` here for claims to work.
 ///   PERIOD          — subscription length in seconds (required for "subscription")
+///   FACTORY         - address of a deployed Rub3Factory to deploy through
+///                     (default: 0x0 = deploy directly). Going through a factory
+///                     is what stamps the protocol fee and records the contract
+///                     in `isDeployed`, which is what the registry and the
+///                     marketplace list. Deploying directly still works and
+///                     carries no fee; it is simply unrecorded. The fee terms
+///                     are the factory's own immutables and cannot be chosen
+///                     here - see contracts.md -> "Protocol fee".
 ///
 /// Usage — dry run (no broadcast):
 ///   source .env && forge script script/Deploy.s.sol \
@@ -65,13 +74,13 @@ contract Deploy is Script {
         string  contractType;
         string  name;
         string  symbol;
-        uint8   identityModel;
-        address tbaImpl;
+        Rub3License.IdentityTerms identity;
         address predecessor;
         address owner;
         uint256 supplyCap;
         uint256 cooldownBlocks;
         uint256 period;
+        address factory;
         Rub3License.SaleTerms sale;
         bytes32[] wrapperHashes;
     }
@@ -92,7 +101,7 @@ contract Deploy is Script {
         p.contractType  = vm.envString("CONTRACT_TYPE");
         p.name          = vm.envString("TOKEN_NAME");
         p.symbol        = vm.envString("TOKEN_SYMBOL");
-        p.identityModel = uint8(vm.envUint("IDENTITY_MODEL"));
+        p.identity.model = uint8(vm.envUint("IDENTITY_MODEL"));
 
         // ── Optional params ───────────────────────────────────────────────────
         p.supplyCap      = vm.envOr("SUPPLY_CAP",      uint256(0));
@@ -101,9 +110,11 @@ contract Deploy is Script {
         // period is only required for "subscription"; default 0 for "access"
         p.period         = _eq(p.contractType, "subscription") ? vm.envUint("PERIOD") : 0;
         // TBA implementation - required for account model, forbidden for access model.
-        p.tbaImpl        = vm.envOr("TBA_IMPLEMENTATION", address(0));
+        p.identity.tbaImplementation = vm.envOr("TBA_IMPLEMENTATION", address(0));
         // Contract whose holders may migrate onto this one. Immutable once deployed.
         p.predecessor    = vm.envOr("PREDECESSOR", address(0));
+        // Deploy through a factory (fee-stamped and recorded) or directly (no fee).
+        p.factory        = vm.envOr("FACTORY", address(0));
         // Launch release binary hashes. The set is append-only from here on.
         p.wrapperHashes  = _wrapperHashes();
         // Both rails in one value; `priceAmount` must be 0 when no token is set.
@@ -116,18 +127,48 @@ contract Deploy is Script {
 
     /// Deploys the contract `CONTRACT_TYPE` names. Must run inside a broadcast.
     function _deploy(DeployParams memory p) internal returns (address) {
+        if (p.factory != address(0)) return _deployViaFactory(p);
+
+        // Direct deploy: no protocol fee, and no row in any factory's
+        // `isDeployed`. Both halves of that are deliberate - see
+        // {Rub3Factory}.
+        Rub3License.FeeTerms memory noFee =
+            Rub3License.FeeTerms({feeBps: 0, treasury: address(0)});
+
         if (_eq(p.contractType, "access")) {
             return address(new Rub3Access(
-                p.name, p.symbol, p.identityModel, p.tbaImpl, p.wrapperHashes,
-                p.sale, p.supplyCap, p.cooldownBlocks, p.predecessor, p.owner
+                p.name, p.symbol, p.identity, p.wrapperHashes,
+                p.sale, noFee, p.supplyCap, p.cooldownBlocks, p.predecessor, p.owner
             ));
         }
         if (_eq(p.contractType, "subscription")) {
             return address(new Rub3Subscription(
-                p.name, p.symbol, p.identityModel, p.tbaImpl, p.wrapperHashes,
-                p.sale, p.supplyCap, p.period, p.cooldownBlocks, p.predecessor, p.owner
+                p.name, p.symbol, p.identity, p.wrapperHashes,
+                p.sale, noFee, p.supplyCap, p.period, p.cooldownBlocks, p.predecessor, p.owner
             ));
         }
+        revert(string.concat("Deploy: unknown CONTRACT_TYPE '", p.contractType, "' (expected 'access' or 'subscription')"));
+    }
+
+    /// Deploys through `FACTORY`, which stamps its own immutable fee terms and
+    /// records the result. The fee is not an input here and cannot be: the
+    /// factory reads it off itself.
+    function _deployViaFactory(DeployParams memory p) internal returns (address) {
+        Rub3LicenseParams memory lp = Rub3LicenseParams({
+            name:              p.name,
+            symbol:            p.symbol,
+            identity:          p.identity,
+            wrapperHashes:     p.wrapperHashes,
+            sale:              p.sale,
+            supplyCap:         p.supplyCap,
+            cooldownBlocks:    p.cooldownBlocks,
+            predecessor:       p.predecessor,
+            owner:             p.owner
+        });
+
+        Rub3Factory factory = Rub3Factory(p.factory);
+        if (_eq(p.contractType, "access"))       return factory.deployAccess(lp);
+        if (_eq(p.contractType, "subscription")) return factory.deploySubscription(lp, p.period);
         revert(string.concat("Deploy: unknown CONTRACT_TYPE '", p.contractType, "' (expected 'access' or 'subscription')"));
     }
 
@@ -142,9 +183,12 @@ contract Deploy is Script {
         console.log("  chain:         %d", block.chainid);
         console.log("  name:          %s", p.name);
         console.log("  symbol:        %s", p.symbol);
-        console.log("  identityModel: %d  (%s)", p.identityModel, p.identityModel == 0 ? "access" : "account");
-        if (p.identityModel == 1) {
-            console.log("  tbaImpl:       %s", p.tbaImpl);
+        console.log("  identityModel: %d  (%s)",
+            p.identity.model,
+            p.identity.model == 0 ? "access" : "account"
+        );
+        if (p.identity.model == 1) {
+            console.log("  tbaImpl:       %s", p.identity.tbaImplementation);
         }
         console.log("  price:         %d wei", p.sale.price);
         if (p.sale.priceToken == address(0)) {
@@ -167,6 +211,16 @@ contract Deploy is Script {
             p.predecessor == address(0) ? "  (no migrations accepted)" : ""
         );
         console.log("  owner:         %s", p.owner);
+        if (p.factory == address(0)) {
+            console.log("  factory:       none  (direct deploy: no protocol fee, not registry-listable)");
+        } else {
+            console.log("  factory:       %s", p.factory);
+            console.log("  feeBps:        %d  (frozen: %d bps to %s)",
+                Rub3License(deployed).feeBps(),
+                Rub3License(deployed).feeBps(),
+                Rub3License(deployed).treasury()
+            );
+        }
         if (_eq(p.contractType, "subscription")) {
             console.log("  period:        %d sec", p.period);
             console.log("                 (~%d days)", p.period / 86400);

@@ -22,6 +22,21 @@ contract Rub3AccessTest is Test {
 
     /// The constructor seeds the append-only hash set from an array; most
     /// fixtures want exactly one launch hash.
+    function _identity(uint8 model, address tbaImplementation)
+        internal
+        pure
+        returns (Rub3License.IdentityTerms memory)
+    {
+        return Rub3License.IdentityTerms({model: model, tbaImplementation: tbaImplementation});
+    }
+
+    /// No protocol fee - what a direct (non-factory) deploy carries, and what
+    /// every fixture in this suite uses. The fee split has its own suite in
+    /// `Rub3Factory.t.sol`.
+    function _noFee() internal pure returns (Rub3License.FeeTerms memory) {
+        return Rub3License.FeeTerms({feeBps: 0, treasury: address(0)});
+    }
+
     function _hashes(bytes32 h) internal pure returns (bytes32[] memory out) {
         out = new bytes32[](1);
         out[0] = h;
@@ -35,8 +50,8 @@ contract Rub3AccessTest is Test {
 
     function setUp() public {
         nft = new Rub3Access(
-            "Rub3 Test", "R3T", IDENTITY, TBA_IMPL,
-            _hashes(WRAPPER_HASH), _sale(PRICE), SUPPLY_CAP, COOLDOWN_BLOCKS,
+            "Rub3 Test", "R3T", _identity(IDENTITY, TBA_IMPL),
+            _hashes(WRAPPER_HASH), _sale(PRICE), _noFee(), SUPPLY_CAP, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
         vm.deal(alice, 10 ether);
@@ -59,8 +74,8 @@ contract Rub3AccessTest is Test {
     function test_invalidIdentityModel_reverts() public {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.InvalidIdentityModel.selector, 2));
         new Rub3Access(
-            "x", "x", 2, TBA_IMPL, _hashes(WRAPPER_HASH),
-            _sale(PRICE), SUPPLY_CAP, COOLDOWN_BLOCKS,
+            "x", "x", _identity(2, TBA_IMPL), _hashes(WRAPPER_HASH),
+            _sale(PRICE), _noFee(), SUPPLY_CAP, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
     }
@@ -68,8 +83,8 @@ contract Rub3AccessTest is Test {
     function test_cooldownTooSmall_reverts() public {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.CooldownTooSmall.selector, 14, 15));
         new Rub3Access(
-            "x", "x", IDENTITY, TBA_IMPL, _hashes(WRAPPER_HASH),
-            _sale(PRICE), SUPPLY_CAP, 14,
+            "x", "x", _identity(IDENTITY, TBA_IMPL), _hashes(WRAPPER_HASH),
+            _sale(PRICE), _noFee(), SUPPLY_CAP, 14,
             NO_PREDECESSOR, owner
         );
     }
@@ -77,8 +92,8 @@ contract Rub3AccessTest is Test {
     function test_accessModel_rejectsNonZeroTbaImpl() public {
         vm.expectRevert(Rub3License.TbaImplementationForbidden.selector);
         new Rub3Access(
-            "x", "x", 0, address(0xBEEF),
-            _hashes(WRAPPER_HASH), _sale(PRICE), SUPPLY_CAP, COOLDOWN_BLOCKS,
+            "x", "x", _identity(0, address(0xBEEF)),
+            _hashes(WRAPPER_HASH), _sale(PRICE), _noFee(), SUPPLY_CAP, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
     }
@@ -86,8 +101,8 @@ contract Rub3AccessTest is Test {
     function test_accountModel_requiresTbaImpl() public {
         vm.expectRevert(Rub3License.TbaImplementationRequired.selector);
         new Rub3Access(
-            "x", "x", 1, address(0),
-            _hashes(WRAPPER_HASH), _sale(PRICE), SUPPLY_CAP, COOLDOWN_BLOCKS,
+            "x", "x", _identity(1, address(0)),
+            _hashes(WRAPPER_HASH), _sale(PRICE), _noFee(), SUPPLY_CAP, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
     }
@@ -95,8 +110,8 @@ contract Rub3AccessTest is Test {
     function test_accountModel_acceptsTbaImpl() public {
         address impl = address(0xDEAD);
         Rub3Access acct = new Rub3Access(
-            "Rub3 Acct", "R3A", 1, impl,
-            _hashes(WRAPPER_HASH), _sale(PRICE), SUPPLY_CAP, COOLDOWN_BLOCKS,
+            "Rub3 Acct", "R3A", _identity(1, impl),
+            _hashes(WRAPPER_HASH), _sale(PRICE), _noFee(), SUPPLY_CAP, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
         assertEq(acct.identityModel(),     1);
