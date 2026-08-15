@@ -199,8 +199,8 @@ rub3-wrapper --headless --token-id 3 --binary /path/to/your/app
 
 `--headless` requires a build with the `headless` feature; other builds exit 18.
 
-Before launching the wrapped binary the wrapper removes all four
-`RUB3_AGENT_*` variables (`RUB3_AGENT_KEY`, `RUB3_AGENT_KEYSTORE`,
+Before launching the wrapped binary the wrapper removes every `RUB3_AGENT_*`
+credential variable (`RUB3_AGENT_KEY`, `RUB3_AGENT_KEYSTORE`,
 `RUB3_AGENT_KEYSTORE_PASSWORD`, `RUB3_AGENT_KEYSTORE_PASSWORD_FILE`) from the
 child's environment, so it does not hand the licensed product the agent
 credential or the location of one. This is unconditional: there is no flag to
@@ -228,6 +228,9 @@ silent fall-through to a keystore.
 |---|---|
 | `RUB3_AGENT_MAX_TOKEN_AMOUNT` | The most this agent may authorize on a contract's stablecoin rail, an integer in that payment token's own smallest unit (USDC has 6 decimals, so 5 USDC is `5000000`) |
 
+This one is policy, not a credential, so unlike the signer sources above it is
+**not** stripped from the wrapped binary's environment.
+
 There is no default, and until it is set the stablecoin rail is **unavailable**
 rather than unlimited: the wrapper falls back to ETH and prints why. A default
 is not well defined here, because the unit belongs to whichever token the
@@ -237,9 +240,13 @@ silent zero and never a silent unlimited.
 
 A contract's ETH price and its stablecoin price are independent quotes with no
 on-chain relation - the contract holds no oracle - so this ceiling is what
-bounds the amount an agent will sign for. A listed amount above it exits 22 and
-buys nothing on either rail, rather than quietly switching currency, so a policy
-breach is distinguishable from a network failure.
+bounds the amount an agent will sign for. It is checked last, after the rail is
+known to be advertised, affordable, and signable, so it only ever weighs a
+purchase that would otherwise have happened. A listed amount above it on an
+otherwise usable rail exits 22 and buys nothing on either rail, rather than
+quietly switching currency, so a policy breach is distinguishable from a network
+failure. An agent that holds none of the token is not refused: it buys in ETH,
+exactly as it did before the stablecoin rail existed.
 
 For KMS, HSM, or enclave-backed keys, implement the `Signer` trait and pass it
 to `activation::ensure_headless` directly. Its only primitive is "sign this
@@ -274,7 +281,7 @@ activation failure.
 | 19 | Chain id mismatch between endpoint and build | Fix `RPC_URL` |
 | 20 | `--token-id` names a token this signer does not hold | Fix the id, or drop the flag to purchase |
 | 21 | Purchase broadcast but not confirmed - timed out, or the receipt query kept failing | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
-| 22 | The listed price is above the configured spend ceiling | Terminal - raise `RUB3_AGENT_MAX_TOKEN_AMOUNT` if the price is acceptable, or do not buy |
+| 22 | The listed price is above the configured spend ceiling, on a rail that was otherwise usable | Terminal - raise `RUB3_AGENT_MAX_TOKEN_AMOUNT` if the price is acceptable, or do not buy |
 
 Code 21 is deliberately not 14: the price may already have left the wallet, so
 a blind retry can buy a second license. Once the named transaction has mined,

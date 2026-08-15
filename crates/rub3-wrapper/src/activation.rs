@@ -330,7 +330,9 @@ child is the child's status and not an activation failure.
       `tx_hash=0x...`; resolve that transaction first, then re-run once it
       has mined or been dropped
   22  the listed price is above the configured spend ceiling - stderr
-      carries `rail=... listed=... maximum=... token=0x...`. Not
+      carries `rail=... listed=... maximum=... token=0x...`. Only
+      raised when that rail was otherwise usable, so it always means
+      the purchase was refused rather than routed elsewhere. Not
       retryable: raise RUB3_AGENT_MAX_TOKEN_AMOUNT or do not buy
 
 Signer sources, highest precedence first:
@@ -348,7 +350,11 @@ Spend policy:
                                         differ, so no single number means the
                                         same thing twice. Unset leaves the
                                         stablecoin rail unavailable and buys in
-                                        ETH; a malformed value is a hard error";
+                                        ETH; a malformed value is a hard error.
+                                        Checked last, after the rail is known to
+                                        be advertised, affordable and signable,
+                                        so it only ever refuses a purchase this
+                                        agent would otherwise have made";
 
 // ── Headless activation ───────────────────────────────────────────────────────
 
@@ -1045,24 +1051,38 @@ mod headless {
     }
 
     /// Picks the rail: the stablecoin one when the contract advertises it, the
-    /// operator has set a ceiling that covers the listed amount, the payment
-    /// token answers the reads an authorization needs, *and* the wallet holds
-    /// enough of it. ETH otherwise.
+    /// wallet can afford it, the payment token answers the reads an
+    /// authorization needs, *and* the operator's ceiling covers the listed
+    /// amount. ETH otherwise.
     ///
-    /// Every fallback below is a settled fact about this contract, this token,
-    /// or this wallet, and each one is printed with its cause. Two things are
-    /// deliberately not fallbacks:
+    /// The order of those four is load-bearing, and the ceiling is deliberately
+    /// last. The guard means "I would have paid this and policy says no", so it
+    /// may only fire once the rail was otherwise fully usable. An agent holding
+    /// none of the payment token was never going to spend it, and must not be
+    /// refused over money it could not have moved.
     ///
-    ///   * a **transport** failure on any of these reads stops the run. A
-    ///     blinking node must never silently change the currency, which is why
-    ///     the reads branch on [`rpc::RpcError::is_transport`] rather than
-    ///     treating every failure as an answer.
-    ///   * a listed amount **above the operator's ceiling** is a refusal, not a
-    ///     routing problem - see [`HeadlessError::PriceAbovePolicy`].
+    /// That splits the outcomes cleanly in two, and they must not be blurred:
     ///
-    /// ETH remains the fallback rather than a deprecated path: nothing that
-    /// bought a licence before §2.2 may start failing because a contract now
-    /// also lists a token, or because that token is imperfect.
+    ///   * **The rail was usable and only the ceiling stopped it.** A refusal:
+    ///     [`HeadlessError::PriceAbovePolicy`] and its own non-retryable exit
+    ///     code, never a quiet ETH purchase instead. An orchestrator has to be
+    ///     able to tell a policy breach from a network failure.
+    ///   * **The rail was not usable at all** - not advertised, not affordable,
+    ///     no readable EIP-712 domain, or no ceiling configured to size it by.
+    ///     ETH is then not a fallback from anything: it is the path this agent
+    ///     was always on. The printed reason names the fact that put it there
+    ///     and says nothing about a spend limit.
+    ///
+    /// A **transport** failure on any of these reads is neither of those: it
+    /// stops the run. That is why the reads branch on
+    /// [`rpc::RpcError::is_transport`] rather than treating every failure as an
+    /// answer - a blinking node must never silently change the currency.
+    ///
+    /// So ETH stays exactly what it was before §2.2 rather than a deprecated
+    /// path: nothing that bought a licence before may start failing because a
+    /// contract now also lists a token, because that token is imperfect, or
+    /// because the agent cannot afford a listing that happens to exceed a
+    /// ceiling.
     fn choose_rail(
         ctx: &HeadlessContext,
         contract: Address,
@@ -1074,16 +1094,6 @@ mod headless {
             return Ok(None);
         };
         let token = crate::identity::format_addr(price.token);
-
-        match SpendPolicy::from_env()?.check_token_amount(price.token, price.amount)? {
-            SpendVerdict::Allowed => {}
-            SpendVerdict::NoCeiling { var } => {
-                return Ok(eth_instead(format!(
-                    "no stablecoin spend ceiling is configured - set {var} to the most this \
-                     agent may authorize, in {token}'s own smallest unit",
-                )));
-            }
-        }
 
         let balance = match rpc::erc20_balance_of(&ctx.rpc_url, price.token, wallet) {
             Ok(balance) => balance,
@@ -1120,6 +1130,19 @@ mod headless {
                 )));
             }
         };
+
+        // Last, once every other question has said yes. Everything above is a
+        // reason the agent could not have paid on this rail; only here is it a
+        // question of whether it should.
+        match SpendPolicy::from_env()?.check_token_amount(price.token, price.amount)? {
+            SpendVerdict::Allowed => {}
+            SpendVerdict::NoCeiling { var } => {
+                return Ok(eth_instead(format!(
+                    "no stablecoin spend ceiling is configured - set {var} to the most this \
+                     agent may authorize, in {token}'s own smallest unit",
+                )));
+            }
+        }
 
         Ok(Some(TokenRail {
             price,
