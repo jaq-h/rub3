@@ -411,7 +411,7 @@ without `activate()` + cooldown + purchase), so `--features headless` and
 - `cargo clippy -p rub3-wrapper --all-targets -- -D warnings`: exit 0 under the default bundle and under `tier-0`/`1`/`2`/`3`/`4`, `tier-3,binary-encryption`, `tier-2,webview` and `tier-3,headless`. The six warnings `main` carried are fixed at the root, so CI's lint job now runs clippy as a blocking gate. `cargo fmt --all -- --check` is clean on every file except `tests/session_onchain_e2e.rs`, which §2.4 owns and is reformatting, so that step stays advisory until §2.4 lands
 
 **Deferred to §2.2**
-- USDC via EIP-3009. The headless purchase path is ETH-only today; §2.2 adds `purchaseWithAuthorization` and has headless prefer it when the contract advertises it
+- USDC via EIP-3009. The headless purchase path shipped here ETH-only; §2.2 below, now complete, adds `purchaseWithAuthorization` and has headless prefer it when the contract advertises it
 
 ### 2.2 - USDC purchase via EIP-3009 `[complete]`
 
@@ -513,6 +513,7 @@ The same two extra values pushed `Deploy.run()` itself over the stack limit, so 
 - Wrapper matrix, all eight bundles: pass. `cargo clippy --all-targets -- -D warnings`: clean (and a latent `clippy::zombie_processes` failure in `tests/session_onchain_e2e.rs`, which only surfaces under a bundle CI does not run clippy on, fixed in passing)
 - Anvil e2e: `headless` 18/18 including every new arm, `session_verify_onchain_e2e` 1/1
 - The `cast` recipe now in `contracts/contracts.md` run verbatim against anvil: mock USDC + `Rub3Access` deployed, buyer signs with `cast wallet sign --data`, the *deployer* submits, and the buyer ends holding token 0 having spent 5 USDC and exactly zero wei
+- Canonical bytecode fingerprints regenerated with `scripts/canonical-bytecode-hashes.sh update` on the forge version the `bytecode-fingerprints` job pins, and committed here as that gate requires. Both fingerprints moved, which a change to both contracts must; the recorded build block is untouched and the immutable-range counts are unchanged at 13 and 17, so the figures quoted in `contracts/contracts.md` still hold
 
 **Deliberately not done**
 - No hardcoded USDC address anywhere. `priceToken` is per-deploy and the wrapper reads it off the contract, so "which USDC deployment" is the developer's choice on any chain, not rub3's
