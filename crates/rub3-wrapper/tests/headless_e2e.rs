@@ -1449,6 +1449,8 @@ impl BlockingProxy {
     fn blocking(token: &str, selector: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy");
         let url = format!("http://{}", listener.local_addr().expect("proxy addr"));
+        // The accept loop polls a shutdown flag, so it must not park in
+        // `accept`. `relay` undoes this on each accepted stream; see there.
         listener.set_nonblocking(true).expect("proxy non-blocking");
 
         let upstream = format!("127.0.0.1:{PORT}");
@@ -1494,6 +1496,13 @@ impl Drop for BlockingProxy {
 /// Relays one client connection, request by request, until it blocks a call or
 /// either side goes quiet.
 fn relay(mut client: TcpStream, upstream_addr: &str, token: &str, selector: &str) {
+    // `accept` on the BSD socket layer returns a stream carrying the
+    // listener's non-blocking flag. Left set, the first read below returns
+    // `WouldBlock` before the request has arrived and this proxy would drop
+    // every connection instead of the one call it means to block.
+    if client.set_nonblocking(false).is_err() {
+        return;
+    }
     let _ = client.set_read_timeout(Some(Duration::from_secs(10)));
     let mut upstream: Option<TcpStream> = None;
 
