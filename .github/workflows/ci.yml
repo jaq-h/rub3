@@ -188,6 +188,10 @@ jobs:
   #                                                none: 57ef9e36... (unchanged)
   #
   # The script self-checks that setting and fails loudly if it is ever reverted.
+  # It discovers the deployable contracts from the artifacts of the build it
+  # just ran, keeping the ones whose compilationTarget sits under contracts/src,
+  # so a contract added on another branch is fingerprinted here without anybody
+  # editing the script.
   # When the contracts legitimately change, this job stays red until the
   # regenerated contracts/canonical-bytecode.json is committed in the same pull
   # request. That is the intended workflow, not a nuisance.

@@ -61,21 +61,10 @@ foundry_out="$(jq -er '.out' <<<"$foundry_config")" || {
 # --force so a stale build output directory cannot make a drifted build look clean.
 forge build --force >/dev/null
 
-# forge writes artifacts as <out>/<declaring file basename>/<contract name>.json,
-# so both the artifact path and the manifest's `source` field are derived from
-# the file that actually declared the contract rather than assumed from its
-# name. That keeps a contract in a subdirectory, and a second contract declared
-# inside an existing file, honest.
-artifact_of() {
-  local name="$1" source="$2"
-  printf '%s/%s/%s.json' "$foundry_out" "$(basename "$source")" "$name"
-}
-
 # sha256 of the raw bytes, not of the hex text: the hex string's case and its
 # "0x" prefix are presentation, and a future consumer hashing bytes must agree.
 hash_of() {
-  local name="$1" source="$2" artifact object
-  artifact="$(artifact_of "$name" "$source")"
+  local name="$1" source="$2" artifact="$3" object
   if [ ! -f "$artifact" ]; then
     echo "error: no artifact at contracts/$artifact for contract $name declared in contracts/$source" >&2
     return 1
@@ -112,8 +101,7 @@ MSG
 # themselves. Validated against the object's own length so a malformed or
 # out-of-bounds range is a hard failure rather than a published lie.
 immutable_ranges_of() {
-  local name="$1" source="$2" artifact object size
-  artifact="$(artifact_of "$name" "$source")"
+  local artifact="$1" object size
   object="$(jq -r '.deployedBytecode.object // ""' "$artifact")"
   size=$(( (${#object} - 2) / 2 ))
   jq -e --argjson size "$size" '
@@ -129,22 +117,76 @@ immutable_ranges_of() {
     | sort_by(.start, .length)' "$artifact" 2>/dev/null
 }
 
-# The deployable set is every concrete contract under src/, at any depth.
-# Abstract bases such as Rub3License have no deployedBytecode of their own and
-# are excluded here by construction (their declaration starts with `abstract`),
-# so a new sibling contract is picked up without editing this script.
+# The deployable set is derived from the artifacts forge just wrote, never from
+# parsing Solidity. Each artifact records the file and contract name it was
+# compiled from in .metadata.settings.compilationTarget, so restricting that to
+# the resolved source directory yields exactly the contracts this build
+# produced: at any depth, a second contract declared inside an existing file
+# included, test and script artifacts excluded, and a contract a sibling branch
+# adds picked up without editing this script. A declaration this script failed
+# to recognise can no longer leave a deployable contract unfingerprinted while
+# the gate stays green.
+#
+# Abstract bases such as Rub3License, and interfaces such as IRub3Predecessor,
+# have compilationTarget entries too but compile to an empty deployedBytecode
+# object, so they drop out here rather than being special-cased by keyword.
+# Anything with a non-empty object goes on to hash_of, whose stricter guard
+# still rejects an unlinked library placeholder rather than skipping it.
+#
+# `forge build --force` above clears the artifact directory first, which was
+# measured, so a contract deleted in this commit cannot linger here as a phantom.
+src_prefix="${foundry_src%/}/"
 entries=()
+unreadable=()
+while IFS= read -r -d '' artifact; do
+  targets="$(
+    jq -r --arg src "$src_prefix" '
+      (.metadata.settings.compilationTarget // {})
+      | if type != "object" then error("compilationTarget is not an object") else . end
+      | to_entries[]
+      | select(.key | startswith($src))
+      | [.value, .key] | @tsv' "$artifact"
+  )" || { unreadable+=("$artifact"); continue; }
+  [ -n "$targets" ] || continue
+  object="$(jq -r '.deployedBytecode.object // ""' "$artifact")" || { unreadable+=("$artifact"); continue; }
+  if [ -z "$object" ] || [ "$object" = "0x" ]; then continue; fi
+  while IFS= read -r target; do
+    if [ -n "$target" ]; then entries+=("$target"$'\t'"$artifact"); fi
+  done <<< "$targets"
+done < <(find "$foundry_out" -type f -name '*.json' -print0)
+
+if [ "${#unreadable[@]}" -gt 0 ]; then
+  {
+    echo "error: these files under contracts/$foundry_out could not be parsed as JSON, so the"
+    echo "       deployable contract set cannot be derived from this build:"
+    echo
+    printf '    contracts/%s\n' "${unreadable[@]}"
+    cat <<'MSG'
+
+The gate discovers contracts from the artifacts forge wrote rather than by
+reading Solidity, so an unreadable artifact could hide a deployable contract
+from the manifest. Clear the artifact directory and rebuild:
+
+    (cd contracts && forge clean && forge build)
+MSG
+  } >&2
+  exit 1
+fi
+
+[ "${#entries[@]}" -gt 0 ] || {
+  echo "error: no deployable contracts found under contracts/$foundry_src." >&2
+  echo "       The gate reads .metadata.settings.compilationTarget out of the artifacts in" >&2
+  echo "       contracts/$foundry_out and keeps the ones declared under contracts/$src_prefix," >&2
+  echo "       so this means the build produced none, or src and out do not belong to the" >&2
+  echo "       same resolved foundry config." >&2
+  exit 1
+}
+
+sorted_entries=()
 while IFS= read -r line; do
-  if [ -n "$line" ]; then entries+=("$line"); fi
-done < <(
-  find "$foundry_src" -type f -name '*.sol' -print0 \
-    | while IFS= read -r -d '' file; do
-        { grep -oE '^[[:space:]]*contract[[:space:]]+[A-Za-z0-9_]+' "$file" || true; } \
-          | awk -v f="$file" '{print $2 "\t" f}'
-      done \
-    | sort
-)
-[ "${#entries[@]}" -gt 0 ] || { echo "error: no deployable contracts found under contracts/$foundry_src" >&2; exit 1; }
+  if [ -n "$line" ]; then sorted_entries+=("$line"); fi
+done < <(printf '%s\n' "${entries[@]}" | sort)
+entries=("${sorted_entries[@]}")
 
 # The manifest keys contracts by name, and forge writes artifacts to
 # out/<file basename>/<contract>.json, so a name declared twice is ambiguous in
@@ -181,14 +223,14 @@ fi
 
 names=()
 sources=()
+artifacts=()
 hashes=()
 ranges=()
 for entry in "${entries[@]}"; do
-  name="${entry%%$'\t'*}"
-  source="${entry#*$'\t'}"
-  hash="$(hash_of "$name" "$source")" || exit 1
-  range="$(immutable_ranges_of "$name" "$source")" || {
-    echo "error: contracts/$(artifact_of "$name" "$source") has a" >&2
+  IFS=$'\t' read -r name source artifact <<< "$entry"
+  hash="$(hash_of "$name" "$source" "$artifact")" || exit 1
+  range="$(immutable_ranges_of "$artifact")" || {
+    echo "error: contracts/$artifact has a" >&2
     echo "       .deployedBytecode.immutableReferences block that is missing, malformed, or" >&2
     echo "       names a byte range outside the deployed bytecode, so the immutable slots a" >&2
     echo "       comparator must zero before hashing an on-chain deploy cannot be published." >&2
@@ -198,6 +240,7 @@ for entry in "${entries[@]}"; do
   }
   names+=("$name")
   sources+=("$source")
+  artifacts+=("$artifact")
   hashes+=("$hash")
   ranges+=("$range")
 done
@@ -213,8 +256,7 @@ done
 # it: solc resolves a compiler per pragma when solc_version is unpinned, and
 # per-path compilation restrictions can settle a sibling contract differently.
 settings_of() {
-  local name="$1" source="$2" artifact
-  artifact="$(artifact_of "$name" "$source")"
+  local artifact="$1"
   jq -e -S '{
     solc_version: .metadata.compiler.version,
     solc_settings: (.metadata.settings | del(.compilationTarget, .remappings))
@@ -229,8 +271,8 @@ settings_of() {
 build_settings=""
 ref_name=""
 for i in "${!names[@]}"; do
-  settings="$(settings_of "${names[$i]}" "${sources[$i]}")" || {
-    echo "error: contracts/$(artifact_of "${names[$i]}" "${sources[$i]}") carries no complete solc" >&2
+  settings="$(settings_of "${artifacts[$i]}")" || {
+    echo "error: contracts/${artifacts[$i]} carries no complete solc" >&2
     echo "       .metadata block, so the build inputs behind ${names[$i]}'s fingerprint cannot be" >&2
     echo "       recorded. Ensure forge is emitting artifact metadata (do not disable it in" >&2
     echo "       contracts/foundry.toml)." >&2
@@ -470,13 +512,24 @@ case "$mode" in
       cat "$drift_diff"
       cat <<'MSG'
 
-The compiled output of at least one contract changed, or a pinned build input
-did. If that change is intended, run
+Read the diff above before rerunning update, because there are two causes and
+they need different fixes.
+
+If a deployed_bytecode_sha256, an immutable_ranges list, or the set of contracts
+moved, the compiled output really changed. If that is intended, run
 
     scripts/canonical-bytecode-hashes.sh update
 
 and commit the updated contracts/canonical-bytecode.json in the same pull
 request. Never update it in a separate commit from the contract change.
+
+If instead the diff is confined to the build block while every fingerprint is
+unchanged, your forge is not the one this gate runs. forge assembles the
+standard-json settings recorded there, so a different forge can emit a different
+block from byte-identical contracts. The version CI uses is pinned on the
+bytecode-fingerprints job in .github/workflows/ci.yml; match it locally, or bump
+the pin, rerun update, and commit the regenerated manifest in this same pull
+request.
 MSG
       exit 1
     fi
