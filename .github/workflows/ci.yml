@@ -191,7 +191,10 @@ jobs:
   # It discovers the deployable contracts from the artifacts of the build it
   # just ran, keeping the ones whose compilationTarget sits under contracts/src,
   # so a contract added on another branch is fingerprinted here without anybody
-  # editing the script.
+  # editing the script. Abstract bases and interfaces drop out on their empty
+  # deployedBytecode, libraries on their AST contractKind: a library's runtime
+  # code carries a self-address placeholder, so no honest fingerprint can be
+  # published for one.
   # When the contracts legitimately change, this job stays red until the
   # regenerated contracts/canonical-bytecode.json is committed in the same pull
   # request. That is the intended workflow, not a nuisance.

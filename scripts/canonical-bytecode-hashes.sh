@@ -127,17 +127,23 @@ immutable_ranges_of() {
 # to recognise can no longer leave a deployable contract unfingerprinted while
 # the gate stays green.
 #
-# Abstract bases such as Rub3License, and interfaces such as IRub3Predecessor,
-# have compilationTarget entries too but compile to an empty deployedBytecode
-# object, so they drop out here rather than being special-cased by keyword.
-# Anything with a non-empty object goes on to hash_of, whose stricter guard
-# still rejects an unlinked library placeholder rather than skipping it.
+# Two kinds of non-deployable are dropped, both structurally. Abstract bases
+# such as Rub3License, and interfaces such as IRub3Predecessor, compile to an
+# empty deployedBytecode object. Libraries do not: they compile to real runtime
+# code whose leading 20 bytes are a zeroed self-address placeholder the deployer
+# patches, which is not an immutable and so appears in no immutable_ranges list.
+# Publishing one would be an instruction no comparator following contracts.md
+# could ever satisfy, so a library is excluded on its AST contractKind, which
+# `ast = true` in contracts/foundry.toml exists to provide. Anything that
+# survives goes on to hash_of, whose stricter guard still rejects an unlinked
+# library placeholder in a contract rather than skipping it.
 #
 # `forge build --force` above clears the artifact directory first, which was
 # measured, so a contract deleted in this commit cannot linger here as a phantom.
 src_prefix="${foundry_src%/}/"
 entries=()
 unreadable=()
+kindless=()
 while IFS= read -r -d '' artifact; do
   targets="$(
     jq -r --arg src "$src_prefix" '
@@ -151,7 +157,18 @@ while IFS= read -r -d '' artifact; do
   object="$(jq -r '.deployedBytecode.object // ""' "$artifact")" || { unreadable+=("$artifact"); continue; }
   if [ -z "$object" ] || [ "$object" = "0x" ]; then continue; fi
   while IFS= read -r target; do
-    if [ -n "$target" ]; then entries+=("$target"$'\t'"$artifact"); fi
+    [ -n "$target" ] || continue
+    target_name="${target%%$'\t'*}"
+    kind="$(
+      jq -er --arg name "$target_name" '
+        (.ast.nodes // null)
+        | if type != "array" then error("no ast") else . end
+        | map(select(.nodeType == "ContractDefinition" and .name == $name))
+        | if length == 0 then error("no ContractDefinition") else .[0].contractKind end
+        | if type != "string" then error("no contractKind") else . end' "$artifact" 2>/dev/null
+    )" || { kindless+=("$target_name, in contracts/$artifact"); continue; }
+    if [ "$kind" = "library" ]; then continue; fi
+    entries+=("$target"$'\t'"$artifact")
   done <<< "$targets"
 done < <(find "$foundry_out" -type f -name '*.json' -print0)
 
@@ -168,6 +185,25 @@ reading Solidity, so an unreadable artifact could hide a deployable contract
 from the manifest. Clear the artifact directory and rebuild:
 
     (cd contracts && forge clean && forge build)
+MSG
+  } >&2
+  exit 1
+fi
+
+if [ "${#kindless[@]}" -gt 0 ]; then
+  {
+    echo "error: the AST needed to tell a library from a contract is missing for:"
+    echo
+    printf '    %s\n' "${kindless[@]}"
+    cat <<'MSG'
+
+A library compiles to real runtime code whose leading 20 bytes are a zeroed
+self-address placeholder, not an immutable, so it belongs in no published
+fingerprint. Without the AST this gate cannot tell one apart and would publish
+it, so it stops instead of guessing.
+
+`ast = true` in contracts/foundry.toml is what emits it. Restore it, or drop any
+profile or FOUNDRY_* override switching it off, and rebuild.
 MSG
   } >&2
   exit 1
@@ -248,9 +284,14 @@ done
 # Build settings are read out of the emitted artifacts' own solc metadata, not
 # out of foundry.toml text, so the recorded inputs describe the build that
 # actually produced these hashes. `compilationTarget` is dropped because it is
-# per-contract, and `remappings` because forge derives them from how deep the
-# submodules happen to be initialised rather than from anything pinned here; a
-# remapping that actually changes compiled output still moves the fingerprint. A `[profile.*]` selection or a FOUNDRY_* env
+# per-contract. `remappings` is dropped because only part of it is pinned here:
+# contracts/remappings.txt fixes the two the rub3 contracts import through,
+# `@openzeppelin/contracts/=` and `forge-std/=`, and forge appends three of its
+# own (`erc4626-tests/=`, `halmos-cheatcodes/=`, `openzeppelin-contracts/=`)
+# derived from how deep the submodules happen to be initialised. Those three
+# describe the environment, not the build contract, and a remapping that
+# actually changes compiled output still moves the fingerprint. A `[profile.*]`
+# selection or a FOUNDRY_* env
 # override changes the artifacts too, and is therefore visible here. The manifest
 # records one build block for all contracts, so every artifact has to agree on
 # it: solc resolves a compiler per pragma when solc_version is unpinned, and
@@ -523,13 +564,18 @@ moved, the compiled output really changed. If that is intended, run
 and commit the updated contracts/canonical-bytecode.json in the same pull
 request. Never update it in a separate commit from the contract change.
 
-If instead the diff is confined to the build block while every fingerprint is
-unchanged, your forge is not the one this gate runs. forge assembles the
-standard-json settings recorded there, so a different forge can emit a different
-block from byte-identical contracts. The version CI uses is pinned on the
-bytecode-fingerprints job in .github/workflows/ci.yml; match it locally, or bump
-the pin, rerun update, and commit the regenerated manifest in this same pull
-request.
+If instead the only diff is inside build.solc_settings, with every fingerprint
+and build.dependencies unchanged, your forge is not the one this gate runs.
+forge assembles the standard-json settings recorded there, so a different forge
+can emit a different block from byte-identical contracts. The version CI uses is
+pinned on the bytecode-fingerprints job in .github/workflows/ci.yml; match it
+locally, or bump the pin, rerun update, and commit the regenerated manifest in
+this same pull request.
+
+A diff in build.dependencies is not that case. It means a pinned dependency
+revision moved, which is the first case above even when no fingerprint follows,
+because a dependency the src contracts do not compile against can change without
+touching their compiled output.
 MSG
       exit 1
     fi
