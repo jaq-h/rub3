@@ -248,9 +248,9 @@ To arrive at the same fingerprint from a checkout of this repository at a given 
 | `bytecode_hash` | `none` | `contracts/foundry.toml` |
 | `openzeppelin-contracts` | `b8c7b9e82d2b340cf82f2913c38e3a0bac2f96ae` | `contracts/foundry.lock` |
 | `forge-std` | `0844d7e1fc5e60d77b68e469bff60265f236c398` | `contracts/foundry.lock` |
-| dependency revisions, cross-check | the same two revisions | submodule gitlinks, `git ls-tree HEAD contracts/lib/` |
+| dependency revisions, cross-check | the same two revisions | submodule gitlinks, `git ls-tree HEAD contracts/lib/` (enforced by the gate) |
 
-`contracts/foundry.lock` is checked in and is a convenient mirror of the submodule gitlinks; the gitlinks are the git-authoritative record, so `git ls-tree HEAD contracts/lib/` is an independent confirmation path that does not require trusting a generated file. `forge` derives it from those same gitlinks, so the two cannot disagree.
+`contracts/foundry.lock` is checked in and is a convenient mirror of the submodule gitlinks; the gitlinks are the git-authoritative record, so `git ls-tree HEAD contracts/lib/` is an independent confirmation path that does not require trusting a generated file. Because the lock is tracked rather than regenerated into every fresh clone, the two could in principle drift apart in git, so the gate cross-checks them: it fails, showing both values, if any recorded revision disagrees with its gitlink or is missing a revision entirely. The confirmation path is enforced, not merely asserted.
 
 The manifest records `solc_version` as the full compiler string including its `+commit` suffix, for example `0.8.28+commit.7893614a`, because the compiler build is part of the build identity and exact reproduction is the whole point. `foundry.toml` pins the `0.8.28` half; `forge` resolves it to that exact commit.
 
@@ -293,6 +293,8 @@ scripts/canonical-bytecode-hashes.sh update
 Splitting that into a separate commit or pull request defeats the gate, which exists so that a fingerprint can never move without a reviewer seeing it move.
 
 New contracts under `contracts/src/` are picked up automatically, at any depth and including a second contract declared inside an existing file: discovery walks every `.sol` file under `contracts/src/` and derives both the artifact path and the manifest's `source` field from the file that declared each contract. Abstract bases such as `Rub3License` have no `deployedBytecode` of their own and are excluded by construction, since their declaration starts with `abstract`.
+
+The manifest keys contracts by name, so a name declared in two different files under `contracts/src/` fails the gate, naming both files, rather than being silently collapsed to whichever one sorted last. Give every contract under `contracts/src/` a unique name; the migration path is a new deploy of a differently named contract behind the successor pointer, not a second `Rub3Access` in a `v2/` directory.
 
 ## Auditing the invariants before buying
 

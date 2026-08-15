@@ -29,7 +29,7 @@ case "$mode" in
   *) echo "usage: $0 [check|update|print]" >&2; exit 2 ;;
 esac
 
-for bin in forge jq shasum xxd; do
+for bin in forge git jq shasum xxd; do
   command -v "$bin" >/dev/null 2>&1 || { echo "error: $bin not found on PATH" >&2; exit 1; }
 done
 
@@ -94,6 +94,39 @@ done < <(
     | sort
 )
 [ "${#entries[@]}" -gt 0 ] || { echo "error: no deployable contracts found under contracts/src" >&2; exit 1; }
+
+# The manifest keys contracts by name, and forge writes artifacts to
+# out/<file basename>/<contract>.json, so a name declared twice is ambiguous in
+# both places. Fail closed rather than let one entry silently replace the other
+# and leave a deployable contract with no recorded fingerprint.
+duplicate_names="$(printf '%s\n' "${entries[@]}" | cut -f1 | sort | uniq -d)"
+if [ -n "$duplicate_names" ]; then
+  {
+    echo "error: a contract name is declared in more than one file under contracts/src:"
+    echo
+    while IFS= read -r dup; do
+      printf '    %s, declared in:\n' "$dup"
+      printf '%s\n' "${entries[@]}" | awk -F'\t' -v d="$dup" '$1 == d { printf "      contracts/%s\n", $2 }'
+    done <<< "$duplicate_names"
+    cat <<'MSG'
+
+The manifest in contracts/canonical-bytecode.json keys contracts by name, so one
+of these would silently replace the other and a deployable contract would end up
+with no recorded fingerprint while this gate still passed. forge also writes
+artifacts to out/<declaring file basename>/<contract>.json, so two source files
+sharing a basename are ambiguous there as well.
+
+Rename one of the contracts so every contract name under contracts/src is
+unique, then run
+
+    scripts/canonical-bytecode-hashes.sh update
+
+and commit the updated contracts/canonical-bytecode.json in the same pull
+request.
+MSG
+  } >&2
+  exit 1
+fi
 
 names=()
 sources=()
@@ -163,10 +196,99 @@ MSG
   exit 1
 fi
 
+missing_revs="$(jq -r 'to_entries | map(select((.value.rev | type) != "string" or .value.rev == "")) | .[].key' foundry.lock)"
+if [ -n "$missing_revs" ]; then
+  {
+    echo "error: contracts/foundry.lock records no revision for:"
+    echo
+    printf '    %s\n' $missing_revs
+    cat <<'MSG'
+
+Every dependency revision is a build input behind the recorded fingerprints, so
+the manifest cannot record a null for one. This usually means forge changed the
+lock file's schema; regenerate it with
+
+    cd contracts && forge build
+
+If the regenerated lock still has no rev for those keys, read the revisions off
+the submodule gitlinks instead:
+
+    git ls-tree HEAD contracts/lib/
+
+Fix this and commit the refreshed contracts/foundry.lock together with a
+regenerated contracts/canonical-bytecode.json in the same pull request.
+MSG
+  } >&2
+  exit 1
+fi
+
+lock_deps="$(jq 'with_entries(.value = .value.rev)' foundry.lock)"
+
+if ! git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+  cat >&2 <<'MSG'
+error: cannot read the submodule gitlinks, because this tree is not a git
+checkout with a commit at HEAD. The gate cross-checks contracts/foundry.lock
+against the git-authoritative record of the pinned dependency revisions,
+
+    git ls-tree HEAD contracts/lib/
+
+so it cannot run here. Run it from a clone of this repository.
+MSG
+  exit 1
+fi
+
+gitlink_deps="$(
+  git -C "$repo_root" ls-tree HEAD contracts/lib/ \
+    | awk '$2 == "commit" { path = $4; sub(/^contracts\//, "", path); print path "\t" $3 }' \
+    | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: .[1]}) | from_entries'
+)"
+
+# contracts.md advertises `git ls-tree HEAD contracts/lib/` as the independent
+# confirmation path for the pinned revisions. Now that foundry.lock is tracked
+# rather than regenerated into every fresh clone, the two can disagree in git,
+# so the gate enforces the claim instead of asserting it.
+dependency_disagreements="$(
+  jq -n --argjson lock "$lock_deps" --argjson links "$gitlink_deps" '
+    ([($lock | keys[]), ($links | keys[])] | unique) as $keys
+    | [ $keys[]
+        | select(($lock[.] // null) != ($links[.] // null))
+        | {key: ., lock: ($lock[.] // null), gitlink: ($links[.] // null)} ]'
+)"
+if [ "$(printf '%s' "$dependency_disagreements" | jq 'length')" -ne 0 ]; then
+  {
+    echo "error: contracts/foundry.lock and the submodule gitlinks at HEAD disagree:"
+    echo
+    printf '%s' "$dependency_disagreements" | jq -r '.[] |
+      "    \(.key)\n      contracts/foundry.lock: \(.lock // "(not recorded)")\n      git ls-tree HEAD:       \(.gitlink // "(no gitlink at contracts/\(.key))")"'
+    cat <<'MSG'
+
+The dependency revisions are a build input behind the recorded fingerprints, and
+contracts/contracts.md publishes both records as pinning the same revisions. If
+they disagree, that published reproducibility claim is false, so this gate is red
+on purpose. Reconcile them in this pull request, whichever record is right:
+
+  - if the submodule gitlinks are right, regenerate the lock from the
+    checked-out submodules with `cd contracts && forge build`, then commit
+    contracts/foundry.lock
+
+  - if the lock is right, check each submodule out at the locked revision and
+    stage the gitlink:
+        git -C contracts/lib/<dep> checkout <rev> && git add contracts/lib/<dep>
+
+Then run
+
+    scripts/canonical-bytecode-hashes.sh update
+
+and commit the refreshed contracts/canonical-bytecode.json alongside it.
+MSG
+  } >&2
+  exit 1
+fi
+
 generated="$(
   jq -n \
     --argjson build "$build_settings" \
-    --slurpfile lock foundry.lock \
+    --argjson deps "$lock_deps" \
     --argjson contracts "$(
       for i in "${!names[@]}"; do
         jq -n --arg n "${names[$i]}" --arg s "${sources[$i]}" --arg h "${hashes[$i]}" \
@@ -177,9 +299,7 @@ generated="$(
       schema: 1,
       algorithm: "sha256(deployedBytecode.object)",
       note: "Regenerate with scripts/canonical-bytecode-hashes.sh update. See contracts/contracts.md -> Reproducible builds.",
-      build: ($build + {
-        dependencies: ($lock[0] | with_entries(.value = .value.rev))
-      }),
+      build: ($build + {dependencies: $deps}),
       contracts: $contracts
     }'
 )"
