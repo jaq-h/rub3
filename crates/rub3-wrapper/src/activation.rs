@@ -330,10 +330,11 @@ child is the child's status and not an activation failure.
       `tx_hash=0x...`; resolve that transaction first, then re-run once it
       has mined or been dropped
   22  the listed price is above the configured spend ceiling - stderr
-      carries `rail=... listed=... maximum=... token=0x...`. Only
-      raised when that rail was otherwise usable, so it always means
-      the purchase was refused rather than routed elsewhere. Not
-      retryable: raise RUB3_AGENT_MAX_TOKEN_AMOUNT or do not buy
+      carries `rail=... listed=... maximum=... token=0x...`. It reports
+      only that the price was refused: the ceiling is weighed before
+      anything is signed, so the rail was not exercised and this is no
+      evidence it is otherwise usable. Not retryable: raise
+      RUB3_AGENT_MAX_TOKEN_AMOUNT or do not buy
 
 Signer sources, highest precedence first:
   RUB3_AGENT_KEY                        raw hex private key (dev / CI only)
@@ -351,10 +352,12 @@ Spend policy:
                                         same thing twice. Unset leaves the
                                         stablecoin rail unavailable and buys in
                                         ETH; a malformed value is a hard error.
-                                        Checked last, after the rail is known to
-                                        be advertised, affordable and signable,
-                                        so it only ever refuses a purchase this
-                                        agent would otherwise have made";
+                                        Weighed after the rail is known to be
+                                        advertised, affordable and signable, and
+                                        before anything is signed: an
+                                        authorization is spendable by anyone who
+                                        sees it, so one must never exist for an
+                                        amount policy refuses";
 
 // ── Headless activation ───────────────────────────────────────────────────────
 
@@ -1276,19 +1279,19 @@ mod headless {
     }
 
     /// The 65-byte `r || s || v` packing an EOA signature is, with `v` in
-    /// {27, 28}.
+    /// {27, 28}, which is what [`alloy::primitives::Signature::as_bytes`]
+    /// produces.
     ///
     /// The licence contract hands these bytes straight to the payment token,
-    /// whose signature checker recovers a signer from exactly this layout. A
-    /// smart-contract wallet's EIP-1271 signature is not built here and need
-    /// not look like this at all - it goes through the same field untouched -
-    /// but the wrapper's own signers are keys, so this is what they produce.
+    /// whose signature checker recovers a signer from exactly this layout, so
+    /// the recovery byte is deliberately not hand-rolled here: an off-by-27
+    /// would yield an authorization the token attributes to some other address
+    /// entirely. A smart-contract wallet's EIP-1271 signature is not built here
+    /// and need not look like this at all - it goes through the same field
+    /// untouched - but the wrapper's own signers are keys, so this is what they
+    /// produce.
     fn pack_signature(signature: &alloy::primitives::Signature) -> [u8; 65] {
-        let mut packed = [0u8; 65];
-        packed[..32].copy_from_slice(&signature.r().to_be_bytes::<32>());
-        packed[32..64].copy_from_slice(&signature.s().to_be_bytes::<32>());
-        packed[64] = 27 + u8::from(signature.v());
-        packed
+        signature.as_bytes()
     }
 
     /// The token an unqualified run activates: the lowest id the signer holds.

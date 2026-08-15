@@ -169,13 +169,22 @@ A contract deployed with `PRICE_TOKEN` sells on two rails at once. `purchase(add
 
 That is a deliberate trade, made to admit smart-contract wallets. The `bytes` form validates through a signature checker: ECDSA recovery for a 65-byte EOA signature, falling through to EIP-1271 `isValidSignature` for a contract signer. Taking it means an ERC-4337 smart account - which is how a growing share of agent wallets hold funds, and agents are who this rail exists for - can buy a licence on the same single entry point an EOA uses. The split `(v, r, s)` form can only ever serve an EOA. Contract code is frozen at deploy, so supporting both later would mean a new deploy behind the successor pattern; narrower token support was judged the better price.
 
-Nothing on-chain can check this for you. The constructor probe reads `authorizationState`, which both forms have, and a staticcall probe for the overload itself cannot tell "no such function" from "bad signature" - both revert. So **verify it before deploying**, against the token address you are about to configure:
+Nothing on-chain can check this for you. The constructor probe reads `authorizationState`, which both forms have, and a staticcall probe for the overload itself cannot tell "no such function" from "bad signature" - both revert. So **verify it before deploying**, and verify it against the right address.
+
+**Resolve the implementation first.** USDC is deployed behind a `FiatTokenProxy`, and `cast interface` reads the ABI the explorer has for the address you give it. Asked about the proxy address - the one you configure as `PRICE_TOKEN` - it returns the proxy's own ABI (`implementation()`, `admin()`, `upgradeTo`, a fallback) and no `receiveWithAuthorization` at all. An empty grep against a proxy address therefore says nothing about the token; it is the same trap that makes a bytecode selector scan useless here.
 
 ```bash
-# Should print the overload. If your token only lists the (v, r, s) form,
-# it cannot be used as PRICE_TOKEN.
-cast interface <PRICE_TOKEN> --chain <CHAIN> | grep receiveWithAuthorization
+# 1. If the token is a proxy, this prints the implementation address.
+#    A non-proxy answers with the zero address or an error - then just use
+#    <PRICE_TOKEN> itself in step 2.
+cast implementation <PRICE_TOKEN> --rpc-url $RPC
+
+# 2. Ask the implementation what it exposes. The `bytes` overload must be
+#    listed alongside (or instead of) the (v, r, s) one.
+cast interface <IMPLEMENTATION_OR_TOKEN> --chain <CHAIN> | grep receiveWithAuthorization
 ```
+
+Read the output rather than the exit status: what you need is a line ending in `bytes signature)` (or `bytes)`). A listing that shows only the `(uint8, bytes32, bytes32)` form means the token cannot be used as `PRICE_TOKEN`. An *empty* result means the check did not answer - an unverified contract, the wrong chain, or a proxy address you have not resolved - and is not itself grounds to conclude anything about the token.
 
 A misconfiguration is not silent at runtime either, and it costs nobody a licence: the wrapper pre-flights the exact `purchaseWithAuthorization` call as an `eth_call` before broadcasting anything, and a token that reverts there selects the ETH rail with a printed reason naming the likely cause. No gas is spent and no activation is lost.
 
@@ -217,6 +226,10 @@ SALT=0x$(openssl rand -hex 32)
 NONCE=$(cast call <CONTRACT_ADDRESS> "purchaseAuthorizationNonce(address,bytes32)(bytes32)" \
   <BUYER> $SALT --rpc-url $RPC)
 
+# The authorization's expiry is signed, and step 3 has to submit the same
+# number, so bind it here rather than recomputing it from the clock later.
+VALID_BEFORE=$(( $(date +%s) + 900 ))
+
 # 2. Sign the authorization. `to` is the licence contract, `value` is
 #    `priceAmount()` exactly, and the domain is the token's own - read `name()`
 #    and `version()` off the token rather than assuming, then cross-check:
@@ -246,7 +259,7 @@ cat > auth.json <<EOF
   },
   "message": {
     "from": "<BUYER>", "to": "<CONTRACT_ADDRESS>", "value": "5000000",
-    "validAfter": "0", "validBefore": "$(( $(date +%s) + 900 ))",
+    "validAfter": "0", "validBefore": "$VALID_BEFORE",
     "nonce": "$NONCE"
   }
 }
@@ -258,11 +271,13 @@ EOF
 SIG=$(cast wallet sign --data --from-file auth.json --private-key $BUYER_KEY)
 
 # 3. Anyone submits it. `recipient` of 0x0 mints to the buyer who signed - never
-#    to the submitter. The buyer spends no gas and no ETH.
+#    to the submitter. The buyer spends no gas and no ETH. Every value in the
+#    tuple must be the one that was signed, which is why $VALID_BEFORE is bound
+#    above rather than recomputed here.
 cast send <CONTRACT_ADDRESS> \
   "purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,bytes))" \
   0x0000000000000000000000000000000000000000 \
-  "(<BUYER>,0,<VALID_BEFORE>,$SALT,$SIG)" \
+  "(<BUYER>,0,$VALID_BEFORE,$SALT,$SIG)" \
   --rpc-url $RPC --private-key $SUBMITTER_KEY
 ```
 
