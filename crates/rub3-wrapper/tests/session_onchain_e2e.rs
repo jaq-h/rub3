@@ -91,10 +91,16 @@ fn start_anvil() -> AnvilGuard {
 // ── Subprocess helpers ────────────────────────────────────────────────────────
 
 fn forge_create_rub3_access() -> String {
-    // 9 constructor args:
-    //   name, symbol, identityModel, tbaImplementation, wrapperHash,
-    //   price, supplyCap, cooldownBlocks, owner
-    let zero_hash = "0x0000000000000000000000000000000000000000000000000000000000000000";
+    // 10 constructor args:
+    //   name, symbol, identityModel, tbaImplementation, wrapperHashes,
+    //   price, supplyCap, cooldownBlocks, predecessor, owner
+    //
+    // `wrapperHashes` is the append-only hash set (contracts §2.4), seeded here
+    // with a single stand-in release hash - the zero hash is rejected on-chain
+    // because it is the `Unknown` sentinel. `predecessor` is the contract whose
+    // holders may migrate onto this one; zero means none.
+    let wrapper_hashes =
+        "[0x1111111111111111111111111111111111111111111111111111111111111111]";
     let zero_addr = "0x0000000000000000000000000000000000000000";
     let output = Command::new("forge")
         .current_dir(contracts_dir())
@@ -105,7 +111,8 @@ fn forge_create_rub3_access() -> String {
             "--private-key", DEPLOYER_KEY,
             "--rpc-url", &rpc_url(),
             "--constructor-args",
-            "Rub3 Test", "RUB3", "0", zero_addr, zero_hash, "0", "0", "15", DEPLOYER_ADDR,
+            "Rub3 Test", "RUB3", "0", zero_addr, wrapper_hashes, "0", "0", "15",
+            zero_addr, DEPLOYER_ADDR,
         ])
         .output()
         .expect("failed to run forge create");

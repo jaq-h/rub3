@@ -18,11 +18,20 @@ contract Rub3AccessTest is Test {
     uint256 internal constant COOLDOWN_BLOCKS = 15; // == MIN_COOLDOWN_BLOCKS
     uint8   internal constant IDENTITY        = 0; // access
     address internal constant TBA_IMPL        = address(0); // unused for access model
+    address internal constant NO_PREDECESSOR  = address(0); // accepts no migrations
+
+    /// The constructor seeds the append-only hash set from an array; most
+    /// fixtures want exactly one launch hash.
+    function _hashes(bytes32 h) internal pure returns (bytes32[] memory out) {
+        out = new bytes32[](1);
+        out[0] = h;
+    }
 
     function setUp() public {
         nft = new Rub3Access(
             "Rub3 Test", "R3T", IDENTITY, TBA_IMPL,
-            WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner
+            _hashes(WRAPPER_HASH), PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS,
+            NO_PREDECESSOR, owner
         );
         vm.deal(alice, 10 ether);
         vm.deal(bob,   10 ether);
@@ -33,7 +42,9 @@ contract Rub3AccessTest is Test {
     function test_metadata() public view {
         assertEq(nft.identityModel(),     IDENTITY);
         assertEq(nft.tbaImplementation(), TBA_IMPL);
-        assertEq(nft.wrapperHash(),       WRAPPER_HASH);
+        assertEq(uint8(nft.wrapperHashes(WRAPPER_HASH)), uint8(Rub3License.HashStatus.Valid));
+        assertEq(nft.wrapperHashCount(),  1);
+        assertEq(nft.wrapperHashAt(0),    WRAPPER_HASH);
         assertEq(nft.price(),             PRICE);
         assertEq(nft.supplyCap(),         SUPPLY_CAP);
         assertEq(nft.owner(),             owner);
@@ -41,19 +52,26 @@ contract Rub3AccessTest is Test {
 
     function test_invalidIdentityModel_reverts() public {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.InvalidIdentityModel.selector, 2));
-        new Rub3Access("x", "x", 2, TBA_IMPL, WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner);
+        new Rub3Access(
+            "x", "x", 2, TBA_IMPL, _hashes(WRAPPER_HASH),
+            PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, NO_PREDECESSOR, owner
+        );
     }
 
     function test_cooldownTooSmall_reverts() public {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.CooldownTooSmall.selector, 14, 15));
-        new Rub3Access("x", "x", IDENTITY, TBA_IMPL, WRAPPER_HASH, PRICE, SUPPLY_CAP, 14, owner);
+        new Rub3Access(
+            "x", "x", IDENTITY, TBA_IMPL, _hashes(WRAPPER_HASH),
+            PRICE, SUPPLY_CAP, 14, NO_PREDECESSOR, owner
+        );
     }
 
     function test_accessModel_rejectsNonZeroTbaImpl() public {
         vm.expectRevert(Rub3License.TbaImplementationForbidden.selector);
         new Rub3Access(
             "x", "x", 0, address(0xBEEF),
-            WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner
+            _hashes(WRAPPER_HASH), PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS,
+            NO_PREDECESSOR, owner
         );
     }
 
@@ -61,7 +79,8 @@ contract Rub3AccessTest is Test {
         vm.expectRevert(Rub3License.TbaImplementationRequired.selector);
         new Rub3Access(
             "x", "x", 1, address(0),
-            WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner
+            _hashes(WRAPPER_HASH), PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS,
+            NO_PREDECESSOR, owner
         );
     }
 
@@ -69,7 +88,8 @@ contract Rub3AccessTest is Test {
         address impl = address(0xDEAD);
         Rub3Access acct = new Rub3Access(
             "Rub3 Acct", "R3A", 1, impl,
-            WRAPPER_HASH, PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, owner
+            _hashes(WRAPPER_HASH), PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS,
+            NO_PREDECESSOR, owner
         );
         assertEq(acct.identityModel(),     1);
         assertEq(acct.tbaImplementation(), impl);
@@ -148,11 +168,20 @@ contract Rub3AccessTest is Test {
         assertEq(nft.price(), 1 ether);
     }
 
-    function test_setWrapperHash_onlyOwner() public {
+    function test_addWrapperHash_onlyOwner() public {
         bytes32 newHash = keccak256("v2");
+
+        vm.prank(alice);
+        vm.expectRevert();
+        nft.addWrapperHash(newHash);
+
         vm.prank(owner);
-        nft.setWrapperHash(newHash);
-        assertEq(nft.wrapperHash(), newHash);
+        nft.addWrapperHash(newHash);
+        assertEq(uint8(nft.wrapperHashes(newHash)), uint8(Rub3License.HashStatus.Valid));
+
+        // Appended, not replaced - the launch hash is still verifiable.
+        assertEq(uint8(nft.wrapperHashes(WRAPPER_HASH)), uint8(Rub3License.HashStatus.Valid));
+        assertEq(nft.wrapperHashCount(), 2);
     }
 
     function test_withdraw_transfersBalance() public {
