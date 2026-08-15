@@ -824,9 +824,10 @@ rub3/
 │   ├── src/
 │   │   ├── Rub3License.sol           # Abstract base: ERC-721 + Enumerable + Ownable, activation
 │   │   ├── Rub3Access.sol            # One-time purchase license
-│   │   └── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
+│   │   ├── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
+│   │   └── Rub3Factory.sol           # §2.3 - fee-stamping deploys + isDeployed
 │   ├── test/
-│   ├── script/Deploy.s.sol
+│   ├── script/                       # Deploy.s.sol, DeployFactory.s.sol
 │   └── contracts.md
 ├── licenses/com.rub3.example.json
 ├── scripts/
@@ -844,7 +845,6 @@ Planned (not yet created):
 │   ├── rub3-cli/                # §2.5 — pack, deploy, fetch, register
 │   └── tauri-plugin-rub3/       # §5.3
 ├── contracts/src/
-│   ├── Rub3Factory.sol          # §2.3 — fee-stamping deploys
 │   ├── Rub3Metered.sol          # §4.1 — per-launch billing
 │   └── Rub3Registry.sol         # §3.2 — discovery + agent cards
 ├── llms.txt                     # §3.3

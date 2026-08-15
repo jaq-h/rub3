@@ -109,13 +109,13 @@ jobs:
   #                                               per line). Every other file in
   #                                               the workspace is rustfmt-clean.
   #
-  # That file has carried the same hand-aligned constructor-argument lists since
-  # before section 2.4, and section 2.2 rewrote them again for the SaleTerms
-  # tuple - exactly the region rustfmt would reflow, which is why the drift has
-  # been deferred rather than fixed in passing each time. Nothing owns it
-  # concurrently now: the fmt step stays `continue-on-error` only until somebody
-  # runs rustfmt over that one file. At that point drop the `continue-on-error`
-  # below and fmt becomes a real gate too.
+  # That last file is the one a repo-wide rustfmt cleanup, queued separately, has
+  # to own: its constructor-argument list keeps being rewritten by whichever
+  # contract section is in flight (§2.2's `SaleTerms`, then §2.3's `IdentityTerms`
+  # / `FeeTerms`), which is exactly the region rustfmt would reflow, so formatting
+  # it from a feature branch buys a conflict and nothing else. The fmt step stays
+  # `continue-on-error` until that cleanup lands. At that point drop the
+  # `continue-on-error` below and fmt becomes a real gate too.
   #
   # The fmt failure is scoped to the STEP, not the job, so clippy regressions now
   # turn this check red. clippy runs with `-D warnings` on purpose: plain
