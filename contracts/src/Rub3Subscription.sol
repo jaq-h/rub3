@@ -64,20 +64,20 @@ contract Rub3Subscription is Rub3License {
     event Renewed(uint256 indexed tokenId, uint256 expiresAt, address priceToken, uint256 pricePaid);
 
     constructor(
-        string    memory name_,
-        string    memory symbol_,
-        uint8            identityModel_,
-        address          tbaImplementation_,
-        bytes32[] memory wrapperHashes_,
-        SaleTerms memory sale_,
-        uint256          supplyCap_,
-        uint256          period_,
-        uint256          cooldownBlocks_,
-        address          predecessor_,
-        address          owner_
+        string        memory name_,
+        string        memory symbol_,
+        IdentityTerms memory identity_,
+        bytes32[]     memory wrapperHashes_,
+        SaleTerms     memory sale_,
+        FeeTerms      memory fee_,
+        uint256              supplyCap_,
+        uint256              period_,
+        uint256              cooldownBlocks_,
+        address              predecessor_,
+        address              owner_
     ) Rub3License(
-        name_, symbol_, identityModel_, tbaImplementation_, wrapperHashes_,
-        sale_, supplyCap_, cooldownBlocks_, predecessor_, owner_
+        name_, symbol_, identity_, wrapperHashes_,
+        sale_, fee_, supplyCap_, cooldownBlocks_, predecessor_, owner_
     ) {
         period = period_;
 

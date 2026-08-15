@@ -57,16 +57,19 @@ rub3/
 │   ├── src/
 │   │   ├── Rub3License.sol           # Abstract base (ERC-721 + Enumerable + Ownable)
 │   │   ├── Rub3Access.sol            # One-time purchase license
-│   │   └── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
+│   │   ├── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
+│   │   └── Rub3Factory.sol           # §2.3 - fee-stamping deploys + isDeployed, and its two deployer helpers
 │   ├── test/
 │   │   ├── Rub3Access.t.sol
 │   │   ├── Rub3Subscription.t.sol
 │   │   ├── Rub3Invariants.t.sol      # Ownership invariants (§2.4) + no-revocation bytecode audit
 │   │   ├── Rub3TokenPurchase.t.sol   # Stablecoin rail (§2.2): EIP-3009 authorization, replay, front-running
+│   │   ├── Rub3Factory.t.sol         # §2.3: fee immutability, exact split on both rails, direct deploys
 │   │   └── mocks/
 │   │       └── MockEIP3009Token.sol  # Faithful EIP-3009 stand-in for USDC, plus its negative fixtures
 │   ├── script/
-│   │   └── Deploy.s.sol              # Deploy either contract to any EVM chain
+│   │   ├── Deploy.s.sol              # Deploy either contract to any EVM chain, directly or via FACTORY
+│   │   └── DeployFactory.s.sol       # Deploy a Rub3Factory (FEE_BPS + TREASURY, both required)
 │   ├── foundry.toml
 │   ├── remappings.txt                # Import remappings pinned in-tree (a reproducibility input)
 │   ├── foundry.lock                  # Pinned dependency revisions, mirrors the submodule gitlinks
@@ -341,13 +344,14 @@ See [implementation.md](implementation.md) for the full roadmap.
 - Tier-3 on-chain re-verification: `session::verify_onchain` confirms tx status/contract/block hash; `try_session_fast_path` re-verifies ~1 in 5 cold starts (offline errors fall open, verdict-contradicting errors fall closed). Covered by an anvil-gated E2E test (`tests/session_onchain_e2e.rs`)
 - Identity models: `identityModel` + `tbaImplementation` on-chain, local ERC-6551 TBA derivation (`identity.rs`), identity fields signed into the session preimage
 - Purchase UI: in-wrapper purchase flow for tier 3+ (price/supply reads, calldata encoding, receipt polling, minted-token recovery)
-- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 131 forge tests
+- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 174 forge tests
 - Ownership invariants (§2.4): append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor` and the `honorsContract` trust rule, per-token `renewPrice` snapshot, and a no-revocation bytecode audit
 - **USDC purchases via EIP-3009 (§2.2):** `purchaseWithAuthorization` / `renewWithAuthorization` alongside the ETH path, taking a payment authorization the buyer signs off-chain that anyone may submit - so an agent holding only stablecoins can obtain a licence without ever owning ETH. Uses `receiveWithAuthorization` (payee-only) so the authorization cannot be spent outside the licence contract, and binds the mint recipient into the derived nonce so a submitter cannot redirect it. Both rails reach one mint; subscriptions freeze both per token. The authorization carries an opaque `bytes signature`, so an EIP-1271 smart-contract wallet buys on the same entry point as an EOA - which requires a payment token exposing Circle's FiatTokenV2_2-style `bytes` overload of `receiveWithAuthorization`; a token implementing only EIP-3009's `(v, r, s)` form is not supported. The wrapper's headless path prefers the stablecoin rail whenever the contract advertises one, the wallet can cover it, and the operator's `RUB3_AGENT_MAX_TOKEN_AMOUNT` ceiling covers the listed amount - see [Spend policy](#spend-policy)
-- Deploy script: `forge script` deploys either contract to any EVM chain from env vars
+- **`Rub3Factory` + protocol fee (§2.3):** the canonical deployment path. `deployAccess` / `deploySubscription` stamp an immutable protocol fee (`feeBps`, `treasury`) into every contract they deploy and record it in `isDeployed`, which is the registry's and marketplace's whole trust rule. The split runs on-chain inside `purchase()` / `renew()` on **both** payment rails, charged on the amount received so a zero-price listing cannot route around it, and accrued in the contract rather than pushed - so an immutable treasury that cannot receive can never block a purchase. Both fee terms are `immutable` on the licence contract *and* the factory, with no setter on either, so a developer's economics can never change after deploy; rub3 changes its take only by deploying a new factory. Direct deployment stays possible, carries no fee, and is simply unrecorded. Nothing is charged on deploys, the CLI, the SDK, or the wrapper, and there is no token
+- Deploy script: `forge script` deploys either contract to any EVM chain from env vars, directly or through a factory (`FACTORY`); `script/DeployFactory.s.sol` deploys the factory itself
 - **Headless activation (the agent front door):** `activation::ensure_headless(signer, ctx)` runs `tokensOfOwner` → purchase if empty → cooldown check → `activate()` → local session signature → `verify_local` → persist, in one call. A `Signer` trait (env key / encrypted keystore / KMS-backed impl) keeps raw key handling in a single auditable type; `webview` and `headless` are independent Cargo features, and a headless build links no GUI dependency at all. `--headless [--token-id N]` with documented exit codes, covered by an anvil-gated E2E
 
-**Not yet implemented (agent-first roadmap):** `Rub3Factory` with immutable protocol fee split, CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
+**Not yet implemented (agent-first roadmap):** CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
 
 ## Direction
 

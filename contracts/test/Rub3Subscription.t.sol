@@ -20,6 +20,21 @@ contract Rub3SubscriptionTest is Test {
     address internal constant TBA_IMPL        = address(0xBEEF); // any non-zero impl
     address internal constant NO_PREDECESSOR  = address(0);
 
+    function _identity(uint8 model, address tbaImplementation)
+        internal
+        pure
+        returns (Rub3License.IdentityTerms memory)
+    {
+        return Rub3License.IdentityTerms({model: model, tbaImplementation: tbaImplementation});
+    }
+
+    /// No protocol fee - what a direct (non-factory) deploy carries, and what
+    /// every fixture in this suite uses. The fee split has its own suite in
+    /// `Rub3Factory.t.sol`.
+    function _noFee() internal pure returns (Rub3License.FeeTerms memory) {
+        return Rub3License.FeeTerms({feeBps: 0, treasury: address(0)});
+    }
+
     function _hashes(bytes32 h) internal pure returns (bytes32[] memory out) {
         out = new bytes32[](1);
         out[0] = h;
@@ -33,8 +48,8 @@ contract Rub3SubscriptionTest is Test {
 
     function setUp() public {
         nft = new Rub3Subscription(
-            "Rub3 Sub", "R3S", IDENTITY, TBA_IMPL,
-            _hashes(WRAPPER_HASH), _sale(PRICE), SUPPLY_CAP, PERIOD, COOLDOWN_BLOCKS,
+            "Rub3 Sub", "R3S", _identity(IDENTITY, TBA_IMPL),
+            _hashes(WRAPPER_HASH), _sale(PRICE), _noFee(), SUPPLY_CAP, PERIOD, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
         vm.deal(alice, 10 ether);

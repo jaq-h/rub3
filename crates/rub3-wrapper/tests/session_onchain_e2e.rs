@@ -96,12 +96,16 @@ fn start_anvil() -> AnvilGuard {
 
 fn forge_create_rub3_access() -> String {
     // 10 constructor args:
-    //   name, symbol, identityModel, tbaImplementation, wrapperHashes,
-    //   sale, supplyCap, cooldownBlocks, predecessor, owner
+    //   name, symbol, identity, wrapperHashes, sale, fee, supplyCap,
+    //   cooldownBlocks, predecessor, owner
     //
-    // `sale` is the `SaleTerms` tuple of contracts §2.2 - (price in wei,
-    // priceToken, priceAmount) - passed to `forge create` as a parenthesised
-    // tuple. A zero priceToken advertises no stablecoin rail.
+    // Three of them are tuples that `forge create` takes parenthesised.
+    // `identity` is `(identityModel, tbaImplementation)`. `sale` is the
+    // `SaleTerms` of contracts §2.2 - (price in wei, priceToken, priceAmount) -
+    // where a zero priceToken advertises no stablecoin rail. `fee` is the
+    // `FeeTerms` of §2.3 - (feeBps, treasury) - and `(0, 0x0)` is what a direct
+    // deploy carries: no protocol fee. The fee split has its own anvil arm in
+    // `headless_e2e.rs`, which deploys through `Rub3Factory`.
     //
     // `wrapperHashes` is the append-only hash set (contracts §2.4), seeded here
     // with a single stand-in release hash - the zero hash is rejected on-chain
@@ -119,10 +123,15 @@ fn forge_create_rub3_access() -> String {
             "--private-key", DEPLOYER_KEY,
             "--rpc-url", &rpc_url(),
             "--constructor-args",
-            "Rub3 Test", "RUB3", "0", zero_addr, wrapper_hashes,
+            "Rub3 Test", "RUB3",
+            // IdentityTerms: (identityModel, tbaImplementation).
+            "(0,0x0000000000000000000000000000000000000000)",
+            wrapper_hashes,
             // SaleTerms: (price wei, priceToken, priceAmount). This fixture
             // sells for free on the ETH rail and advertises no token rail.
             "(0,0x0000000000000000000000000000000000000000,0)",
+            // FeeTerms: (feeBps, treasury). Direct deploy, so no fee.
+            "(0,0x0000000000000000000000000000000000000000)",
             "0", "15", zero_addr, DEPLOYER_ADDR,
         ])
         .output()

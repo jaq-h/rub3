@@ -16,10 +16,10 @@ Three commitments shape every design decision below:
 
 | | Can never change | Can change (affects future only) |
 |---|---|---|
-| **Developer** | validity of issued tokens; transfer rights; per-token renewal terms (`renewPrice`, `renewPriceToken`, `renewPriceAmount`, `period`); supply cap; identity model; TBA implementation; cooldown; predecessor link | price for new sales on either rail (`price`, `priceToken` / `priceAmount`); wrapper hash set (append + flag only); successor pointer; registry listing |
+| **Developer** | validity of issued tokens; transfer rights; per-token renewal terms (`renewPrice`, `renewPriceToken`, `renewPriceAmount`, `period`); supply cap; identity model; TBA implementation; cooldown; predecessor link; protocol fee terms (`feeBps`, `treasury`) | price for new sales on either rail (`price`, `priceToken` / `priceAmount`); wrapper hash set (append + flag only); successor pointer; registry listing |
 | **rub3** | fee on any deployed contract; validation logic | factory versions; registry curation; marketplace; facilitator |
 
-Every "can never change" cell in the developer row is enforced by bytecode today and checkable before purchase - see [Ownership invariants](#ownership-invariants-all-license-contracts) for the audit procedure and for the shorter list of properties that are still convention rather than proof.
+Every "can never change" cell in the developer row is enforced by bytecode today and checkable before purchase - and since §2.3 that includes the fee, so "rub3 cannot raise its take on a contract you already deployed" is now a property of the bytecode rather than a promise. See [Ownership invariants](#ownership-invariants-all-license-contracts) for the audit procedure and for the shorter list of properties that are still convention rather than proof.
 
 **Open rails, owned network.** The wrapper, SDK, CLI, and contract templates are open source and free. Revenue lives where network effects live: an immutable 2–3% protocol fee stamped into factory-deployed contracts, metered per-launch billing only the wrapper can enforce, and (once volume exists) marketplace fees on secondary license trades. x402 can meter API calls because the server is a choke point; the wrapper is that choke point for locally executed software.
 
@@ -479,22 +479,32 @@ Key behaviors:
 - **Device binding (tier 4)**: `registeredDevice` stores the public key of the device that activated. The wrapper signs each launch's block hash with its device private key and verifies against this on-chain value.
 - **Single active session**: Creating a new session (for a pirate) immediately invalidates the holder's own session. The holder must choose between keeping access or giving it away.
 
-#### Rub3Factory *(planned — implementation.md §2.3)*
+#### Rub3Factory *(implementation.md §2.3)*
 
 All canonical deployments go through a factory that stamps the protocol's economics and invariants:
 
 ```solidity
 contract Rub3Factory {
-    uint16  public immutable feeBps;    // 200–300; frozen per factory version
+    uint16  public constant  MIN_FEE_BPS = 200;  // the range any rub3 factory may charge
+    uint16  public constant  MAX_FEE_BPS = 300;
+    uint16  public immutable feeBps;    // chosen per factory deploy, frozen at construction
     address public immutable treasury;  // rub3 fee recipient
     mapping(address => bool) public isDeployed;  // registry + marketplace trust only these
 
-    function deployAccess(...) external returns (address);
-    function deploySubscription(...) external returns (address);
+    function deployAccess(Rub3LicenseParams calldata) external returns (address);
+    function deploySubscription(Rub3LicenseParams calldata, uint256 period) external returns (address);
 }
 ```
 
-The fee split executes on-chain inside `purchase()` / `renew()`: `feeBps` to `treasury`, remainder to the developer. **Immutable per contract** — a developer's economics can never change after deploy; rub3 changes its take only by shipping a new factory version, which affects future deploys only. Direct (non-factory) deployment of the open-source contracts is always possible — it just isn't listable in the registry or marketplace. The fee buys distribution, verification, and liquidity, priced so routing around it costs more than paying it.
+The fee split executes on-chain inside `purchase()` / `renew()`, on **both** payment rails: `feeBps` of what arrived to `treasury`, the remainder to the developer's `withdraw()` balance. **Immutable per contract** - `feeBps` and `treasury` are `immutable` on the factory *and* on every contract it deploys, so a developer's economics can never change after deploy; rub3 changes its take only by deploying a new factory, which affects contracts deployed by that factory and nothing that already exists. Direct (non-factory) deployment of the open-source contracts is always possible - it carries no fee and simply isn't listable in the registry or marketplace. The fee buys distribution, verification, and liquidity, priced so routing around it costs more than paying it.
+
+Three properties of the split are load-bearing rather than incidental, and each closes a specific failure:
+
+- **Charged on the amount received, not the listed price.** Otherwise a developer lists at zero, has their client pay the real price as "overpayment", and the fee on every sale is zero while the money still lands in `withdraw`. Charging what arrived also makes the arithmetic exact by construction: the two shares are the payment, with nothing left over.
+- **Rounding favours the developer.** Integer division, so a sub-unit fee is zero rather than one. A fee that rounded up could exceed the payment at the smallest amounts.
+- **Accrued in the contract, not pushed to the treasury on the money path.** `treasury` is immutable, so a transfer inside `purchase()` would let a recipient that reverts on receipt break every purchase on that contract forever, unfixably. The fee is held and swept by `withdrawFees()` / `withdrawTokenFees(address)`, which are permissionless because the destination cannot be chosen. `withdraw` and `withdrawToken` pay the balance *less* the accrual, so the two shares are disjoint and neither side can reach the other's.
+
+The factory cannot `new` both licence contracts directly - their creation code together is over 30 KB against a 24,576-byte runtime limit - so it constructs one `Rub3AccessDeployer` and one `Rub3SubscriptionDeployer` in its own constructor and holds their addresses as immutables. The consequence for an auditor: the factory's own bytecode fingerprint does not pin which licence implementations it deploys, so verifying a factory means fetching the code at `accessDeployer()` / `subscriptionDeployer()` and comparing those against the canonical manifest too. See `contracts/contracts.md` → "The protocol fee".
 
 #### Rub3Metered *(planned — implementation.md §4.1)*
 
@@ -547,7 +557,7 @@ Covers contract bugs, paid major versions, and chain migration. Three hard guara
 
 The distinction matters because an agent can verify the first list before buying and can only trust the second.
 
-**Bytecode** - check these against the deployed runtime code. The 27 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, and exactly the set the copy-pasteable loop in `contracts/contracts.md` scans for. (The rows also name `renewPrice(tokenId)`, `renewPriceToken(tokenId)`, `renewPriceAmount(tokenId)` and `wrapperHashList()`, which are functions that *do* exist and are read as part of the check.)
+**Bytecode** - check these against the deployed runtime code. The 29 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, and exactly the set the copy-pasteable loop in `contracts/contracts.md` scans for. (The rows also name `renewPrice(tokenId)`, `renewPriceToken(tokenId)`, `renewPriceAmount(tokenId)`, `wrapperHashList()`, `feeBps()` and `treasury()`, which are functions that *do* exist and are read as part of the check.)
 
 | Property | How an agent checks it |
 |---|---|
@@ -556,6 +566,7 @@ The distinction matters because an agent can verify the first list before buying
 | Hash set is append-only | `setWrapperHash(bytes32)`, `removeWrapperHash(bytes32)`, `unrevokeWrapperHash(bytes32)` absent; `wrapperHashList()` only ever grows |
 | Renewal terms frozen per token | `renewPrice(tokenId)`, `renewPriceToken(tokenId)` and `renewPriceAmount(tokenId)` do not move after mint; `setRenewPrice(uint256,uint256)`, `setRenewPriceToken(uint256,address)`, `setRenewPriceAmount(uint256,uint256)`, `setExpiresAt(uint256,uint256)` and any other renewal setter are absent from the runtime bytecode; `period` is `immutable`, with no `setPeriod(uint256)`. Free tiers are legitimate, so a `renewPrice` of `0` is conforming |
 | Deploy-time parameters frozen | `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` are `immutable` - no `setPredecessor(address)` selector |
+| The protocol fee is frozen per contract | `feeBps` and `treasury` are `immutable` on the licence contract and on the `Rub3Factory` that stamped them; `setFeeBps(uint16)` and `setTreasury(address)` are absent from the runtime bytecode. Read `feeBps()` / `treasury()` before buying and they are what that contract will charge for as long as it exists |
 | Migration cannot be forced | `claimFromPredecessor` is the only mint path outside `purchase` / `purchaseWithAuthorization`, and it checks `ownerOf(...) == msg.sender` on the predecessor |
 
 **Convention** - real commitments, but not provable from the bytecode:
@@ -563,8 +574,7 @@ The distinction matters because an agent can verify the first list before buying
 | Property | Why it isn't bytecode |
 |---|---|
 | Registry delisting never invalidates a token | `Rub3Registry` is not built yet (§3.2). Today it is a design commitment; once built, the property holds because the registry has no call into the license contract at all |
-| The protocol fee is immutable per deploy | `Rub3Factory` is not built yet (§2.3). Until then, contracts deployed directly carry no fee |
-| These invariants hold for *this* contract | Only factory-stamped deploys are guaranteed. Anyone may deploy the open-source templates directly, or a modified copy - which is why the audit is a bytecode check, not a source claim |
+| These invariants hold for *this* contract | Anyone may deploy the open-source templates directly, or a modified copy, which is why the audit is a bytecode check and not a source claim. `Rub3Factory.isDeployed(addr)` narrows it - a factory deploy is provably an unmodified template on this factory's terms - but the factory's own bytecode has to be checked first, and its runtime code does not contain the licence implementations, so verifying one means also comparing `accessDeployer()` / `subscriptionDeployer()` against the canonical manifest |
 | A revoked binary already running keeps running | Deliberate. The hash set informs new downloads and activations; a switch that could stop a running binary would be a revocation surface |
 | The developer keeps publishing builds and hashes | Unenforceable by anyone. It is also the failure mode the invariants are designed to survive: an abandoned contract keeps validating forever, so vendor death depreciates a license rather than confiscating it |
 
@@ -1206,8 +1216,8 @@ Runtime:       heartbeat IPC (app cannot run without wrapper)
 
 ## Scaling Considerations
 
-- Contract deployment: one per app, ~$1–5 on Base (via `Rub3Factory` once §2.3 lands — deploys are never charged by rub3)
-- Protocol fee: 2–3% split executed inside `purchase()`/`renew()` on factory deploys — no additional infrastructure; settlement is continuous and on-chain
+- Contract deployment: one per app, ~$1–5 on Base (via `Rub3Factory` - deploys are never charged by rub3; the factory deploy itself is a one-off that rub3 pays, not the developer)
+- Protocol fee: a 2–3% split executed inside `purchase()`/`renew()` on factory deploys, on both payment rails - no additional infrastructure; settlement is continuous and on-chain, with each side sweeping its own balance
 - RPC read calls: varies by tier. Tier 0: zero. Tiers 1-2: one per renewal. Tiers 3-4: one per launch (`activeSessionId` + `ownerOf`). Public RPC or Alchemy free tier sufficient.
 - RPC write calls: tiers 3-4 only. One `activate()`/`activateDevice()` tx per session creation. ~$0.001 on Base.
 - Session files: ~500 bytes each, one per token per device. Negligible storage.

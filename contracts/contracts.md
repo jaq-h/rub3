@@ -158,6 +158,14 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | `COOLDOWN_BLOCKS` | no | Blocks between activations per token (default `1800` ≈ 1 hr on Base; floor `15` ≈ 30 s is enforced on-chain) |
 | `OWNER` | no | Contract owner address; defaults to broadcaster |
 | `PERIOD` | subscription only | Subscription length in seconds |
+| `FACTORY` | no | `Rub3Factory` to deploy through. Deploying through one is what stamps the protocol fee and records the contract in `isDeployed`, which is what the registry and marketplace list. `0x0` (default) deploys directly: no fee, and unrecorded. See [The protocol fee](#the-protocol-fee) |
+
+`script/DeployFactory.s.sol` deploys the factory itself and takes two variables of its own:
+
+| Variable | Required | Description |
+|---|---|---|
+| `FEE_BPS` | yes | Protocol fee in basis points, within `MIN_FEE_BPS`..`MAX_FEE_BPS` (200-300). No default: this decides rub3's take for every contract the factory ever deploys |
+| `TREASURY` | yes | Fee recipient. Must be non-zero, and must be able to receive ETH |
 
 ## Paying in USDC (EIP-3009)
 
@@ -291,12 +299,101 @@ EIP-3009 defines two ways to spend the same six signed fields. `transferWithAuth
 
 ### Withdrawing proceeds
 
-`withdraw(address payable)` takes the ETH balance; `withdrawToken(address,address)` takes the whole balance of an ERC-20:
+`withdraw(address payable)` takes the developer's ETH balance; `withdrawToken(address,address)` takes their balance of an ERC-20:
 
 ```bash
-cast send <CONTRACT_ADDRESS> "withdrawToken(address,address)" <USDC> <TREASURY> \
+cast send <CONTRACT_ADDRESS> "withdrawToken(address,address)" <USDC> <DEVELOPER> \
   --rpc-url $RPC --private-key $DEPLOYER_KEY
 ```
+
+On a contract deployed directly, "the developer's balance" is everything the contract holds. On a factory deploy it is everything *less* the protocol fee accrued against it, which is swept separately - see [The protocol fee](#the-protocol-fee).
+
+## The protocol fee
+
+rub3's revenue, stamped at deploy time and immutable thereafter (implementation.md §2.3). Two numbers decide it and both are frozen the moment a contract is constructed:
+
+| Getter | What it is |
+|---|---|
+| `feeBps()` | The protocol's share of every payment, in basis points. `0` on a directly deployed contract |
+| `treasury()` | Where that share accrues. `address(0)` iff `feeBps()` is `0` |
+
+Both are `immutable`. There is no setter on the licence contract, none on the factory, and no path of any kind - developer, factory, or rub3 - that moves either afterwards. **A developer's economics can never change after their contract is deployed.** rub3 changes its take only by deploying a *new* `Rub3Factory`, which affects contracts deployed by that factory and nothing that already exists. The two setters that would break the promise, `setFeeBps(uint16)` and `setTreasury(address)`, are on the forbidden-selector list below and absent from the bytecode.
+
+### Deploying through the factory
+
+```bash
+cd contracts
+
+# 1. The factory. FEE_BPS decides rub3's take for everything it will ever deploy.
+FEE_BPS=250 \
+TREASURY=0xYourTreasury \
+forge script script/DeployFactory.s.sol \
+  --rpc-url http://127.0.0.1:8545 \
+  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  --broadcast
+
+# 2. Any number of licence contracts through it. The fee is not an input here:
+#    the factory reads it off itself.
+CONTRACT_TYPE=access \
+TOKEN_NAME="My App License" \
+TOKEN_SYMBOL=MAL \
+IDENTITY_MODEL=0 \
+PRICE=50000000000000000 \
+FACTORY=0xTheFactoryAddress \
+forge script script/Deploy.s.sol \
+  --rpc-url http://127.0.0.1:8545 \
+  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  --broadcast
+```
+
+Check what was stamped and that the factory recorded it:
+
+```bash
+cast call <LICENCE> "feeBps()(uint16)"          --rpc-url $RPC
+cast call <LICENCE> "treasury()(address)"       --rpc-url $RPC
+cast call <FACTORY> "isDeployed(address)(bool)" <LICENCE> --rpc-url $RPC
+```
+
+`Rub3Factory` also enumerates: `deploymentCount()`, `deploymentAt(uint256)`, `deployments()`, so an agent can list the canonical set without replaying logs.
+
+### How the split works
+
+The fee runs on-chain inside `purchase()` and `renew()`, on **both** payment rails, and it is the same rule on each: `feeBps` of *what arrived* to the treasury, the remainder to the developer.
+
+- **On the amount received, not the listed price.** Charging the listed price would leave the fee trivially avoidable: list at zero, publish a client that pays the real price as "overpayment", collect it all through `withdraw` and pay nothing. It also makes the arithmetic exact by construction - the two shares are the payment, with no rounding left over anywhere.
+- **Rounding favours the developer.** Integer division, so a fee that comes to less than one wei (or one of the token's smallest units) is zero and the whole payment is the developer's. Never the other way: a fee that rounded up could exceed the payment at the smallest amounts.
+- **Accrued, not pushed.** The fee is held in the contract and swept separately rather than transferred to the treasury inside the purchase. `treasury` is immutable, so a push on the money path would mean a recipient that reverts on receipt - or that one day costs more gas than a buyer sent - breaks every purchase on that contract forever, unfixably. Accruing keeps the buyer's path free of calls out; a collection failure is rub3's problem, not the buyer's.
+
+The two balances are disjoint and neither side can reach the other's:
+
+| Call | Who | Moves |
+|---|---|---|
+| `withdraw(address payable)` | contract owner | `address(this).balance - feesAccrued()` |
+| `withdrawToken(address,address)` | contract owner | `balanceOf(this) - tokenFeesAccrued(token)` |
+| `withdrawFees()` | anyone | `feesAccrued()`, to `treasury()` |
+| `withdrawTokenFees(address)` | anyone | `tokenFeesAccrued(token)`, to `treasury()` |
+
+The two fee sweeps are permissionless because their destination is immutable: the caller decides nothing but the timing, and rub3 collecting should not require rub3 to send a transaction on every contract that ever sold a licence. On a contract with no fee they revert `NoFeeConfigured` rather than burning the balance to `address(0)`.
+
+```bash
+# Settle both halves of a sale.
+cast send <LICENCE> "withdrawFees()"                     --rpc-url $RPC --private-key $ANY_KEY
+cast send <LICENCE> "withdraw(address)" <DEVELOPER>      --rpc-url $RPC --private-key $OWNER_KEY
+```
+
+A `ProtocolFeeAccrued(address token, uint256 amount, uint256 fee, uint256 developerAmount)` log is emitted on every payment, with `token == address(0)` meaning ETH. Both shares and their sum are readable from that one log.
+
+### Deploying directly is still fine
+
+Nothing prevents or penalises deploying the open-source templates yourself. A direct deploy passes `FeeTerms(0, address(0))` and pays no fee at all; the two rails, the mint, the invariants, and the wrapper all behave identically. The one thing it does not get is a row in a factory's `isDeployed`, so it is not listable in the registry (§3.2) or the marketplace (§4.3). The fee buys distribution, verification, and liquidity.
+
+### Why the factory deploys through two helper contracts
+
+`Rub3Factory` cannot `new` both licence contracts itself: a contract's runtime code has to carry the creation code of everything it deploys, and the two together are over 30 KB against a 24,576-byte runtime limit. A `new` reached only from a *constructor* lands in the creation code, which is discarded after deployment, so the factory builds one `Rub3AccessDeployer` and one `Rub3SubscriptionDeployer` in its own constructor and keeps their addresses as immutables. Consequences worth knowing:
+
+- **The factory's own fingerprint does not pin the licence implementations.** Its runtime code contains neither. An auditor confirms which implementations a factory deploys by fetching the code at `accessDeployer()` and `subscriptionDeployer()` and comparing those against the manifest, then comparing a deployed licence against `Rub3Access` / `Rub3Subscription`.
+- **The deployers are callable by anyone, and that is not a hole.** Calling one directly yields a licence contract the factory never recorded, which is exactly what deploying the template directly already gets you. Trust comes from `isDeployed`, never from who created the contract.
+- **The factory's initcode is bounded by EIP-3860 (49,152 bytes) and is not far off it.** `test_factory_initcodeFitsUnderEip3860` guards it, so growing the licence contracts fails a test rather than producing an undeployable factory.
 
 ## Managing the wrapper hash set after deployment
 
@@ -394,7 +491,9 @@ Each entry is a `{"start": <byte offset into the runtime code>, "length": <bytes
 
 Step 2 is not optional and it is not a refinement. Skipping it fails 100% of the time.
 
-Measured on this branch, `Rub3Access` declares five immutables (`identityModel`, `tbaImplementation`, `supplyCap`, `predecessor`, `cooldownBlocks`) inherited from `Rub3License`, and `Rub3Subscription` declares those five plus its own `period`, six in total. Because a single immutable is read at several places in the runtime code, the slot count is higher than the variable count: `Rub3Access` carries 13 ranges (416 bytes) and `Rub3Subscription` 17 (544 bytes). Those numbers move whenever the code that reads an immutable moves, which is also whenever the fingerprint moves, so the manifest records both together and the drift gate compares both.
+Measured on this branch, `Rub3Access` declares seven immutables inherited from `Rub3License` (`identityModel`, `tbaImplementation`, `supplyCap`, `predecessor`, `cooldownBlocks`, and the §2.3 fee terms `feeBps` and `treasury`), and `Rub3Subscription` declares those seven plus its own `period`, eight in total. Because a single immutable is read at several places in the runtime code, the slot count is higher than the variable count: `Rub3Access` carries 18 ranges (576 bytes) and `Rub3Subscription` 22 (704 bytes). Those numbers move whenever the code that reads an immutable moves, which is also whenever the fingerprint moves, so the manifest records both together and the drift gate compares both.
+
+`Rub3Factory` is fingerprinted too, with four immutables of its own (`feeBps`, `treasury`, `accessDeployer`, `subscriptionDeployer`) across 10 ranges. `Rub3AccessDeployer` and `Rub3SubscriptionDeployer` have none, so their `immutable_ranges` are empty and their runtime code hashes directly - which is what makes them the thing to compare a factory's declared deployers against.
 
 Zeroing an immutable range destroys the constructor argument it held, which is the point: the fingerprint answers "is this the code I expect", not "was this deployed with the terms I expect". Read the terms separately from the contract's own getters (`supplyCap()`, `period()`, `predecessor()`, and the rest), which is where they are authoritative anyway.
 
@@ -493,21 +592,21 @@ for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
            "upgradeTo(address)" "upgradeToAndCall(address,bytes)" "initialize()" \
            "setWrapperHash(bytes32)" "removeWrapperHash(bytes32)" \
            "unrevokeWrapperHash(bytes32)" \
-           "forceMigrate(uint256,address)" "setPredecessor(address)"; do
+           "forceMigrate(uint256,address)" "setPredecessor(address)" \
+           "setFeeBps(uint16)" "setTreasury(address)"; do
   SEL=$(cast sig "$SIG" | sed 's/^0x//')
   case "$CODE" in *"$SEL"*) echo "PRESENT: $SIG";; esac
 done
 ```
 
-Silence means exactly one thing: none of those 27 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical fingerprint of the template built from this repo, after zeroing the immutable ranges published for it. Those fingerprints and ranges are now pinned - see "Reproducible builds and canonical fingerprints" above - but nothing in this repository performs the comparison yet.
+Silence means exactly one thing: none of those 29 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical fingerprint of the template built from this repo, after zeroing the immutable ranges published for it. Those fingerprints and ranges are now pinned - see "Reproducible builds and canonical fingerprints" above - but nothing in this repository performs the comparison yet.
 
 Sanity-check the method itself against a selector that *is* there - `cast sig "activate(uint256)"` should be found.
 
 ## Planned contract evolution
 
-The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot) and the §2.2 stablecoin rail, both of which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
+The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot), the §2.2 stablecoin rail, and the §2.3 factory and protocol fee, all of which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
 
-- **`Rub3Factory`** (§2.3) — canonical deployment path; stamps an immutable 2–3% protocol fee split into `purchase()`/`renew()`; registry and marketplace list factory deploys only
 - **`contentURI`** (§3.1) — content-addressed binary location on-chain, making the contract a complete distribution record
 - **Concurrent seats** (§3.4) — `maxConcurrentSessions[tokenId] = K` generalizing `activeSessionId` for agent fleets
 - **`Rub3Metered`** (§4.1) — per-launch / per-session micropayment billing
