@@ -722,9 +722,23 @@ contract Rub3FactoryTest is Test {
         assertEq(twin.feesAccrued(), _expectedFee(amount, FEE_BPS));
     }
 
-    /// A token nobody paid in has no fee reserved against it, so the developer
-    /// sweeps a mistaken transfer whole.
-    function test_token_foreignTokenSweepsEntirely() public {
+    /// Balance that never arrived through a payment function has no fee
+    /// reserved against it, so the developer sweeps it whole. This asserts two
+    /// readings at once, and both are intended:
+    ///
+    /// 1. A token nobody paid in - a mistaken transfer, an airdrop - is the
+    ///    developer's, because rub3 took no cut on money it never handled.
+    /// 2. It is therefore also the accepted boundary of what the fee captures:
+    ///    a developer who lists at zero and takes payment by direct transfer
+    ///    pays no fee. That is documented (contracts/contracts.md -> "The
+    ///    protocol fee", architecture.md -> "Rub3Factory") and deliberate, not
+    ///    an oversight. The fee applies to value arriving through the payment
+    ///    functions; payment arranged outside them is out of scope, and
+    ///    charging on unaccounted balance was rejected because it would take a
+    ///    cut of transfers that are not revenue.
+    ///
+    /// Do not "fix" this by tightening the sweep.
+    function test_token_unaccruedBalanceSweepsEntirelyToTheDeveloper() public {
         MockEIP3009Token other = new MockEIP3009Token();
         other.mint(address(nft), 777);
 

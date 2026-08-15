@@ -375,6 +375,12 @@ The two balances are disjoint and neither side can reach the other's:
 
 The two fee sweeps are permissionless because their destination is immutable: the caller decides nothing but the timing, and rub3 collecting should not require rub3 to send a transaction on every contract that ever sold a licence. On a contract with no fee they revert `NoFeeConfigured` rather than burning the balance to `address(0)`.
 
+### What the fee covers, and what it does not
+
+So a developer knows exactly where they stand: **the fee is charged on value that arrives through the contract's payment functions** - `purchase`, `purchaseWithAuthorization`, `renew`, `renewWithAuthorization`. Value that reaches the contract any other way is never accrued against, and `withdraw` / `withdrawToken` release it in full to the developer. Concretely, that means a direct ERC-20 `transfer` to the licence contract, a `selfdestruct` beneficiary, and a coinbase payout: nothing was taken on them, so all of it is the developer's.
+
+This is a deliberate, reasoned position on where the fee's scope ends, not an implementation gap. The fee is an economic argument, not a technical lock. A developer who wants to route around it can already take payment entirely off-chain and mint free licences, so tightening the on-contract case would close nothing; what the fee buys is distribution, verification, and liquidity, priced so that routing around it costs more than paying it, and the registry and marketplace listing is the carrot. Charging on unaccounted balance was considered and rejected: it would take a cut of mistaken transfers and airdrops, which are not revenue, and would quietly change what the fee means. `test_token_unaccruedBalanceSweepsEntirelyToTheDeveloper` pins the behaviour.
+
 ```bash
 # Settle both halves of a sale.
 cast send <LICENCE> "withdrawFees()"                     --rpc-url $RPC --private-key $ANY_KEY
