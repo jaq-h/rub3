@@ -90,16 +90,6 @@ interface IRub3Predecessor {
 /// the same single mint in the concrete contract, so a token bought with USDC is
 /// indistinguishable from one bought with ETH in state, events, and terms.
 abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGuardTransient {
-    /// @notice The EIP-3009 authorization a buyer signs, minus the three fields
-    ///         this contract derives rather than accepts.
-    ///
-    ///         `to` is always this contract, `value` is always the listed price
-    ///         at execution time, and `nonce` is always derived from *what is
-    ///         being bought* (see {purchaseAuthorizationNonce}). All three are
-    ///         covered by the buyer's EIP-712 signature on the token, so a
-    ///         submitter who alters any of them produces a digest the token
-    ///         refuses. `salt` is the buyer's own randomness, the only free
-    ///         input to the nonce.
     /// @notice What a licence costs, on both rails.
     ///
     ///         Grouped rather than passed as three loose constructor arguments:
@@ -115,6 +105,16 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         uint256 priceAmount;
     }
 
+    /// @notice The EIP-3009 authorization a buyer signs, minus the three fields
+    ///         this contract derives rather than accepts.
+    ///
+    ///         `to` is always this contract, `value` is always the listed price
+    ///         at execution time, and `nonce` is always derived from *what is
+    ///         being bought* (see {purchaseAuthorizationNonce}). All three are
+    ///         covered by the buyer's EIP-712 signature on the token, so a
+    ///         submitter who alters any of them produces a digest the token
+    ///         refuses. `salt` is the buyer's own randomness, the only free
+    ///         input to the nonce.
     struct PaymentAuthorization {
         address from;
         uint256 validAfter;

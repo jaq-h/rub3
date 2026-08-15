@@ -201,3 +201,37 @@ contract NotAToken {
         return 1;
     }
 }
+
+/// @notice An EIP-3009 token that answers the constructor probe and holds real
+///         balances, but exposes no `DOMAIN_SEPARATOR()` getter.
+///
+/// EIP-3009 mandates the authorization functions and `authorizationState`, which
+/// is the whole of what {Rub3License-_setTokenPrice}'s probe can check. The
+/// `DOMAIN_SEPARATOR()` getter is an EIP-2612 convention layered on top, and a
+/// token can be a conforming EIP-3009 token without it. A buyer then cannot
+/// build the EIP-712 digest for it off-chain.
+///
+/// That is a fact about the token, not about the network, so the wrapper falls
+/// back to the ETH rail rather than ending a purchase the ETH rail would have
+/// completed. This fixture is what lets that be proven end to end.
+contract NoDomainSeparatorEIP3009Token is ERC20 {
+    mapping(address => mapping(bytes32 => bool)) public authorizationState;
+
+    constructor() ERC20("No Domain", "NODOM") {}
+
+    /// Matches the USDC stand-in, so a price quoted for one is quoted the same
+    /// way for the other.
+    function decimals() public pure override returns (uint8) {
+        return 6;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    /// Present so the token is spendable in principle; no test reaches it,
+    /// because no authorization for it can be signed in the first place.
+    function receiveWithAuthorization(
+        address, address, uint256, uint256, uint256, bytes32, uint8, bytes32, bytes32
+    ) external {}
+}

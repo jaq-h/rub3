@@ -171,6 +171,15 @@ cast call <CONTRACT_ADDRESS> "priceAmount()(uint256)" --rpc-url $RPC
 cast call <CONTRACT_ADDRESS> "price()(uint256)"       --rpc-url $RPC   # the ETH rail
 ```
 
+The two rails are independently quoted and the contract holds no oracle, so
+nothing on-chain relates the wei price to the token amount. On the wrapper side
+that bound is the operator's: `RUB3_AGENT_MAX_TOKEN_AMOUNT`, an integer in the
+payment token's own smallest unit, must be set before a headless build will use
+the stablecoin rail at all. Unset, it buys in ETH and says so; a listed
+`priceAmount` above it is refused with exit code 22 rather than switched to the
+other rail. Nothing here changes what the *contract* accepts - either rail is
+always spendable by anyone who submits a valid transaction.
+
 Change what is offered to *future* buyers (owner only; it reaches nothing already issued, and a subscription snapshots both rails per token at mint):
 
 ```bash

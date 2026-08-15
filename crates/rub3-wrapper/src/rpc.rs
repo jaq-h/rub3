@@ -135,6 +135,17 @@ impl RpcError {
             RpcError::Contract(_) | RpcError::InvalidInput(_) | RpcError::EnsNotSupported => false,
         }
     }
+
+    /// Whether the node failed to answer, as opposed to the chain answering
+    /// something the caller did not want.
+    ///
+    /// Callers that read a contract-level failure as information - the
+    /// stablecoin-rail reads, where "this token has no such function" selects
+    /// the ETH rail - branch on this so that a node failure never reaches the
+    /// same conclusion.
+    pub fn is_transport(&self) -> bool {
+        matches!(self, RpcError::Transport(_))
+    }
 }
 
 impl std::fmt::Display for RpcError {
@@ -612,8 +623,10 @@ pub fn token_rail(rpc_url: &str, contract: Address) -> Result<Option<TokenPrice>
 
         let token = match instance.priceToken().call().await {
             Ok(token) => token,
-            Err(e) if is_transport(&e) => return Err(RpcError::Transport(e.to_string())),
-            Err(_) => return Ok(None),
+            Err(e) => match classify_call_error(&e) {
+                transport @ RpcError::Transport(_) => return Err(transport),
+                _ => return Ok(None),
+            },
         };
         if token.is_zero() {
             return Ok(None);
@@ -623,7 +636,7 @@ pub fn token_rail(rpc_url: &str, contract: Address) -> Result<Option<TokenPrice>
             .priceAmount()
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(|e| classify_call_error(&e))?;
 
         Ok(Some(TokenPrice { token, amount }))
     })
@@ -639,7 +652,7 @@ pub fn erc20_balance_of(rpc_url: &str, token: Address, owner: Address) -> Result
             .balanceOf(owner)
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))
+            .map_err(|e| classify_call_error(&e))
     })
 }
 
@@ -652,7 +665,7 @@ pub fn token_domain_separator(rpc_url: &str, token: Address) -> Result<B256, Rpc
             .DOMAIN_SEPARATOR()
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))
+            .map_err(|e| classify_call_error(&e))
     })
 }
 
@@ -728,16 +741,48 @@ pub fn encode_purchase_with_authorization_calldata(
     format!("0x{}", hex::encode(call.abi_encode()))
 }
 
-/// Whether a contract-call failure was the network rather than the chain.
+/// Splits a failed `eth_call` into "the chain answered" and "the node did not".
 ///
-/// A reverted `eth_call` and a dead endpoint arrive as the same Rust type; only
-/// the first is an answer. Anything the node *responded* to - including a
-/// revert - is a settled fact about the contract.
-fn is_transport(e: &alloy::contract::Error) -> bool {
-    matches!(
-        e,
-        alloy::contract::Error::TransportError(alloy::transports::RpcError::Transport(_))
-    )
+/// Every stablecoin-rail read turns on this distinction: a chain answer is a
+/// settled fact about the contract and lets the caller fall back to ETH, while
+/// a node failure must stop the run rather than silently change the currency.
+/// Getting it wrong in the permissive direction is the dangerous one, so only
+/// two shapes count as answers:
+///
+///   * a decode failure - `ZeroData` (the address returned `0x`, so it has no
+///     such function), an unknown function or selector, or return data the ABI
+///     cannot decode;
+///   * a JSON-RPC error body that says the call *reverted*, which nodes report
+///     as code `3`, as revert data, or as a message naming the revert.
+///
+/// Everything else a node can put in an error body - a rate limit, an execution
+/// timeout, a missing trie node - describes the node's own state and says
+/// nothing about the contract. Those are transport, as are a truncated
+/// response, a null response, and a dead socket.
+fn classify_call_error(e: &alloy::contract::Error) -> RpcError {
+    use alloy::contract::Error as ContractError;
+    use alloy::transports::RpcError as JsonRpcError;
+
+    match e {
+        ContractError::ZeroData(..)
+        | ContractError::AbiError(_)
+        | ContractError::UnknownFunction(_)
+        | ContractError::UnknownSelector(_) => RpcError::Contract(e.to_string()),
+        ContractError::TransportError(JsonRpcError::ErrorResp(payload)) => {
+            // Geth and reth answer a reverted `eth_call` with code 3; anvil and
+            // several hosted nodes use -32000 and say so in the message. Revert
+            // data present at all is conclusive on its own.
+            let reverted = payload.code == 3
+                || payload.as_revert_data().is_some()
+                || payload.message.to_ascii_lowercase().contains("revert");
+            if reverted {
+                RpcError::Contract(e.to_string())
+            } else {
+                RpcError::Transport(e.to_string())
+            }
+        }
+        _ => RpcError::Transport(e.to_string()),
+    }
 }
 
 /// Fetches the receipt for `tx_hash` and returns the token id minted to
@@ -1276,5 +1321,160 @@ mod tests {
                 transport.after_secs(),
             );
         }
+    }
+}
+
+// ── Stub-node tests for the call classifier ───────────────────────────────────
+
+/// How a node answers matters as much as what it says, and the split between
+/// "the chain answered" and "the node did not" decides whether the wrapper
+/// falls back to the ETH rail or stops. These drive [`token_rail`] against a
+/// local socket that returns one fixed body, so each classification is
+/// exercised through the real public function rather than asserted about the
+/// classifier in isolation.
+#[cfg(test)]
+mod stub_node_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// A local HTTP endpoint that answers every request with the same body.
+    struct StubNode {
+        url: String,
+        shutdown: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl StubNode {
+        fn serving(body: &'static str) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub node");
+            let url = format!("http://{}", listener.local_addr().expect("local addr"));
+            listener
+                .set_nonblocking(true)
+                .expect("stub node non-blocking");
+
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&shutdown);
+            let handle = std::thread::spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let _ = stream
+                                .set_read_timeout(Some(std::time::Duration::from_millis(500)));
+                            let mut buf = [0u8; 4096];
+                            let _ = stream.read(&mut buf);
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                            let _ = stream.flush();
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                url,
+                shutdown,
+                handle: Some(handle),
+            }
+        }
+    }
+
+    impl Drop for StubNode {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// A rate limit is the node's own state, not the contract's. Reading it as
+    /// "this contract offers no stablecoin rail" would pay in the wrong
+    /// currency because a public endpoint was busy.
+    #[test]
+    fn a_json_rpc_error_body_is_a_node_failure_not_an_absent_rail() {
+        let node = StubNode::serving(
+            r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32005,"message":"rate limit exceeded"}}"#,
+        );
+        let err = token_rail(&node.url, Address::ZERO)
+            .expect_err("a rate-limited node must not answer the rail question");
+        assert!(
+            err.is_transport(),
+            "a rate limit must classify as transport, got {err}"
+        );
+        assert!(err.is_retryable(), "and must stay retryable, got {err}");
+    }
+
+    /// An execution timeout is likewise the node, not the chain.
+    #[test]
+    fn an_execution_timeout_is_a_node_failure_not_an_absent_rail() {
+        let node = StubNode::serving(
+            r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":"execution timeout"}}"#,
+        );
+        let err = token_rail(&node.url, Address::ZERO)
+            .expect_err("an execution timeout must not answer the rail question");
+        assert!(
+            err.is_transport(),
+            "an execution timeout must classify as transport, got {err}"
+        );
+    }
+
+    /// A truncated or garbled body says nothing about the contract either.
+    #[test]
+    fn a_malformed_response_body_is_a_node_failure_not_an_absent_rail() {
+        let node = StubNode::serving("not json at all");
+        let err = token_rail(&node.url, Address::ZERO)
+            .expect_err("an undeserializable response must not answer the rail question");
+        assert!(
+            err.is_transport(),
+            "a deserialization failure must classify as transport, got {err}"
+        );
+    }
+
+    /// The one node-side error that *is* an answer: a revert means the address
+    /// has no `priceToken()`, which is exactly how a pre-§2.2 contract reads.
+    #[test]
+    fn a_reverted_call_means_the_contract_offers_no_stablecoin_rail() {
+        let node = StubNode::serving(
+            r#"{"jsonrpc":"2.0","id":0,"error":{"code":3,"message":"execution reverted"}}"#,
+        );
+        assert_eq!(
+            token_rail(&node.url, Address::ZERO).expect("a revert is a settled answer"),
+            None,
+            "a reverted priceToken() means the ETH rail",
+        );
+    }
+
+    /// Nodes that report a revert as -32000 with revert wording must read the
+    /// same way as the ones that use code 3.
+    #[test]
+    fn a_revert_reported_as_minus_32000_also_means_no_stablecoin_rail() {
+        let node = StubNode::serving(
+            r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":"execution reverted"}}"#,
+        );
+        assert_eq!(
+            token_rail(&node.url, Address::ZERO).expect("a revert is a settled answer"),
+            None,
+        );
+    }
+
+    /// An address with no code answers `0x`, which decodes to nothing.
+    #[test]
+    fn empty_return_data_means_the_contract_offers_no_stablecoin_rail() {
+        let node = StubNode::serving(r#"{"jsonrpc":"2.0","id":0,"result":"0x"}"#);
+        assert_eq!(
+            token_rail(&node.url, Address::ZERO).expect("empty return data is a settled answer"),
+            None,
+        );
     }
 }

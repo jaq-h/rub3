@@ -295,6 +295,10 @@ pub const EXIT_TOKEN_NOT_OWNED: i32 = 20;
 /// it kept failing. Deliberately distinct from `EXIT_ACTIVATION_FAILED`: the
 /// money may already be spent, so this one must not be retried blindly.
 pub const EXIT_PURCHASE_UNCONFIRMED: i32 = 21;
+/// A listed price is above the ceiling the operator configured for that rail.
+/// Never retried and never quietly worked around: the price exceeded a policy,
+/// which is a different thing from the network having failed.
+pub const EXIT_PRICE_ABOVE_POLICY: i32 = 22;
 
 /// The exit-code table rendered for `--help`, so the contract is discoverable
 /// from the binary itself and not only from the docs.
@@ -325,18 +329,33 @@ child is the child's status and not an activation failure.
       may already be spent, so do NOT retry blindly: stderr carries
       `tx_hash=0x...`; resolve that transaction first, then re-run once it
       has mined or been dropped
+  22  the listed price is above the configured spend ceiling - stderr
+      carries `rail=... listed=... maximum=... token=0x...`. Not
+      retryable: raise RUB3_AGENT_MAX_TOKEN_AMOUNT or do not buy
 
 Signer sources, highest precedence first:
   RUB3_AGENT_KEY                        raw hex private key (dev / CI only)
   RUB3_AGENT_KEYSTORE                   encrypted V3 keystore file
   RUB3_AGENT_KEYSTORE_PASSWORD_FILE     password file for the keystore (preferred)
-  RUB3_AGENT_KEYSTORE_PASSWORD          password, inline";
+  RUB3_AGENT_KEYSTORE_PASSWORD          password, inline
+
+Spend policy:
+  RUB3_AGENT_MAX_TOKEN_AMOUNT           the most this agent may authorize on a
+                                        contract's stablecoin rail, an integer
+                                        in that payment token's own smallest
+                                        unit (USDC has 6 decimals, so 5 USDC is
+                                        5000000). No default: token decimals
+                                        differ, so no single number means the
+                                        same thing twice. Unset leaves the
+                                        stablecoin rail unavailable and buys in
+                                        ETH; a malformed value is a hard error";
 
 // ── Headless activation ───────────────────────────────────────────────────────
 
 #[cfg(feature = "headless")]
 pub use self::headless::{
-    ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome, PaymentRail,
+    ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome, PaymentRail, SpendPolicy,
+    SpendVerdict, ENV_MAX_TOKEN_AMOUNT,
 };
 
 #[cfg(feature = "headless")]
@@ -359,6 +378,120 @@ mod headless {
         /// Activate this specific token. `None` lets the flow choose: the
         /// lowest-numbered token the signer holds, or a freshly purchased one.
         pub token_id: Option<u64>,
+    }
+
+    /// The environment variable holding the stablecoin spend ceiling.
+    ///
+    /// Part of the `RUB3_AGENT_*` family, alongside the signer sources: an
+    /// operator already has to configure this family before a headless build
+    /// can spend anything at all, so the ceiling joins a surface they have
+    /// already met rather than introducing a new class of setup.
+    pub const ENV_MAX_TOKEN_AMOUNT: &str = "RUB3_AGENT_MAX_TOKEN_AMOUNT";
+
+    /// The operator's ceiling on what one headless run may pay, per rail.
+    ///
+    /// One type holds every "never spend more than this" rule and one function
+    /// checks against it, so the queued ETH ceiling (`rub3-max-price-policy`,
+    /// for the gap between reading `price()` and sending `value: price`)
+    /// becomes another field here and another [`SpendPolicy::check_token_amount`]
+    /// sibling, rather than a second mechanism grown beside this one.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct SpendPolicy {
+        /// The most a single EIP-3009 authorization may carry, in the payment
+        /// token's own smallest unit.
+        ///
+        /// `None` means the operator configured none, and that makes the
+        /// stablecoin rail *unavailable* rather than unlimited. There is no
+        /// number this crate could pick instead: the unit belongs to whichever
+        /// token the contract lists, and decimals differ between them (USDC 6,
+        /// DAI 18), so any fixed default is wrongly scaled for some token. An
+        /// unset ceiling therefore falls back to ETH, which never spends a
+        /// currency the operator did not size.
+        pub max_token_amount: Option<U256>,
+    }
+
+    /// What the policy says about one proposed spend.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SpendVerdict {
+        /// Within a ceiling the operator configured.
+        Allowed,
+        /// No ceiling is configured for this rail, so the rail cannot be used.
+        /// Carries the variable an operator sets to enable it, so the printed
+        /// fallback reason can name it.
+        NoCeiling { var: &'static str },
+    }
+
+    impl SpendPolicy {
+        /// Reads the policy from the process environment.
+        pub fn from_env() -> Result<Self, HeadlessError> {
+            let raw = std::env::var(ENV_MAX_TOKEN_AMOUNT).ok();
+            Self::from_raw(raw.as_deref())
+        }
+
+        /// The parsing rules, separated from the environment so they can be
+        /// exercised without mutating process-global state.
+        ///
+        /// A value that is present but unreadable is a hard error rather than
+        /// a fallback: silently treating a typo as zero would refuse every
+        /// purchase, and silently treating it as unlimited would authorize an
+        /// amount nobody chose. Both are worse than stopping.
+        pub fn from_raw(max_token_amount: Option<&str>) -> Result<Self, HeadlessError> {
+            let Some(raw) = max_token_amount else {
+                return Ok(Self {
+                    max_token_amount: None,
+                });
+            };
+
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(HeadlessError::Config {
+                    var: ENV_MAX_TOKEN_AMOUNT,
+                    detail: "is set but empty; unset it to buy in ETH, or set an amount"
+                        .to_string(),
+                });
+            }
+
+            let parsed = trimmed.parse::<U256>().map_err(|e| HeadlessError::Config {
+                var: ENV_MAX_TOKEN_AMOUNT,
+                detail: format!(
+                    "is not a whole non-negative amount in the payment token's smallest \
+                     unit: {trimmed:?} ({e})"
+                ),
+            })?;
+
+            Ok(Self {
+                max_token_amount: Some(parsed),
+            })
+        }
+
+        /// The single place a stablecoin price is weighed against the policy.
+        ///
+        /// Three outcomes, deliberately distinct: within a configured ceiling,
+        /// no ceiling configured (the rail is unusable, and the caller falls
+        /// back to ETH), or above the ceiling, which is a refusal rather than a
+        /// fallback - see [`HeadlessError::PriceAbovePolicy`].
+        pub fn check_token_amount(
+            &self,
+            token: Address,
+            listed: U256,
+        ) -> Result<SpendVerdict, HeadlessError> {
+            let Some(maximum) = self.max_token_amount else {
+                return Ok(SpendVerdict::NoCeiling {
+                    var: ENV_MAX_TOKEN_AMOUNT,
+                });
+            };
+
+            if listed > maximum {
+                return Err(HeadlessError::PriceAbovePolicy {
+                    rail: "erc3009",
+                    listed: listed.to_string(),
+                    maximum: maximum.to_string(),
+                    token: Some(crate::identity::format_addr(token)),
+                });
+            }
+
+            Ok(SpendVerdict::Allowed)
+        }
     }
 
     /// Which currency a purchase was settled in, and how much of it.
@@ -438,6 +571,25 @@ mod headless {
             after_secs: u64,
             reason: Option<String>,
         },
+        /// The price a contract lists on a rail is above the ceiling the
+        /// operator configured for that rail. Deliberately its own outcome and
+        /// its own exit code: an orchestrator has to tell "this costs more than
+        /// my policy allows" apart from "the network failed", and nothing on
+        /// the network will change this answer. Never falls back to another
+        /// rail, because a refusal is not a routing problem.
+        PriceAbovePolicy {
+            /// Which rail was refused, so an ETH ceiling reports through the
+            /// same variant when it lands.
+            rail: &'static str,
+            listed: String,
+            maximum: String,
+            /// The payment token, when the rail has one.
+            token: Option<String>,
+        },
+        /// An operator-supplied configuration value could not be read. A hard
+        /// stop rather than a guess: every reading of a malformed spend
+        /// ceiling is wrong, and the wrong ones spend money.
+        Config { var: &'static str, detail: String },
         /// Headless activation needs a real license contract; this build points
         /// at the zero address, or at something that is not an address at all.
         NoContract,
@@ -501,6 +653,20 @@ mod headless {
                          retrying blindly"
                     )
                 }
+                HeadlessError::PriceAbovePolicy { rail, listed, maximum, token } => {
+                    write!(f, "price above policy: the {rail} rail lists {listed}")?;
+                    if let Some(token) = token {
+                        write!(f, " of {token}")?;
+                    }
+                    write!(
+                        f,
+                        ", above the configured maximum of {maximum}. Raise \
+                         {ENV_MAX_TOKEN_AMOUNT} if this price is acceptable"
+                    )
+                }
+                HeadlessError::Config { var, detail } => {
+                    write!(f, "invalid configuration: {var} {detail}")
+                }
                 HeadlessError::NoContract => write!(
                     f,
                     "headless activation requires a usable license contract, but this build has none configured"
@@ -530,6 +696,11 @@ mod headless {
                 HeadlessError::ChainIdMismatch { .. } => EXIT_CHAIN_MISMATCH,
                 HeadlessError::TokenNotOwned { .. } => EXIT_TOKEN_NOT_OWNED,
                 HeadlessError::PurchaseUnconfirmed { .. } => EXIT_PURCHASE_UNCONFIRMED,
+                HeadlessError::PriceAbovePolicy { .. } => EXIT_PRICE_ABOVE_POLICY,
+                // No dedicated code: a malformed variable is an operator
+                // mistake to read on stderr, not a state an orchestrator
+                // branches on. It is still a hard stop.
+                HeadlessError::Config { .. } => EXIT_GENERIC,
                 HeadlessError::NoContract => EXIT_GENERIC,
             }
         }
@@ -571,6 +742,20 @@ mod headless {
                     after_secs,
                     ..
                 } => Some(format!("tx_hash={tx_hash} waited_secs={after_secs}")),
+                // Every number a policy decision turned on, so an orchestrator
+                // can tell how far over the ceiling the listing was without
+                // reading the chain again.
+                HeadlessError::PriceAbovePolicy {
+                    rail,
+                    listed,
+                    maximum,
+                    token,
+                } => Some(match token {
+                    Some(token) => {
+                        format!("rail={rail} listed={listed} maximum={maximum} token={token}")
+                    }
+                    None => format!("rail={rail} listed={listed} maximum={maximum}"),
+                }),
                 _ => None,
             }
         }
@@ -777,8 +962,9 @@ mod headless {
     /// Mirrors the interactive purchase flow (§1.7) - same supply check, same
     /// `Transfer` log parse to recover the minted id - with the broadcast done
     /// by the signer instead of a human's wallet, and with one addition: it
-    /// pays in the contract's stablecoin when the contract advertises one and
-    /// the wallet can cover it, and in ETH otherwise (§2.2).
+    /// pays in the contract's stablecoin when the contract advertises one, the
+    /// operator's spend ceiling covers the listed amount, and the wallet holds
+    /// enough of it - and in ETH otherwise (§2.2). See [`choose_rail`].
     fn purchase(
         signer: &dyn Signer,
         ctx: &HeadlessContext,
@@ -794,8 +980,8 @@ mod headless {
         }
 
         let (plan, paid) = match choose_rail(ctx, contract, wallet)? {
-            Some(token_price) => {
-                let auth = authorize_purchase(signer, ctx, contract, wallet, &token_price)?;
+            Some(rail) => {
+                let auth = authorize_purchase(signer, ctx, contract, wallet, &rail)?;
                 let calldata = decode_calldata(&rpc::encode_purchase_with_authorization_calldata(
                     wallet, auth,
                 ))?;
@@ -809,8 +995,8 @@ mod headless {
                         input: calldata,
                     },
                     PaymentRail::Erc3009 {
-                        token: crate::identity::format_addr(token_price.token),
-                        amount: token_price.amount.to_string(),
+                        token: crate::identity::format_addr(rail.price.token),
+                        amount: rail.price.amount.to_string(),
                     },
                 )
             }
@@ -846,39 +1032,108 @@ mod headless {
         Ok((token_id, paid))
     }
 
-    /// Picks the rail: the stablecoin one when the contract advertises it *and*
-    /// the wallet holds enough of that token, ETH otherwise.
+    /// The stablecoin rail together with everything signing on it needs.
     ///
-    /// The balance check is what makes the preference safe to state
-    /// unconditionally. An agent that holds the stablecoin should never be made
-    /// to hold ETH for the price as well; an agent that does not hold it must
-    /// not be steered into a transaction that can only revert.
+    /// The payment token's EIP-712 domain is resolved here rather than at
+    /// signing time so that every "can this rail actually be used" question is
+    /// answered in one place. Once [`choose_rail`] hands one of these back the
+    /// rail is committed, and nothing downstream can discover a reason it is
+    /// unusable after the ETH path has already been passed over.
+    pub(super) struct TokenRail {
+        price: rpc::TokenPrice,
+        domain_separator: alloy::primitives::B256,
+    }
+
+    /// Picks the rail: the stablecoin one when the contract advertises it, the
+    /// operator has set a ceiling that covers the listed amount, the payment
+    /// token answers the reads an authorization needs, *and* the wallet holds
+    /// enough of it. ETH otherwise.
+    ///
+    /// Every fallback below is a settled fact about this contract, this token,
+    /// or this wallet, and each one is printed with its cause. Two things are
+    /// deliberately not fallbacks:
+    ///
+    ///   * a **transport** failure on any of these reads stops the run. A
+    ///     blinking node must never silently change the currency, which is why
+    ///     the reads branch on [`rpc::RpcError::is_transport`] rather than
+    ///     treating every failure as an answer.
+    ///   * a listed amount **above the operator's ceiling** is a refusal, not a
+    ///     routing problem - see [`HeadlessError::PriceAbovePolicy`].
+    ///
+    /// ETH remains the fallback rather than a deprecated path: nothing that
+    /// bought a licence before §2.2 may start failing because a contract now
+    /// also lists a token, or because that token is imperfect.
     fn choose_rail(
         ctx: &HeadlessContext,
         contract: Address,
         wallet: Address,
-    ) -> Result<Option<rpc::TokenPrice>, HeadlessError> {
-        let Some(token_price) = rpc::token_rail(&ctx.rpc_url, contract)
+    ) -> Result<Option<TokenRail>, HeadlessError> {
+        let Some(price) = rpc::token_rail(&ctx.rpc_url, contract)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?
         else {
             return Ok(None);
         };
+        let token = crate::identity::format_addr(price.token);
 
-        let balance = rpc::erc20_balance_of(&ctx.rpc_url, token_price.token, wallet)
-            .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
-
-        if balance >= token_price.amount {
-            return Ok(Some(token_price));
+        match SpendPolicy::from_env()?.check_token_amount(price.token, price.amount)? {
+            SpendVerdict::Allowed => {}
+            SpendVerdict::NoCeiling { var } => {
+                return Ok(eth_instead(format!(
+                    "no stablecoin spend ceiling is configured - set {var} to the most this \
+                     agent may authorize, in {token}'s own smallest unit",
+                )));
+            }
         }
 
-        eprintln!(
-            "rub3: falling back to the ETH rail - {} holds {} of {}, price is {}",
-            crate::identity::format_addr(wallet),
-            balance,
-            crate::identity::format_addr(token_price.token),
-            token_price.amount,
-        );
-        Ok(None)
+        let balance = match rpc::erc20_balance_of(&ctx.rpc_url, price.token, wallet) {
+            Ok(balance) => balance,
+            Err(e) if e.is_transport() => return Err(HeadlessError::Rpc(e.to_string())),
+            Err(e) => {
+                return Ok(eth_instead(format!(
+                    "{token} did not answer balanceOf ({e})"
+                )));
+            }
+        };
+        if balance < price.amount {
+            return Ok(eth_instead(format!(
+                "{} holds {} of {}, price is {}",
+                crate::identity::format_addr(wallet),
+                balance,
+                token,
+                price.amount,
+            )));
+        }
+
+        // EIP-3009 mandates the authorization functions and `authorizationState`,
+        // which is all the licence contract's constructor probe can check. The
+        // `DOMAIN_SEPARATOR()` getter is a convention on top, and a token
+        // without it cannot have an authorization built for it off-chain. That
+        // is a fact about the token, so it selects ETH rather than ending a
+        // purchase that the ETH rail would have completed.
+        let domain_separator = match rpc::token_domain_separator(&ctx.rpc_url, price.token) {
+            Ok(domain_separator) => domain_separator,
+            Err(e) if e.is_transport() => return Err(HeadlessError::Rpc(e.to_string())),
+            Err(e) => {
+                return Ok(eth_instead(format!(
+                    "{token} did not answer DOMAIN_SEPARATOR() ({e}), so no EIP-3009 \
+                     authorization can be signed for it"
+                )));
+            }
+        };
+
+        Ok(Some(TokenRail {
+            price,
+            domain_separator,
+        }))
+    }
+
+    /// Records why the stablecoin rail was passed over and selects ETH.
+    ///
+    /// One place, so every fallback reaches the operator in the same shape and
+    /// none of them is silent.
+    fn eth_instead(reason: String) -> Option<TokenRail> {
+        eprintln!("rub3: falling back to the ETH rail - {reason}");
+        None
     }
 
     /// Signs the EIP-3009 authorization that pays for one purchase.
@@ -886,14 +1141,20 @@ mod headless {
     /// Everything that binds the authorization is read from the chain rather
     /// than assumed here: the nonce from the licence contract (it is what ties
     /// the signature to the mint recipient) and the EIP-712 domain from the
-    /// payment token itself. The wrapper contributes only the salt and the
-    /// validity window.
+    /// payment token itself, resolved in [`choose_rail`]. The wrapper
+    /// contributes only the salt and the validity window.
+    ///
+    /// A failure reading the nonce stays a hard error, including a
+    /// contract-level one: `purchaseAuthorizationNonce` lives on the licence
+    /// contract, so an address that cannot answer it is not a rub3 licence
+    /// contract at all. That is not a payment-rail question, and quietly
+    /// buying in ETH would hide it.
     fn authorize_purchase(
         signer: &dyn Signer,
         ctx: &HeadlessContext,
         contract: Address,
         wallet: Address,
-        token_price: &rpc::TokenPrice,
+        rail: &TokenRail,
     ) -> Result<rpc::IRub3License::PaymentAuthorization, HeadlessError> {
         use alloy::primitives::B256;
         use rand::RngCore;
@@ -904,18 +1165,16 @@ mod headless {
 
         let nonce = rpc::purchase_authorization_nonce(&ctx.rpc_url, contract, wallet, salt)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
-        let domain_separator = rpc::token_domain_separator(&ctx.rpc_url, token_price.token)
-            .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
 
         let valid_after = U256::ZERO;
         let valid_before =
             U256::from(chrono::Utc::now().timestamp().max(0) as u64 + AUTHORIZATION_TTL_SECS);
 
         let digest = rpc::receive_authorization_digest(
-            domain_separator,
+            rail.domain_separator,
             wallet,
             contract,
-            token_price.amount,
+            rail.price.amount,
             valid_after,
             valid_before,
             nonce,
@@ -1033,6 +1292,15 @@ mod tests {
                 },
                 21,
             ),
+            (
+                HeadlessError::PriceAbovePolicy {
+                    rail: "erc3009",
+                    listed: "10000000000".into(),
+                    maximum: "5000000".into(),
+                    token: Some("0x0000000000000000000000000000000000000abc".into()),
+                },
+                22,
+            ),
         ];
 
         for (err, expected) in cases {
@@ -1057,6 +1325,7 @@ mod tests {
             EXIT_CHAIN_MISMATCH,
             EXIT_TOKEN_NOT_OWNED,
             EXIT_PURCHASE_UNCONFIRMED,
+            EXIT_PRICE_ABOVE_POLICY,
         ];
         let mut sorted = codes.to_vec();
         sorted.sort_unstable();
@@ -1070,6 +1339,138 @@ mod tests {
         assert!(!codes.contains(&EXIT_GENERIC));
         // clap exits 2 on usage errors - nothing of ours may collide with it.
         assert!(!codes.contains(&2));
+    }
+
+    // ── Spend policy (§2.2) ──────────────────────────────────────────────────
+
+    /// An unconfigured ceiling makes the stablecoin rail unavailable, not
+    /// unlimited. The verdict names the variable so the fallback printed to the
+    /// operator can tell them what to set.
+    #[test]
+    fn an_unset_ceiling_leaves_the_stablecoin_rail_unavailable() {
+        let policy = SpendPolicy::from_raw(None).expect("an unset ceiling is not an error");
+        assert_eq!(policy.max_token_amount, None);
+        assert_eq!(
+            policy
+                .check_token_amount(Address::ZERO, alloy::primitives::U256::from(1u64))
+                .expect("an unset ceiling refuses nothing outright"),
+            SpendVerdict::NoCeiling {
+                var: ENV_MAX_TOKEN_AMOUNT
+            },
+        );
+    }
+
+    /// The ceiling is inclusive: a listing at exactly the configured maximum is
+    /// within policy, and one wei of the token above it is not.
+    #[test]
+    fn a_listing_at_the_ceiling_is_allowed_and_one_above_it_is_refused() {
+        let policy = SpendPolicy::from_raw(Some("5000000")).expect("a plain integer parses");
+        assert_eq!(
+            policy
+                .check_token_amount(Address::ZERO, alloy::primitives::U256::from(5_000_000u64))
+                .expect("equal to the ceiling is within policy"),
+            SpendVerdict::Allowed,
+        );
+
+        let err = policy
+            .check_token_amount(Address::ZERO, alloy::primitives::U256::from(5_000_001u64))
+            .expect_err("above the ceiling must refuse");
+        assert_eq!(err.exit_code(), EXIT_PRICE_ABOVE_POLICY);
+    }
+
+    /// The refusal has to be machine-readable: an orchestrator reads how far
+    /// over the listing was, and against which token, without asking the chain
+    /// again.
+    #[test]
+    fn a_refused_price_reports_the_amounts_and_the_token() {
+        let token: Address = "0x0000000000000000000000000000000000000abc"
+            .parse()
+            .expect("test address");
+        let err = SpendPolicy::from_raw(Some("1000000"))
+            .expect("a plain integer parses")
+            .check_token_amount(token, alloy::primitives::U256::from(9_000_000u64))
+            .expect_err("above the ceiling must refuse");
+
+        let detail = err
+            .machine_detail()
+            .expect("a policy refusal must carry a detail line");
+        assert!(detail.contains("listed=9000000"), "{detail}");
+        assert!(detail.contains("maximum=1000000"), "{detail}");
+        assert!(detail.contains("rail=erc3009"), "{detail}");
+        assert!(
+            detail.to_ascii_lowercase().contains("0abc"),
+            "the refused token must be named: {detail}"
+        );
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("9000000"), "{rendered}");
+        assert!(rendered.contains("1000000"), "{rendered}");
+        assert!(rendered.contains(ENV_MAX_TOKEN_AMOUNT), "{rendered}");
+    }
+
+    /// A malformed ceiling is a hard stop. Reading it as zero would refuse
+    /// every purchase and reading it as unlimited would authorize an amount
+    /// nobody chose, so neither silent reading is available.
+    #[test]
+    fn a_malformed_ceiling_is_a_hard_configuration_error() {
+        for raw in ["abc", "-1", "5.0", "1e6", " ", "5000000usdc"] {
+            let err = SpendPolicy::from_raw(Some(raw))
+                .err()
+                .unwrap_or_else(|| panic!("{raw:?} must not parse"));
+            assert!(
+                matches!(err, HeadlessError::Config { .. }),
+                "{raw:?} produced {err:?}"
+            );
+            assert!(
+                err.to_string().contains(ENV_MAX_TOKEN_AMOUNT),
+                "the message must name the variable: {err}"
+            );
+        }
+    }
+
+    /// Zero is a legitimate ceiling - it means "never pay on this rail" - and
+    /// must not be confused with the variable being unset.
+    #[test]
+    fn a_zero_ceiling_refuses_every_non_zero_price() {
+        let policy = SpendPolicy::from_raw(Some("0")).expect("zero is a valid ceiling");
+        assert_eq!(
+            policy.max_token_amount,
+            Some(alloy::primitives::U256::ZERO),
+            "zero must be a set ceiling, not an unset one",
+        );
+        assert_eq!(
+            policy
+                .check_token_amount(Address::ZERO, alloy::primitives::U256::ZERO)
+                .expect("a free listing is within a zero ceiling"),
+            SpendVerdict::Allowed,
+        );
+        assert_eq!(
+            policy
+                .check_token_amount(Address::ZERO, alloy::primitives::U256::from(1u64))
+                .expect_err("any price is above a zero ceiling")
+                .exit_code(),
+            EXIT_PRICE_ABOVE_POLICY,
+        );
+    }
+
+    /// And the environment is really the source: `from_env` reads the same
+    /// variable the help text names.
+    #[test]
+    fn the_ceiling_is_read_from_the_documented_variable() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let previous = std::env::var(ENV_MAX_TOKEN_AMOUNT).ok();
+        std::env::set_var(ENV_MAX_TOKEN_AMOUNT, "42");
+        let read = SpendPolicy::from_env();
+        match previous {
+            Some(value) => std::env::set_var(ENV_MAX_TOKEN_AMOUNT, value),
+            None => std::env::remove_var(ENV_MAX_TOKEN_AMOUNT),
+        }
+
+        assert_eq!(
+            read.expect("a plain integer parses").max_token_amount,
+            Some(alloy::primitives::U256::from(42u64)),
+        );
     }
 
     #[test]

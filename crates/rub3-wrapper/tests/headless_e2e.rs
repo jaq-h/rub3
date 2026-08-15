@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use alloy::primitives::Address;
 use rub3_wrapper::activation::{
     ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome, PaymentRail,
+    ENV_MAX_TOKEN_AMOUNT, EXIT_PRICE_ABOVE_POLICY,
 };
 use rub3_wrapper::rpc;
 use rub3_wrapper::signer::{resolve_signer, Signer, ENV_AGENT_KEY};
@@ -211,6 +212,19 @@ fn deploy_mock_usdc() -> String {
     forge_create("test/mocks/MockEIP3009Token.sol:MockEIP3009Token", &[])
 }
 
+/// Deploys an EIP-3009 token that passes the licence contract's constructor
+/// probe and holds balances, but exposes no `DOMAIN_SEPARATOR()`.
+///
+/// The one shape of payment token an authorization cannot be built for
+/// off-chain, and therefore the fixture for "a contract-level failure on a
+/// token-side read selects ETH rather than ending the run".
+fn deploy_mock_without_domain_separator() -> String {
+    forge_create(
+        "test/mocks/MockEIP3009Token.sol:NoDomainSeparatorEIP3009Token",
+        &[],
+    )
+}
+
 fn forge_create(target: &str, constructor_args: &[&str]) -> String {
     let url = rpc_url();
     let mut args = vec![
@@ -379,6 +393,10 @@ impl Agent {
         let session_dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var(ENV_AGENT_KEY, &key_hex);
         std::env::set_var("RUB3_SESSION_DIR", session_dir.path());
+        // The spend ceiling is process-global like the key. Cleared here rather
+        // than only on drop, so a test that means to run without one cannot
+        // inherit a previous test's.
+        std::env::remove_var(ENV_MAX_TOKEN_AMOUNT);
 
         // Resolve through the production path so the test exercises the real
         // env-var source, not a test-only constructor.
@@ -398,7 +416,17 @@ impl Drop for Agent {
     fn drop(&mut self) {
         std::env::remove_var(ENV_AGENT_KEY);
         std::env::remove_var("RUB3_SESSION_DIR");
+        std::env::remove_var(ENV_MAX_TOKEN_AMOUNT);
     }
+}
+
+/// Sets the operator's stablecoin spend ceiling for the current test.
+///
+/// Required before the stablecoin rail is usable at all: there is no default,
+/// because the ceiling is denominated in the payment token's own smallest unit
+/// and decimals differ between tokens. Cleared by [`Agent`]'s drop.
+fn set_spend_ceiling(amount: &str) {
+    std::env::set_var(ENV_MAX_TOKEN_AMOUNT, amount);
 }
 
 fn ctx(contract: &str, token_id: Option<u64>) -> HeadlessContext {
@@ -805,6 +833,9 @@ fn headless_purchases_on_the_stablecoin_rail_e2e() {
     let agent = Agent::new();
     fund(agent.address(), FUNDING_ETH);
     mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    // Exactly the listed price: the ceiling is inclusive, and a run at the
+    // ceiling is the boundary worth exercising on the happy path.
+    set_spend_ceiling(USDC_PRICE);
 
     let eth_before = eth_balance(agent.address());
 
@@ -880,7 +911,9 @@ fn headless_falls_back_to_eth_without_stablecoin_balance_e2e() {
 
     let agent = Agent::new();
     fund(agent.address(), FUNDING_ETH);
-    // Deliberately no `mint_usdc`: the agent holds none of the listed token.
+    set_spend_ceiling(USDC_PRICE);
+    // Deliberately no `mint_usdc`: the agent holds none of the listed token, so
+    // the balance check is the only thing left that can select ETH.
 
     let (_, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
         .expect("headless activation should fall back to ETH");
@@ -904,5 +937,224 @@ fn headless_falls_back_to_eth_without_stablecoin_balance_e2e() {
     assert_eq!(
         rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
         agent.address()
+    );
+}
+
+/// An unset ceiling makes the stablecoin rail unavailable, not unlimited.
+///
+/// The agent here can afford the listed USDC price several times over and the
+/// contract advertises the rail, so nothing but the missing configuration
+/// selects ETH. Proving it buys in ETH rather than failing is the standing
+/// requirement that §2.2 breaks nothing: ETH is the fallback, not a deprecated
+/// path.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_falls_back_to_eth_without_a_spend_ceiling_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    // Deliberately no `set_spend_ceiling`.
+
+    let (_, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("an unconfigured ceiling must fall back to ETH, not fail");
+
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { paid, .. } => assert_eq!(
+            paid,
+            &PaymentRail::Eth {
+                price_wei: PRICE_WEI.to_string()
+            },
+            "no configured ceiling means no stablecoin rail",
+        ),
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    assert_eq!(
+        usdc_balance(&usdc, contract_addr),
+        0,
+        "no stablecoin may move without an operator-set ceiling",
+    );
+    assert_eq!(
+        usdc_balance(&usdc, agent.address()),
+        USDC_FUNDING.parse::<u128>().unwrap(),
+        "and the agent's stablecoin balance is untouched",
+    );
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address(),
+        "the licence was still obtained, in ETH",
+    );
+}
+
+/// A price above the configured ceiling is a refusal, not a fallback.
+///
+/// The distinction is the point: an orchestrator must be able to tell "this
+/// costs more than my policy allows" from "the network failed", so this exits
+/// with its own code, spends nothing on either rail, and mints nothing.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_refuses_a_price_above_the_spend_ceiling_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    // One unit under the listed price: affordable, but outside policy.
+    let ceiling = USDC_PRICE.parse::<u128>().unwrap() - 1;
+    set_spend_ceiling(&ceiling.to_string());
+
+    let err = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect_err("a price above the ceiling must refuse");
+
+    assert_eq!(
+        err.exit_code(),
+        EXIT_PRICE_ABOVE_POLICY,
+        "a policy refusal has its own exit code, got {err}",
+    );
+    assert!(
+        matches!(err, HeadlessError::PriceAbovePolicy { .. }),
+        "got {err:?}",
+    );
+
+    let detail = err
+        .machine_detail()
+        .expect("a policy refusal must be machine-readable");
+    assert!(detail.contains(&format!("listed={USDC_PRICE}")), "{detail}");
+    assert!(detail.contains(&format!("maximum={ceiling}")), "{detail}");
+    assert!(
+        detail
+            .to_ascii_lowercase()
+            .contains(&usdc.trim_start_matches("0x").to_ascii_lowercase()),
+        "the refused token must be named: {detail}",
+    );
+
+    // Nothing was spent and nothing was minted: not in USDC, and not by
+    // quietly taking the ETH rail instead.
+    assert_eq!(
+        usdc_balance(&usdc, agent.address()),
+        USDC_FUNDING.parse::<u128>().unwrap(),
+        "no stablecoin left the wallet",
+    );
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "a refusal must mint nothing",
+    );
+    assert!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).is_err(),
+        "token 0 must not exist",
+    );
+}
+
+/// A payment token that answers the constructor probe but has no
+/// `DOMAIN_SEPARATOR()` selects ETH rather than ending the run.
+///
+/// EIP-3009 mandates the authorization functions and `authorizationState`, not
+/// that getter, so a token like this deploys onto a licence contract happily.
+/// An agent that could have bought in ETH must not be stopped by it.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_falls_back_to_eth_when_the_token_has_no_domain_separator_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let token = deploy_mock_without_domain_separator();
+    let contract = deploy_access_with_rail(PRICE_WEI, &token, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    // Funded and within policy, so the only thing that can select ETH is the
+    // token's missing getter.
+    mint_usdc(&token, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    let (session, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a token without DOMAIN_SEPARATOR() must not end the activation");
+
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { paid, .. } => assert_eq!(
+            paid,
+            &PaymentRail::Eth {
+                price_wei: PRICE_WEI.to_string()
+            },
+            "a token that cannot be signed for must select ETH",
+        ),
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    assert_eq!(
+        usdc_balance(&token, contract_addr),
+        0,
+        "nothing paid in a token no authorization could be built for",
+    );
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address()
+    );
+    session::verify_onchain(&session, &rpc_url()).expect("session must verify on-chain");
+}
+
+/// The other half of the same rule: a *transport* failure on a token-side read
+/// is never a fallback.
+///
+/// The contract advertises a rail and the agent is funded, so the run would buy
+/// in USDC. Pointing it at a dead endpoint must stop it rather than let a
+/// blinking node silently change the currency.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_transport_failure_on_a_token_read_is_a_hard_error_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    // A port nothing is listening on: every read fails at the socket, which is
+    // the one class of failure that must never be read as an answer.
+    let mut dead = ctx(&contract, None);
+    dead.rpc_url = "http://127.0.0.1:1".to_string();
+
+    let err = ensure_headless(agent.signer.as_ref(), &dead)
+        .expect_err("an unreachable node must not be read as a rail decision");
+    assert!(
+        matches!(err, HeadlessError::Rpc(_)),
+        "an unreachable node is a chain error, got {err:?}",
+    );
+
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "and nothing was bought on either rail",
     );
 }
