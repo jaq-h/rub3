@@ -8,6 +8,11 @@ solc_version = "0.8.28"
 optimizer = true
 optimizer_runs = 200
 evm_version = "cancun"
+# Omit the CBOR metadata trailer from compiled output. With the default ("ipfs")
+# solc appends a hash of the metadata JSON, which covers comment text and source
+# file paths, so the canonical fingerprint would move on edits that change no
+# behaviour. See contracts/contracts.md -> "Reproducible builds".
+bytecode_hash = "none"
 
 [rpc_endpoints]
 base         = "${BASE_RPC_URL}"

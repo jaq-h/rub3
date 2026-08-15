@@ -231,6 +231,64 @@ cast call <NEW_CONTRACT> "honorsContract(address,uint256)(bool)" <OLD_CONTRACT> 
 
 It spans exactly one hop, by construction: each contract compares the address you pass against its own immutable `predecessor` and looks no further back. After a second migration (v1 -> v2 -> v3), `v3.honorsContract(v1, <V3_TOKEN_ID>)` is false, so a wrapper still pinned to v1 does not honor the v3 token. Nobody is stranded by that - no token is ever burned, so the holder's v1 token (and their v2 token, if they claimed one) keeps validating forever on its own contract, which is exactly what a v1-pinned wrapper checks.
 
+## Reproducible builds and canonical fingerprints
+
+The canonical fingerprint of a rub3 contract is the `sha256` of the compiler's `deployedBytecode.object`: the runtime code with every immutable slot left zeroed. Because the immutables are zeroed, the fingerprint is a function of the contract's compiled semantics alone, not of the constructor arguments a particular deploy chose - two deploys of the same code with different `supplyCap` share it. That is the number a buyer's agent compares an on-chain contract against, so it has to be reproducible by somebody who is not the deployer.
+
+### The reproducibility contract
+
+To arrive at the same fingerprint from a checkout of this repository at a given commit, a third party must match all of these. They are all pinned in-tree, so "match" means "do not override them".
+
+| Input | Value | Where it is pinned |
+|---|---|---|
+| `solc_version` | `0.8.28` | `contracts/foundry.toml` |
+| `optimizer` | `true` | `contracts/foundry.toml` |
+| `optimizer_runs` | `200` | `contracts/foundry.toml` |
+| `evm_version` | `cancun` | `contracts/foundry.toml` |
+| `bytecode_hash` | `none` | `contracts/foundry.toml` |
+| `openzeppelin-contracts` | `b8c7b9e82d2b340cf82f2913c38e3a0bac2f96ae` | `contracts/foundry.lock` |
+| `forge-std` | `0844d7e1fc5e60d77b68e469bff60265f236c398` | `contracts/foundry.lock` |
+
+Nothing else matters: not the `forge` version (it fetches the pinned `solc`), not the checkout path, not comments in the source.
+
+Those last two are the reason `bytecode_hash = "none"` is set. With solc's default (`ipfs`) the compiler appends a CBOR metadata trailer that hashes the metadata JSON, and that JSON covers comment text and source file paths. Measured on these contracts:
+
+| Perturbation | Default `ipfs` | With `bytecode_hash = "none"` |
+|---|---|---|
+| Add one comment line to `Rub3License.sol` | fingerprint moves | unchanged |
+| Rename the source directory `src/` to `contracts_src/` | fingerprint moves | unchanged |
+| `optimizer_runs` 200 to 999 | fingerprint moves | fingerprint moves |
+
+The third row is correct behaviour: `optimizer_runs` changes the emitted code, so it is a real input, which is why it is in the table above.
+
+### Reproducing it
+
+```bash
+cd contracts && forge build
+python3 -c "import json,hashlib; a=json.load(open('out/Rub3Access.sol/Rub3Access.json'));
+print(hashlib.sha256(bytes.fromhex(a['deployedBytecode']['object'][2:])).hexdigest())"
+```
+
+or, for every deployable contract at once, from the repo root:
+
+```bash
+scripts/canonical-bytecode-hashes.sh print
+```
+
+### The expected values, and the drift gate
+
+The current fingerprints live in [`canonical-bytecode.json`](canonical-bytecode.json), alongside the build inputs they were produced under. It is JSON because it is consumed by machines as much as by people: the CI gate diffs against it, and the wrapper will later compile the same table into the binary, so a `serde`-shaped file beats a prose table or a bare checksum list.
+
+CI runs `scripts/canonical-bytecode-hashes.sh check` as a **blocking** job (`.github/workflows/ci.yml` -> `bytecode-fingerprints`). It rebuilds from scratch and fails if any fingerprint, or any pinned build input, differs from the manifest. When a contract change is intended, regenerate and commit the manifest in the same pull request:
+
+```bash
+scripts/canonical-bytecode-hashes.sh update
+```
+
+Splitting that into a separate commit or pull request defeats the gate, which exists so that a fingerprint can never move without a reviewer seeing it move.
+
+New contracts under `contracts/src/` are picked up automatically; abstract bases such as `Rub3License` have no `deployedBytecode` of their own and are excluded by construction.
+
 ## Auditing the invariants before buying
 
 An agent can verify the ownership guarantees against the deployed bytecode rather than trusting the source. `test/Rub3Invariants.t.sol` runs exactly this audit; the full property-by-property breakdown, including which properties are convention rather than bytecode, is in [../architecture.md](../architecture.md#ownership-invariants-all-license-contracts).

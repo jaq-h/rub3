@@ -163,6 +163,47 @@ jobs:
         run: forge test -vv
 
   # ---------------------------------------------------------------------------
+  # Canonical bytecode fingerprints. BLOCKING, not advisory.
+  #
+  # The canonical fingerprint of a rub3 contract is sha256 of the compiler's
+  # `deployedBytecode.object` - the runtime code with immutable slots zeroed, so
+  # it depends on the contract's compiled semantics and not on the constructor
+  # arguments a given deploy chose. A buyer's agent will later compare an
+  # on-chain contract against exactly this number, so it must never move without
+  # somebody noticing.
+  #
+  # contracts/foundry.toml sets bytecode_hash = "none" to make that possible.
+  # Measured on this branch, with the default ("ipfs") and without it:
+  #
+  #   adding one comment line to Rub3License.sol   ipfs: e5590970... (moved)
+  #                                                none: 57ef9e36... (unchanged)
+  #   renaming contracts/src -> contracts_src      ipfs: 60c76f0f... (moved)
+  #                                                none: 57ef9e36... (unchanged)
+  #
+  # The script self-checks that setting and fails loudly if it is ever reverted.
+  # When the contracts legitimately change, this job stays red until the
+  # regenerated contracts/canonical-bytecode.json is committed in the same pull
+  # request. That is the intended workflow, not a nuisance.
+  # ---------------------------------------------------------------------------
+  bytecode-fingerprints:
+    name: canonical bytecode fingerprints (blocking)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1.9.1
+
+      # foundry.toml pins solc_version, so forge fetches that exact compiler
+      # regardless of its own version; solc is the load-bearing pin here.
+      - name: Show toolchain
+        run: forge --version
+
+      - name: Check canonical fingerprints
+        run: scripts/canonical-bytecode-hashes.sh check
+
+  # ---------------------------------------------------------------------------
   # Anvil-gated on-chain E2E, both #[ignore]d suites.
   # session_onchain_e2e.rs spawns a local anvil, deploys Rub3Access with
   # `forge create` from contracts/, runs purchase + activate, then asserts
