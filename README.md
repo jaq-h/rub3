@@ -65,12 +65,15 @@ rub3/
 │   ├── script/
 │   │   └── Deploy.s.sol              # Deploy either contract to any EVM chain
 │   ├── foundry.toml
+│   ├── foundry.lock                  # Pinned dependency revisions, mirrors the submodule gitlinks
+│   ├── canonical-bytecode.json       # Expected sha256 of each contract's deployedBytecode
 │   ├── .env.example
 │   └── contracts.md                  # Local (Anvil) + on-chain (Base Sepolia) setup guide
 ├── licenses/
 │   └── com.rub3.example.json         # Example license proof with valid signature
 ├── scripts/
-│   └── test-e2e.sh                   # Convenience script — runs cargo test
+│   ├── test-e2e.sh                   # Convenience script — runs cargo test
+│   └── canonical-bytecode-hashes.sh  # check/update/print the canonical fingerprints
 ├── architecture.md                   # System design, session model, security tiers
 ├── implementation.md                 # Phased development plan with status
 ├── ideation.md                       # Project vision and design principles

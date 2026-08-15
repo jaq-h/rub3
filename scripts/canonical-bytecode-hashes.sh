@@ -88,7 +88,7 @@ while IFS= read -r line; do
 done < <(
   find src -type f -name '*.sol' -print0 \
     | while IFS= read -r -d '' file; do
-        { grep -oE '^contract[[:space:]]+[A-Za-z0-9_]+' "$file" || true; } \
+        { grep -oE '^[[:space:]]*contract[[:space:]]+[A-Za-z0-9_]+' "$file" || true; } \
           | awk -v f="$file" '{print $2 "\t" f}'
       done \
     | sort
@@ -147,7 +147,10 @@ fi
 
 # Build settings are read out of the emitted artifacts' own solc metadata, not
 # out of foundry.toml text, so the recorded inputs describe the build that
-# actually produced these hashes. A `[profile.*]` selection or a FOUNDRY_* env
+# actually produced these hashes. `compilationTarget` is dropped because it is
+# per-contract, and `remappings` because forge derives them from how deep the
+# submodules happen to be initialised rather than from anything pinned here; a
+# remapping that actually changes compiled output still moves the fingerprint. A `[profile.*]` selection or a FOUNDRY_* env
 # override changes the artifacts too, and is therefore visible here. The manifest
 # records one build block for all contracts, so every artifact has to agree on
 # it: solc resolves a compiler per pragma when solc_version is unpinned, and
@@ -157,7 +160,7 @@ settings_of() {
   artifact="$(artifact_of "$name" "$source")"
   jq -e -S '{
     solc_version: .metadata.compiler.version,
-    solc_settings: (.metadata.settings | del(.compilationTarget))
+    solc_settings: (.metadata.settings | del(.compilationTarget, .remappings))
   }
   | if (.solc_version | type) != "string"
        or (.solc_settings | type) != "object"
