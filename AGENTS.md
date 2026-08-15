@@ -86,7 +86,7 @@ These are the spec; this file is only the map. Read the relevant one before chan
 | `implementation.md` | phased roadmap **and** the build record; the `[complete]` / `[partial]` / `[not started]` tags say what actually exists |
 | `architecture.md` | system design: security tiers, session model, identity models, launch flows, components |
 | `ideation.md` | vision, principles, what rub3 is and isn't |
-| `contracts/contracts.md` | local Anvil and Base Sepolia setup, deploy env-var reference |
+| `contracts/contracts.md` | local Anvil and Base Sepolia setup, deploy env-var reference, the EIP-3009 purchase recipe, the pre-purchase audit |
 | `testing.md` | per-suite test inventory, manual testing, seeding a license proof |
 
 The wrapper's app identity (`APP_ID`, `CONTRACT`, `CHAIN_ID`, `RPC_URL`) is hardcoded as placeholder constants in `src/main.rs`, pending `rub3 pack`. `CONTRACT` defaults to the zero address, which the wrapper reads as "no contract configured" and skips on-chain ownership checks, so a stock build never touches the chain. See `testing.md` → "App constants".
@@ -101,6 +101,8 @@ The wrapper's app identity (`APP_ID`, `CONTRACT`, `CHAIN_ID`, `RPC_URL`) is hard
 - **Migration is a new deploy plus an opt-in `successor` pointer**, holder-initiated: the old contract validates its own tokens forever. This is the sanctioned migration path as specified; see `implementation.md` §2.4 for what is built.
 
 An upgrade hook, an admin escape hatch, or any path that invalidates an issued token is not a missing feature; it is a design this project has deliberately ruled out. Do not propose one. Where a problem appears to require it, the sanctioned answer is a new deploy behind the successor pattern.
+
+**Adding an external function to a license contract has a checklist.** `test/Rub3Invariants.t.sol` asserts a fixed list of forbidden signatures is absent from the runtime bytecode, and the same list is written out in three more places: the `string[N]` array itself, the copy-pasteable loop in `contracts/contracts.md`, and the bytecode table in `architecture.md`, with the count stated in each plus `implementation.md` §2.4. If the new function introduces state that must not be rewritten later, add the setter names that *would* rewrite it and sweep every count in the same pass - the list has churned repeatedly and a stale count is the usual casualty.
 
 Full statements: `architecture.md` → "Ownership invariants (all license contracts)", `implementation.md` §2.4, `contracts/contracts.md` → "Planned contract evolution".
 

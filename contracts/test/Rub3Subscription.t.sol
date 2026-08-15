@@ -25,10 +25,16 @@ contract Rub3SubscriptionTest is Test {
         out[0] = h;
     }
 
+    /// ETH-only sale terms - what every fixture below except the stablecoin
+    /// suite deploys with.
+    function _sale(uint256 price) internal pure returns (Rub3License.SaleTerms memory) {
+        return Rub3License.SaleTerms({price: price, priceToken: address(0), priceAmount: 0});
+    }
+
     function setUp() public {
         nft = new Rub3Subscription(
             "Rub3 Sub", "R3S", IDENTITY, TBA_IMPL,
-            _hashes(WRAPPER_HASH), PRICE, SUPPLY_CAP, PERIOD, COOLDOWN_BLOCKS,
+            _hashes(WRAPPER_HASH), _sale(PRICE), SUPPLY_CAP, PERIOD, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
         vm.deal(alice, 10 ether);
@@ -194,7 +200,9 @@ contract Rub3SubscriptionTest is Test {
 
     function test_purchase_emitsSnapshotInEvent() public {
         vm.expectEmit(true, true, true, true);
-        emit Rub3Subscription.Purchased(0, alice, alice, block.timestamp + PERIOD, PRICE);
+        emit Rub3Subscription.Purchased(
+            0, alice, alice, block.timestamp + PERIOD, PRICE, address(0), 0
+        );
         vm.prank(alice);
         nft.purchase{value: PRICE}(alice);
     }
@@ -204,7 +212,7 @@ contract Rub3SubscriptionTest is Test {
         uint256 id = nft.purchase{value: PRICE}(alice);
 
         vm.expectEmit(true, false, false, true);
-        emit Rub3Subscription.Renewed(id, nft.expiresAt(id) + PERIOD, PRICE);
+        emit Rub3Subscription.Renewed(id, nft.expiresAt(id) + PERIOD, address(0), PRICE);
         vm.prank(alice);
         nft.renew{value: PRICE}(id);
     }

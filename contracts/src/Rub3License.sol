@@ -1,9 +1,36 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {ERC721}           from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
-import {Ownable}          from "@openzeppelin/contracts/access/Ownable.sol";
+import {ERC721}                   from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {ERC721Enumerable}         from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
+import {Ownable}                  from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20}                   from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20}                from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+
+/// @notice The EIP-3009 slice of a payment token (USDC and every other
+///         `transferWithAuthorization` token) that a license contract calls.
+///
+/// Only {receiveWithAuthorization} is used, never `transferWithAuthorization`,
+/// and that choice is the whole front-running defence - see
+/// {Rub3License-_payWithAuthorization}.
+interface IERC3009 {
+    function receiveWithAuthorization(
+        address from,
+        address to,
+        uint256 value,
+        uint256 validAfter,
+        uint256 validBefore,
+        bytes32 nonce,
+        uint8   v,
+        bytes32 r,
+        bytes32 s
+    ) external;
+
+    /// True once an authorization has been used or cancelled. Read by the
+    /// constructor probe as the cheapest view every EIP-3009 token answers.
+    function authorizationState(address authorizer, bytes32 nonce) external view returns (bool);
+}
 
 /// @notice The slice of a predecessor license contract that a successor reads
 ///         during {Rub3License-claimFromPredecessor}. Deliberately tiny: a
@@ -52,7 +79,52 @@ interface IRub3Predecessor {
 /// - **Opt-in succession.** `successor` is a pointer, not a switch. This
 ///   contract validates its own tokens forever regardless of what it points at,
 ///   and migration onto a successor is initiated by the holder alone.
-abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
+///
+/// # Payment rails
+///
+/// Two, and they mint identically. ETH is the `payable` path a human wallet
+/// uses; `priceToken` / `priceAmount` is the stablecoin path an agent uses, paid
+/// with an EIP-3009 authorization the buyer signs off-chain and *anyone* may
+/// submit (implementation.md §2.2). Neither is privileged: both take payment
+/// through one of the two helpers at the bottom of this contract and then reach
+/// the same single mint in the concrete contract, so a token bought with USDC is
+/// indistinguishable from one bought with ETH in state, events, and terms.
+abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGuardTransient {
+    /// @notice The EIP-3009 authorization a buyer signs, minus the three fields
+    ///         this contract derives rather than accepts.
+    ///
+    ///         `to` is always this contract, `value` is always the listed price
+    ///         at execution time, and `nonce` is always derived from *what is
+    ///         being bought* (see {purchaseAuthorizationNonce}). All three are
+    ///         covered by the buyer's EIP-712 signature on the token, so a
+    ///         submitter who alters any of them produces a digest the token
+    ///         refuses. `salt` is the buyer's own randomness, the only free
+    ///         input to the nonce.
+    /// @notice What a licence costs, on both rails.
+    ///
+    ///         Grouped rather than passed as three loose constructor arguments:
+    ///         it names the concept, keeps the two rails visibly parallel, and
+    ///         keeps the concrete constructors inside solc's stack limit.
+    struct SaleTerms {
+        /// Price in wei. The ETH rail, always available.
+        uint256 price;
+        /// EIP-3009 ERC-20 accepted alongside ETH, or `address(0)` for ETH only.
+        address priceToken;
+        /// Price in `priceToken`'s smallest unit. Must be `0` when there is no
+        /// token; independent of `price`, never converted from it.
+        uint256 priceAmount;
+    }
+
+    struct PaymentAuthorization {
+        address from;
+        uint256 validAfter;
+        uint256 validBefore;
+        bytes32 salt;
+        uint8   v;
+        bytes32 r;
+        bytes32 s;
+    }
+
     /// @notice 0 = access (user_id = wallet), 1 = account (user_id = TBA).
     uint8 public immutable identityModel;
 
@@ -72,6 +144,25 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     ///         are paid for once, and `Rub3Subscription` snapshots each token's
     ///         renewal price at mint (`renewPrice[tokenId]`).
     uint256 public price;
+
+    /// @notice ERC-20 accepted for purchase alongside ETH, or `address(0)` when
+    ///         this contract sells for ETH only. Must implement EIP-3009.
+    ///
+    ///         This is also how the rail is *advertised*: the wrapper reads
+    ///         `priceToken()` in one `eth_call` and takes a zero (or a revert,
+    ///         on a contract deployed before §2.2) as "ETH only".
+    ///
+    ///         Set by {setTokenPrice}, and like {setPrice} it moves what is
+    ///         offered to future buyers only - `Rub3Subscription` snapshots both
+    ///         rails per token at mint.
+    address public priceToken;
+
+    /// @notice Purchase price denominated in `priceToken`, in that token's own
+    ///         smallest unit (USDC has 6 decimals, so `5000000` is 5 USDC).
+    ///
+    ///         Independent of `price`, not converted from it: the contract holds
+    ///         no oracle, so the developer quotes each rail separately.
+    uint256 public priceAmount;
 
     /// @notice Max mintable tokens. `0` disables the cap.
     uint256 public immutable supplyCap;
@@ -155,6 +246,12 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     // ── Events ────────────────────────────────────────────────────────────────
 
     event PriceUpdated(uint256 oldPrice, uint256 newPrice);
+    event TokenPriceUpdated(
+        address oldToken,
+        uint256 oldAmount,
+        address newToken,
+        uint256 newAmount
+    );
     event WrapperHashAdded(bytes32 indexed hash);
     event WrapperHashRevoked(bytes32 indexed hash, string reason);
     event SuccessorUpdated(address indexed oldSuccessor, address indexed newSuccessor);
@@ -174,6 +271,9 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     error TbaImplementationForbidden();
     error SoldOut();
     error InsufficientPayment(uint256 sent, uint256 required);
+    error TokenPaymentUnavailable();
+    error IncompatiblePriceToken(address token);
+    error TokenPriceInconsistent(address token, uint256 amount);
     error WithdrawFailed();
     error NotTokenOwner(address caller, address owner);
     error CooldownActive(uint256 blocksRemaining);
@@ -193,7 +293,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
         uint8            identityModel_,
         address          tbaImplementation_,
         bytes32[] memory wrapperHashes_,
-        uint256          price_,
+        SaleTerms memory sale_,
         uint256          supplyCap_,
         uint256          cooldownBlocks_,
         address          predecessor_,
@@ -225,9 +325,11 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
             catch { revert IncompatiblePredecessor(predecessor_); }
         }
 
+        _setTokenPrice(sale_.priceToken, sale_.priceAmount);
+
         identityModel     = identityModel_;
         tbaImplementation = tbaImplementation_;
-        price             = price_;
+        price             = sale_.price;
         supplyCap         = supplyCap_;
         cooldownBlocks    = cooldownBlocks_;
         predecessor       = predecessor_;
@@ -248,6 +350,17 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     function setPrice(uint256 newPrice) external onlyOwner {
         emit PriceUpdated(price, newPrice);
         price = newPrice;
+    }
+
+    /// @notice Set (or withdraw) the ERC-20 rail offered to *future* buyers.
+    ///
+    /// `token == address(0)` (with `amount == 0`) stops offering the rail. It
+    /// reaches nothing already issued, exactly like {setPrice}: an access token
+    /// is paid for once, and a subscription snapshots *both* rails at mint, so a
+    /// holder keeps renewing in the token they bought under at the amount they
+    /// bought under even after this is repointed or cleared.
+    function setTokenPrice(address token, uint256 amount) external onlyOwner {
+        _setTokenPrice(token, amount);
     }
 
     /// @notice Append a wrapper binary hash to the valid set.
@@ -295,6 +408,18 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
         if (!ok) revert WithdrawFailed();
     }
 
+    /// @notice Sweep the contract's whole balance of an ERC-20 to `to`.
+    ///
+    /// The counterpart of {withdraw} for the stablecoin rail - without it,
+    /// everything paid through {_payWithAuthorization} would be stranded. It
+    /// moves ERC-20 balances only and cannot touch a license token: this
+    /// contract's own ERC-721 exposes no `transfer(address,uint256)`, so passing
+    /// its address reverts rather than doing anything.
+    function withdrawToken(address token, address to) external onlyOwner {
+        IERC20 erc20 = IERC20(token);
+        SafeERC20.safeTransfer(erc20, to, erc20.balanceOf(address(this)));
+    }
+
     // ── Wrapper hash views ────────────────────────────────────────────────────
 
     /// @notice Whether `hash` is a currently trusted wrapper binary.
@@ -316,6 +441,43 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     ///         the contract before purchase.
     function wrapperHashList() external view returns (bytes32[] memory) {
         return _wrapperHashList;
+    }
+
+    // ── Payment rails (ETH and EIP-3009) ──────────────────────────────────────
+
+    /// @dev Domain tag for a *purchase* authorization nonce. Distinct from
+    ///      {_RENEW_AUTHORIZATION} so an authorization signed to buy a token can
+    ///      never be replayed to renew one, or the reverse.
+    bytes32 internal constant _PURCHASE_AUTHORIZATION = keccak256("rub3.PurchaseAuthorization.v1");
+
+    /// @dev Domain tag for a *renewal* authorization nonce. Used only by
+    ///      {Rub3Subscription}; declared here so both derivations sit side by
+    ///      side and are visibly disjoint.
+    bytes32 internal constant _RENEW_AUTHORIZATION = keccak256("rub3.RenewAuthorization.v1");
+
+    /// @notice The EIP-3009 nonce a purchase authorization must carry.
+    ///
+    /// EIP-3009 signs six fields and no more, and `recipient` is not one of
+    /// them. Left unbound, a submitter watching the mempool could take a
+    /// buyer's authorization, pass their own address as `recipient`, and mint
+    /// the license to themselves with the buyer's money. Binding the recipient
+    /// *into the nonce* closes that: the nonce is signed, this contract derives
+    /// it rather than accepting it, and a changed recipient derives a different
+    /// nonce, which yields a digest the buyer never signed. The token rejects
+    /// it and the whole transaction reverts.
+    ///
+    /// `address(this)` is in the preimage as well. The token already binds the
+    /// contract through `to`, so this is belt and braces - it means the nonce
+    /// itself is worthless anywhere but here.
+    ///
+    /// A buyer calls this, signs `ReceiveWithAuthorization` over the returned
+    /// nonce, and hands the signature to whoever is submitting.
+    function purchaseAuthorizationNonce(address recipient, bytes32 salt)
+        public
+        view
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(_PURCHASE_AUTHORIZATION, address(this), recipient, salt));
     }
 
     // ── Succession ────────────────────────────────────────────────────────────
@@ -442,6 +604,115 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable {
     ///      concrete contracts so callers can omit the argument.
     function _resolveRecipient(address recipient) internal view returns (address) {
         return recipient == address(0) ? msg.sender : recipient;
+    }
+
+    /// @dev The authorization path's recipient default, which is *not*
+    ///      {_resolveRecipient}: `msg.sender` there is whoever submitted the
+    ///      authorization - a facilitator, or an attacker - and defaulting to
+    ///      them would hand the license to the submitter. It defaults to the
+    ///      buyer who signed instead. Both spellings ("0" and the buyer's own
+    ///      address) resolve to the same recipient and so to the same nonce, so
+    ///      a submitter gains nothing by choosing between them.
+    function _resolveAuthorizedRecipient(address recipient, address from)
+        internal
+        pure
+        returns (address)
+    {
+        return recipient == address(0) ? from : recipient;
+    }
+
+    /// @dev The ETH leg of a payment: the buyer's own transaction carries the
+    ///      money, so there is nothing to move, only a floor to check.
+    ///
+    ///      This and {_payWithAuthorization} are the only two places in the
+    ///      contracts where a payment is taken. The §2.3 protocol fee splits
+    ///      what has just arrived, so it lands in these two functions and
+    ///      nowhere else - no entry point and no mint path has to change for it.
+    function _payEth(uint256 due) internal view {
+        if (msg.value < due) revert InsufficientPayment(msg.value, due);
+    }
+
+    /// @dev The stablecoin leg: pull exactly `amount` of `token` from
+    ///      `auth.from` using the EIP-3009 authorization they signed.
+    ///
+    ///      **`receiveWithAuthorization`, never `transferWithAuthorization`.**
+    ///      The two carry the same six signed fields under different typehashes,
+    ///      and the difference is the whole safety story. Any address may submit
+    ///      a `transferWithAuthorization` straight to the token, so an attacker
+    ///      watching the mempool could move a buyer's USDC into this contract
+    ///      *without* the mint, burning the nonce and leaving the buyer paid-up
+    ///      and licence-less with no way to recover. `receiveWithAuthorization`
+    ///      requires `msg.sender == to`, and `to` is this contract, so the only
+    ///      way to spend the authorization at all is through this function -
+    ///      which mints. Payment and mint are inseparable. EIP-3009 added the
+    ///      variant for exactly this reason, and USDC implements it.
+    ///
+    ///      Anyone may still submit, which is what keeps the purchase gasless
+    ///      for the buyer: they sign, a facilitator pays the gas, and the token
+    ///      goes to the buyer regardless.
+    ///
+    ///      Replay is the token's own job and it does it: the authorization is
+    ///      recorded against `(from, nonce)` and a second use reverts. The
+    ///      balance delta below is the independent check - it holds even against
+    ///      a payment token that fails silently, and it is what makes "the mint
+    ///      happened" mean "the money arrived".
+    ///
+    ///      `value` is not a parameter. It is the listed price read at execution
+    ///      time, so a buyer cannot be made to pay more than the amount their
+    ///      signature covers: if the price moved after they signed, the digest
+    ///      no longer matches and the token rejects it.
+    function _payWithAuthorization(
+        PaymentAuthorization calldata auth,
+        address token,
+        uint256 amount,
+        bytes32 nonce
+    ) internal {
+        if (token == address(0)) revert TokenPaymentUnavailable();
+
+        IERC20 erc20 = IERC20(token);
+        uint256 balanceBefore = erc20.balanceOf(address(this));
+
+        IERC3009(token).receiveWithAuthorization(
+            auth.from,
+            address(this),
+            amount,
+            auth.validAfter,
+            auth.validBefore,
+            nonce,
+            auth.v,
+            auth.r,
+            auth.s
+        );
+
+        uint256 received = erc20.balanceOf(address(this)) - balanceBefore;
+        if (received < amount) revert InsufficientPayment(received, amount);
+    }
+
+    /// @dev Shared by the constructor and {setTokenPrice}.
+    ///
+    ///      A price token that cannot answer the EIP-3009 read slice would
+    ///      advertise a rail that reverts for every buyer, so it is rejected
+    ///      where it is set rather than discovered by the first agent that
+    ///      tries to pay. `authorizationState` is the probe: a view every
+    ///      EIP-3009 token answers, for any argument, with no token minted and
+    ///      no state touched.
+    ///
+    ///      An amount without a token is a misconfiguration in the other
+    ///      direction - it reads as "5 USDC of nothing" - and is rejected too. A
+    ///      token with a zero amount is *not*: a free tier is legitimate, and it
+    ///      still takes the buyer's signature to mint.
+    function _setTokenPrice(address token, uint256 amount) private {
+        if (token == address(0)) {
+            if (amount != 0) revert TokenPriceInconsistent(token, amount);
+        } else {
+            if (token.code.length == 0) revert IncompatiblePriceToken(token);
+            try IERC3009(token).authorizationState(address(0), bytes32(0)) returns (bool) {}
+            catch { revert IncompatiblePriceToken(token); }
+        }
+
+        emit TokenPriceUpdated(priceToken, priceAmount, token, amount);
+        priceToken  = token;
+        priceAmount = amount;
     }
 
     /// @dev Claims the next sequential id without minting it. Reverts if supply

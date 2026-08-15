@@ -16,7 +16,7 @@ Three commitments shape every design decision below:
 
 | | Can never change | Can change (affects future only) |
 |---|---|---|
-| **Developer** | validity of issued tokens; transfer rights; per-token renewal terms (`renewPrice`, `period`); supply cap; identity model; TBA implementation; cooldown; predecessor link | price for new sales; wrapper hash set (append + flag only); successor pointer; registry listing |
+| **Developer** | validity of issued tokens; transfer rights; per-token renewal terms (`renewPrice`, `renewPriceToken`, `renewPriceAmount`, `period`); supply cap; identity model; TBA implementation; cooldown; predecessor link | price for new sales on either rail (`price`, `priceToken` / `priceAmount`); wrapper hash set (append + flag only); successor pointer; registry listing |
 | **rub3** | fee on any deployed contract; validation logic | factory versions; registry curation; marketplace; facilitator |
 
 Every "can never change" cell in the developer row is enforced by bytecode today and checkable before purchase - see [Ownership invariants](#ownership-invariants-all-license-contracts) for the audit procedure and for the shorter list of properties that are still convention rather than proof.
@@ -49,7 +49,17 @@ chain_id = 8453
 
 ### Money
 
-Native ETH pricing works today. The default for the machine economy is **USDC via EIP-3009** (`transferWithAuthorization` — the primitive x402 uses): the buyer signs a payment authorization off-chain, and anyone — the developer, a facilitator, or the buyer itself — submits it on-chain. Gasless for the buyer; an agent holding only stablecoins can purchase without ever owning ETH. Planned in implementation.md §2.2; ETH remains supported as a parallel path.
+Two rails, and they mint identically (implementation.md §2.2, built).
+
+**ETH** is the `payable` path a human wallet uses: `purchase{value: price}(recipient)`.
+
+**USDC via EIP-3009** is the default for the machine economy: the buyer signs a payment authorization off-chain, and anyone - the developer, a facilitator, or the buyer itself - submits it on-chain. Gasless for the buyer; an agent holding only stablecoins can obtain a licence without ever owning ETH. A contract advertises the rail by returning a non-zero `priceToken()` alongside `priceAmount()`; that single `eth_call` is how the wrapper decides which currency to pay in, and a contract deployed before §2.2 has no such getter, so the call reverts and the wrapper reads it as "ETH only".
+
+**`receiveWithAuthorization`, not `transferWithAuthorization`.** EIP-3009 defines both over the same six signed fields; only the receive variant requires `msg.sender == to`. With the transfer variant, anyone watching the mempool could push a buyer's authorization straight at the token, moving the money to the licence contract *without* the mint and burning the nonce - the buyer paid, holds nothing, and there is no recovery. Requiring the receive variant makes the licence contract the only address that can spend the authorization at all, so payment and mint are inseparable. Anyone may still submit the *purchase*, which is what keeps it gasless.
+
+**What binds an authorization.** The token signs `from`, `to`, `value`, `validAfter`, `validBefore`, and `nonce` - and nothing else, so the mint recipient is not covered by default. rub3 binds it through the nonce: `purchaseAuthorizationNonce(recipient, salt)` (and `renewAuthorizationNonce(tokenId, salt)` for renewals) is derived by the contract, not accepted from the caller, so a submitter who changes the recipient derives a different nonce and produces a digest the buyer never signed. Distinct domain tags keep a purchase authorization from being spent as a renewal, or the reverse. Replay is the token's own single-use nonce, backed by a balance-delta check in the licence contract so a mint cannot happen unless the money actually arrived.
+
+This is the prerequisite for x402-style catalog listings (implementation.md §3.3).
 
 ---
 
@@ -386,9 +396,10 @@ The wrapper picks the most capable available tab as the default and lets the use
 
 #### Rub3Access (one-time purchase)
 
-ERC-721 + ERC-721Enumerable with payable `purchase(address recipient)`:
-- Price per token, optional supply cap (immutable)
-- `recipient == address(0)` defaults to `msg.sender`
+ERC-721 + ERC-721Enumerable with payable `purchase(address recipient)` and `purchaseWithAuthorization(address recipient, PaymentAuthorization auth)`:
+- Price per token on both rails: `price` (wei) and `priceToken` / `priceAmount` (an EIP-3009 ERC-20 and its own smallest unit). Independent quotes, not a conversion - the contract holds no oracle. Optional supply cap (immutable)
+- `recipient == address(0)` defaults to `msg.sender` on the ETH path and to `auth.from`, the buyer, on the authorization path - never to the submitter
+- Both paths reach one `_mintPurchased`, so a licence bought with USDC is identical in state and events to one bought with ETH
 - `mapping(bytes32 => HashStatus) wrapperHashes` - append-only set of distributed-binary SHA-256s (see [Binary verification](#binary-verification-all-tiers))
 - `uint8 identityModel` — `0 = access`, `1 = account` — readable by wrapper
 
@@ -398,9 +409,10 @@ On-chain check: `ownerOf(tokenId) == walletAddress`
 
 ERC-721 + ERC-721Enumerable extended with time-based validity:
 - `mapping(uint256 => uint256) public expiresAt`
-- `mapping(uint256 => uint256) public renewPrice` - the token's renewal price, snapshotted from `price` at mint and written once
-- `purchase()` sets `expiresAt[tokenId] = block.timestamp + period` and `renewPrice[tokenId] = price`
-- `renew(uint256 tokenId)` payable, extends by one period at `renewPrice[tokenId]` - never the current `price`
+- `mapping(uint256 => uint256) public renewPrice` - the token's ETH renewal price, snapshotted from `price` at mint and written once
+- `mapping(uint256 => address) public renewPriceToken` + `mapping(uint256 => uint256) public renewPriceAmount` - the same freeze for the stablecoin rail. **A second snapshot, not a conversion of the first**: both listed prices are frozen at the same instant, and a token minted while the contract offered no stablecoin rail carries none and renews in ETH, which every token always can
+- `purchase()` / `purchaseWithAuthorization()` set `expiresAt[tokenId] = block.timestamp + period` and snapshot all three renewal terms
+- `renew(uint256 tokenId)` payable, and `renewWithAuthorization(uint256 tokenId, PaymentAuthorization auth)`, each extending by one period at that token's own snapshot - never the current listed price
 - `uint256 immutable period` - the other half of "renewal terms are frozen per token"
 - `uint8 identityModel` — same flag as above
 
@@ -492,7 +504,7 @@ Live in `Rub3License` (implementation.md §2.4). Enforced by construction, machi
 
 - **No revocation surface.** No burn, no admin transfer, no pause on `ownerOf` / `isValid` / `activate` for issued tokens. Not policy — absent from the bytecode.
 - **No proxies.** Contract code, and therefore license terms, are frozen at deploy. No upgrade hook, no delegatecall, no initializer.
-- **Renewal terms frozen per token.** `renewPrice[tokenId]` snapshots at mint and is written once; `period` is immutable. `renew()` charges the snapshot. A developer cannot reprice a held subscription - and there is no function that could.
+- **Renewal terms frozen per token, on both rails.** `renewPrice[tokenId]`, `renewPriceToken[tokenId]`, and `renewPriceAmount[tokenId]` all snapshot at mint and are written once; `period` is immutable. `renew()` and `renewWithAuthorization()` charge the snapshot. A developer cannot reprice a held subscription in either currency - and there is no function that could.
 - **Append-only wrapper hash set.** Replaces the single rotatable `wrapperHash` slot - see [Binary verification](#binary-verification-all-tiers).
 - **Successor pattern for migrations.** See below.
 
@@ -533,16 +545,16 @@ Covers contract bugs, paid major versions, and chain migration. Three hard guara
 
 The distinction matters because an agent can verify the first list before buying and can only trust the second.
 
-**Bytecode** - check these against the deployed runtime code. The 25 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, and exactly the set the copy-pasteable loop in `contracts/contracts.md` scans for. (The rows also name `renewPrice(tokenId)` and `wrapperHashList()`, which are functions that *do* exist and are read as part of the check.)
+**Bytecode** - check these against the deployed runtime code. The 27 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, and exactly the set the copy-pasteable loop in `contracts/contracts.md` scans for. (The rows also name `renewPrice(tokenId)`, `renewPriceToken(tokenId)`, `renewPriceAmount(tokenId)` and `wrapperHashList()`, which are functions that *do* exist and are read as part of the check.)
 
 | Property | How an agent checks it |
 |---|---|
 | No burn, admin transfer, seizure, or pause | The selectors are absent from the runtime bytecode, and a raw call carrying one reverts (there is no fallback). Scan for `burn(uint256)`, `burn(address,uint256)`, `burnFrom(address,uint256)`, `adminTransfer(address,address,uint256)`, `forceTransfer(address,address,uint256)`, `seize(uint256)`, `clawback(uint256)`, `pause()`, `unpause()`, `paused()`, `setPaused(bool)`, `revoke(uint256)`, `revokeToken(uint256)`, `invalidate(uint256)`, `setExpiresAt(uint256,uint256)`, `setRenewPrice(uint256,uint256)`, `forceMigrate(uint256,address)` |
 | No proxy, no upgrade hook | `upgradeTo(address)`, `upgradeToAndCall(address,bytes)`, `initialize()` absent; contract code hashes stable across blocks |
 | Hash set is append-only | `setWrapperHash(bytes32)`, `removeWrapperHash(bytes32)`, `unrevokeWrapperHash(bytes32)` absent; `wrapperHashList()` only ever grows |
-| Renewal terms frozen per token | `renewPrice(tokenId)` does not move after mint; `setRenewPrice(uint256,uint256)`, `setExpiresAt(uint256,uint256)` and any other renewal setter are absent from the runtime bytecode; `period` is `immutable`, with no `setPeriod(uint256)`. Free tiers are legitimate, so a `renewPrice` of `0` is conforming |
+| Renewal terms frozen per token | `renewPrice(tokenId)`, `renewPriceToken(tokenId)` and `renewPriceAmount(tokenId)` do not move after mint; `setRenewPrice(uint256,uint256)`, `setRenewPriceToken(uint256,address)`, `setRenewPriceAmount(uint256,uint256)`, `setExpiresAt(uint256,uint256)` and any other renewal setter are absent from the runtime bytecode; `period` is `immutable`, with no `setPeriod(uint256)`. Free tiers are legitimate, so a `renewPrice` of `0` is conforming |
 | Deploy-time parameters frozen | `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` are `immutable` - no `setPredecessor(address)` selector |
-| Migration cannot be forced | `claimFromPredecessor` is the only mint path outside `purchase`, and it checks `ownerOf(...) == msg.sender` on the predecessor |
+| Migration cannot be forced | `claimFromPredecessor` is the only mint path outside `purchase` / `purchaseWithAuthorization`, and it checks `ownerOf(...) == msg.sender` on the predecessor |
 
 **Convention** - real commitments, but not provable from the bytecode:
 
@@ -629,7 +641,7 @@ rub3-wrapper
     └── Tauri mode: launch Tauri app entry point
 ```
 
-**Headless mode (built - implementation.md §2.1).** Everything in the tree above except the Wallet Connection webview is signer-agnostic. `activation::ensure_headless(signer, ctx)` runs the same pipeline - enumerate tokens, purchase if empty, cooldown check, activate, sign session, persist - with an operator-supplied signer (env key, keystore, or KMS-backed `Signer` impl). Front doors are Cargo features: `webview` pulls `wry`/`tao`, `headless` pulls neither, so a headless build has no GUI dependency at all - smaller binary, container-friendly. This is the primary path for agent-operated software; the webview is the human fallback.
+**Headless mode (built - implementation.md §2.1).** Everything in the tree above except the Wallet Connection webview is signer-agnostic. `activation::ensure_headless(signer, ctx)` runs the same pipeline - enumerate tokens, purchase if empty, cooldown check, activate, sign session, persist - with an operator-supplied signer (env key, keystore, or KMS-backed `Signer` impl). The purchase step reads `priceToken()` and pays on the stablecoin rail when the contract advertises one and the wallet holds enough of it, and in ETH otherwise; the rail it chose is reported back in `HeadlessOutcome::PurchasedAndActivated { paid }` and printed on the CLI's one-line result. Front doors are Cargo features: `webview` pulls `wry`/`tao`, `headless` pulls neither, so a headless build has no GUI dependency at all - smaller binary, container-friendly. This is the primary path for agent-operated software; the webview is the human fallback.
 
 Key handling is contained rather than spread. Headless necessarily signs and broadcasts, which the interactive flows never do, so the capability lives behind one feature and one object-safe trait whose only primitive is "sign this 32-byte digest" - a KMS or enclave serves it without releasing a key. Exactly one type, `signer::LocalSigner`, ever holds raw key material. The launcher strips all four `RUB3_AGENT_*` variables from the wrapped binary's environment, so the licensed product is not handed the credential or its location; the child still runs as the same UID, so this is containment, not a sandbox.
 
@@ -650,7 +662,7 @@ crates/rub3-wrapper/
 │   ├── agent_env.rs     - names of the `RUB3_AGENT_*` credential vars, read by `signer` and stripped by `supervisor`
 │   ├── signer.rs        - `Signer` trait + `LocalSigner` (feature `headless`; the only holder of raw key material)
 │   ├── tx.rs            - EIP-1559 build/sign/broadcast for headless (feature `headless`)
-│   ├── rpc.rs           - on-chain queries (ownerOf, price, cooldown, sessionId, chainId, receipt polling)
+│   ├── rpc.rs           - on-chain queries (ownerOf, price, priceToken/priceAmount, cooldown, sessionId, chainId, receipt polling) + EIP-3009 authorization digests
 │   ├── supervisor.rs    - child process lifecycle, SIGTERM forwarding, strips `RUB3_AGENT_*` from the child
 │   └── webview.rs       - native activation window (wry/tao), JS↔Rust IPC (feature `webview`)
 ├── assets/

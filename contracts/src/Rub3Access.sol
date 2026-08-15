@@ -18,14 +18,14 @@ contract Rub3Access is Rub3License {
         uint8            identityModel_,
         address          tbaImplementation_,
         bytes32[] memory wrapperHashes_,
-        uint256          price_,
+        SaleTerms memory sale_,
         uint256          supplyCap_,
         uint256          cooldownBlocks_,
         address          predecessor_,
         address          owner_
     ) Rub3License(
         name_, symbol_, identityModel_, tbaImplementation_, wrapperHashes_,
-        price_, supplyCap_, cooldownBlocks_, predecessor_, owner_
+        sale_, supplyCap_, cooldownBlocks_, predecessor_, owner_
     ) {
         // Succession is same-model only, and that is enforced here rather than
         // left to the deployer. {Rub3License} has already established that a
@@ -43,12 +43,50 @@ contract Rub3Access is Rub3License {
         }
     }
 
-    /// @notice Mint a fresh license token to `recipient`.
+    /// @notice Mint a fresh license token to `recipient`, paying in ETH.
     /// @dev    Passing `address(0)` mints to `msg.sender`.
     function purchase(address recipient) external payable returns (uint256 tokenId) {
-        if (msg.value < price) revert InsufficientPayment(msg.value, price);
-        address to = _resolveRecipient(recipient);
+        _payEth(price);
+        return _mintPurchased(_resolveRecipient(recipient), msg.sender);
+    }
+
+    /// @notice Mint a fresh license token to `recipient`, paying `priceAmount`
+    ///         of `priceToken` with an EIP-3009 authorization the buyer signed
+    ///         off-chain.
+    ///
+    /// **Anyone may call this** - the developer, a facilitator, or the buyer.
+    /// That is what makes the purchase gasless for the buyer, and it is safe
+    /// because the authorization pins down everything that matters: the token
+    /// pins `from`, `value`, and the validity window; `to` is this contract, so
+    /// the funds can only be spent here (see
+    /// {Rub3License-_payWithAuthorization}); and the nonce is derived from the
+    /// recipient, so the submitter cannot redirect the mint
+    /// (see {Rub3License-purchaseAuthorizationNonce}).
+    ///
+    /// @dev Passing `address(0)` as `recipient` mints to `auth.from`, the buyer
+    ///      - *not* to `msg.sender`, who is merely carrying the message.
+    function purchaseWithAuthorization(address recipient, PaymentAuthorization calldata auth)
+        external
+        nonReentrant
+        returns (uint256 tokenId)
+    {
+        address to = _resolveAuthorizedRecipient(recipient, auth.from);
+        _payWithAuthorization(
+            auth,
+            priceToken,
+            priceAmount,
+            purchaseAuthorizationNonce(to, auth.salt)
+        );
+        return _mintPurchased(to, auth.from);
+    }
+
+    /// @dev The one mint, reached by both rails. Whatever paid for it, the token
+    ///      that comes out is the same token and announces itself the same way.
+    ///      `payer` is whoever's money it was: `msg.sender` on the ETH rail,
+    ///      `auth.from` on the authorization rail, where `msg.sender` may be a
+    ///      facilitator who paid nothing but gas.
+    function _mintPurchased(address to, address payer) private returns (uint256 tokenId) {
         tokenId = _mintNext(to);
-        emit Purchased(tokenId, to, msg.sender);
+        emit Purchased(tokenId, to, payer);
     }
 }

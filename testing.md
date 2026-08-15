@@ -49,7 +49,7 @@ scripts/test-e2e.sh
 
 - **`license::tests`** — activation message hashing, personal_sign prefix, proof serialization round-trips
 - **`store::tests`** — proof save/load, directory creation, overwrite, missing file handling
-- **`rpc::tests`** — provider construction, contract call error paths, `encode_activate_calldata` selector + layout, `get_tx_receipt` / `get_block_number` error paths, ENS stub
+- **`rpc::tests`** - provider construction, contract call error paths, `encode_activate_calldata` selector + layout, `get_tx_receipt` / `get_block_number` error paths, ENS stub; and for the EIP-3009 rail (§2.2) the `ReceiveWithAuthorization` typehash against its literal preimage, the signing digest against a vector computed independently with `cast`, every signed field proving it changes that digest, and the `purchaseWithAuthorization` calldata selector
 - **`session::tests`** (requires `session` feature) — message determinism, tier-diffing, expiry edge cases, sign/verify round-trip, wrong-wallet failure; with `cooldown` adds: `verify_onchain` missing-field + bad-URL paths, `should_reverify` distribution sanity
 - **`session_store::tests`** (requires `session` feature) - save/load round-trip, missing-session, `load_latest_session` picking the freshest valid session (`load_latest_session_for_wallet` narrows the same scan to one signer, covered from `activation::tests`)
 - **`identity::tests`** - `IdentityModel` parsing and wire format, ERC-6551 TBA derivation determinism and sensitivity to each input, `resolve_user_id` for both models
@@ -116,6 +116,8 @@ Drives `activation::ensure_headless` end to end with no webview involved: the te
 - `headless_explicit_token_not_owned_e2e` - `--token-id` the signer does not hold → exit code 20, minting nothing
 - `headless_explicit_token_id_does_not_reuse_another_tokens_session_e2e` - a cached session for a different token cannot satisfy `--token-id` → exit code 20
 - `headless_chain_id_mismatch_e2e` - endpoint chain id ≠ build chain id → exit code 19, refused before anything is signed
+- `headless_purchases_on_the_stablecoin_rail_e2e` (§2.2) - deploys the EIP-3009 mock from `contracts/test/mocks/`, deploys a contract listing both rails, mints USDC to the agent, and asserts the outcome names `PaymentRail::Erc3009`, that exactly the listed stablecoin amount left the agent and arrived at the contract, and that the ETH spent is gas only - far under the ETH price the same contract lists. Balances are read with `cast`, not through the code under test
+- `headless_falls_back_to_eth_without_stablecoin_balance_e2e` (§2.2) - same contract, an agent holding no USDC → `PaymentRail::Eth`, with nothing paid in USDC
 
 Run with:
 
@@ -123,6 +125,16 @@ Run with:
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
     -- --ignored headless
 ```
+
+### Solidity suite (`contracts/`, run with `forge test` from `contracts/`)
+
+In-process EVM: no network, no `.env`. 127 tests across four files.
+
+- **`test/Rub3Access.t.sol`** (26) - metadata, constructor validation, purchase, supply cap, activation and cooldown, owner gating
+- **`test/Rub3Subscription.t.sol`** (14) - expiry, renewal, `isValid`, and the per-token `renewPrice` snapshot of §2.4
+- **`test/Rub3Invariants.t.sol`** (50) - the ownership invariants: append-only hash set, the successor pattern, mint ordering and predecessor typing, and the no-revocation audit (27 forbidden signatures × 3 deployed contracts, with a positive control proving the scanner finds selectors that do exist)
+- **`test/Rub3TokenPurchase.t.sol`** (37) - the EIP-3009 stablecoin rail of §2.2. The buyer holds stablecoin and a zero ETH balance in every test, and a separate submitter sends every transaction: replay, front-running (diverting the mint, stripping it by calling the token directly, and calling `receiveWithAuthorization` as a third party), authorizations aimed at the wrong contract / wrong intent / wrong token id, the validity window and cancellation, a price move after signing, the balance-delta check, the constructor probes, both rails minting identically, and subscription renewal terms frozen on both rails
+- **`test/mocks/MockEIP3009Token.sol`** - a faithful minimal EIP-3009 token standing in for USDC, plus a silent token and a non-token. Why a mock rather than a fork or a deployed token is argued in the file's own header
 
 ### Test helpers (`tests/helpers/mod.rs`)
 

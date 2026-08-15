@@ -19,7 +19,12 @@ use alloy::sol_types::SolCall;
 //   tbaImplementation()           — ERC-6551 impl for account-model TBA derivation
 //   supplyCap()                   — immutable mint cap (0 = unlimited)
 //   nextTokenId()                 — next id to be minted
-//   purchase(recipient)           — payable; calldata only (wrapper never sends)
+//   purchase(recipient)           - payable; calldata only in interactive mode
+//   priceToken() / priceAmount()  - the EIP-3009 stablecoin rail (§2.2), and how
+//                                   a contract advertises it: a zero token, or a
+//                                   getter that is not there at all, means ETH only
+//   purchaseAuthorizationNonce(…) - the nonce a purchase authorization must carry
+//   purchaseWithAuthorization(…)  - the stablecoin rail's mint
 sol! {
     #[sol(rpc)]
     interface IRub3License {
@@ -40,8 +45,49 @@ sol! {
         function supplyCap() external view returns (uint256 cap);
         function nextTokenId() external view returns (uint256 id);
         function purchase(address recipient) external payable returns (uint256 tokenId);
+
+        function priceToken() external view returns (address token);
+        function priceAmount() external view returns (uint256 amount);
+        function purchaseAuthorizationNonce(address recipient, bytes32 salt)
+            external view returns (bytes32 nonce);
+
+        /// Mirrors `Rub3License.PaymentAuthorization`. Field order is part of
+        /// the ABI encoding, so it must match the Solidity struct exactly.
+        struct PaymentAuthorization {
+            address from;
+            uint256 validAfter;
+            uint256 validBefore;
+            bytes32 salt;
+            uint8   v;
+            bytes32 r;
+            bytes32 s;
+        }
+
+        function purchaseWithAuthorization(address recipient, PaymentAuthorization calldata auth)
+            external returns (uint256 tokenId);
     }
 }
+
+// The slice of an EIP-3009 payment token the wrapper reads. `DOMAIN_SEPARATOR`
+// is read rather than rebuilt from name/version/chainId: it is the one value the
+// token itself agrees is its EIP-712 domain, so a signature built against it
+// cannot drift from whatever version of USDC is actually deployed.
+sol! {
+    #[sol(rpc)]
+    interface IEip3009Token {
+        function balanceOf(address owner) external view returns (uint256 balance);
+        function DOMAIN_SEPARATOR() external view returns (bytes32 separator);
+    }
+}
+
+/// `keccak256("ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")`
+///
+/// The receive variant, not the transfer one. Only the payee may submit a
+/// `receiveWithAuthorization`, which is what stops a third party spending the
+/// buyer's authorization outside the licence contract - see
+/// `Rub3License._payWithAuthorization`.
+const RECEIVE_WITH_AUTHORIZATION_TYPEHASH: B256 =
+    b256!("d099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8");
 
 /// `keccak256("Transfer(address,address,uint256)")` — the ERC-721 Transfer
 /// event topic0. Mint events have `from == address(0)`.
@@ -533,6 +579,167 @@ pub fn encode_purchase_calldata(recipient: Address) -> String {
     format!("0x{}", hex::encode(call.abi_encode()))
 }
 
+// ── Stablecoin rail (EIP-3009, §2.2) ──────────────────────────────────────────
+
+/// What a contract charges on its stablecoin rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenPrice {
+    /// The ERC-20 the contract accepts. Never the zero address - a contract
+    /// with no rail is reported as `None` rather than a zero token.
+    pub token: Address,
+    /// The price in that token's own smallest unit.
+    pub amount: U256,
+}
+
+/// Reads the stablecoin rail a contract advertises, or `None` when it has none.
+///
+/// This is the whole detection mechanism, and it is deliberately one ordinary
+/// `eth_call`: `priceToken()`. Three answers mean "ETH only" and are treated
+/// identically -
+///
+///   * the zero address, from a contract that could offer a rail but does not;
+///   * a revert, from a contract deployed before §2.2, which has no such
+///     function and no fallback to swallow the call;
+///   * empty return data, from an address that is not a licence contract.
+///
+/// A *transport* failure is none of those and is propagated: falling back to
+/// ETH because the node blinked would spend the wrong currency for the wrong
+/// reason.
+pub fn token_rail(rpc_url: &str, contract: Address) -> Result<Option<TokenPrice>, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+
+        let token = match instance.priceToken().call().await {
+            Ok(token) => token,
+            Err(e) if is_transport(&e) => return Err(RpcError::Transport(e.to_string())),
+            Err(_) => return Ok(None),
+        };
+        if token.is_zero() {
+            return Ok(None);
+        }
+
+        let amount = instance
+            .priceAmount()
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))?;
+
+        Ok(Some(TokenPrice { token, amount }))
+    })
+}
+
+/// Reads an ERC-20 balance. Used to check the buyer can actually cover the
+/// stablecoin price before choosing that rail.
+pub fn erc20_balance_of(rpc_url: &str, token: Address, owner: Address) -> Result<U256, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IEip3009Token::new(token, provider);
+        instance
+            .balanceOf(owner)
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))
+    })
+}
+
+/// Reads a payment token's EIP-712 `DOMAIN_SEPARATOR()`.
+pub fn token_domain_separator(rpc_url: &str, token: Address) -> Result<B256, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IEip3009Token::new(token, provider);
+        instance
+            .DOMAIN_SEPARATOR()
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))
+    })
+}
+
+/// Reads the nonce a purchase authorization must carry, from the contract that
+/// will check it.
+///
+/// Derived on-chain rather than recomputed here on purpose: the nonce is what
+/// binds the buyer's signature to the mint recipient, and a wrapper that
+/// derived it independently could drift from the contract and produce
+/// signatures that are silently unspendable.
+pub fn purchase_authorization_nonce(
+    rpc_url: &str,
+    contract: Address,
+    recipient: Address,
+    salt: B256,
+) -> Result<B256, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        instance
+            .purchaseAuthorizationNonce(recipient, salt)
+            .call()
+            .await
+            .map_err(|e| RpcError::Contract(e.to_string()))
+    })
+}
+
+/// The EIP-712 digest a buyer signs to authorize `value` of a payment token to
+/// `payee`. Pure - no RPC.
+///
+/// `domain_separator` comes from the token itself
+/// ([`token_domain_separator`]), so this function never has to know the
+/// token's name or version.
+#[allow(clippy::too_many_arguments)]
+pub fn receive_authorization_digest(
+    domain_separator: B256,
+    from: Address,
+    payee: Address,
+    value: U256,
+    valid_after: U256,
+    valid_before: U256,
+    nonce: B256,
+) -> B256 {
+    use alloy::sol_types::SolValue;
+
+    let struct_hash = alloy::primitives::keccak256(
+        (
+            RECEIVE_WITH_AUTHORIZATION_TYPEHASH,
+            from,
+            payee,
+            value,
+            valid_after,
+            valid_before,
+            nonce,
+        )
+            .abi_encode(),
+    );
+
+    let mut preimage = Vec::with_capacity(66);
+    preimage.extend_from_slice(&[0x19, 0x01]);
+    preimage.extend_from_slice(domain_separator.as_slice());
+    preimage.extend_from_slice(struct_hash.as_slice());
+    alloy::primitives::keccak256(preimage)
+}
+
+/// Returns the 0x-prefixed calldata for
+/// `purchaseWithAuthorization(recipient, auth)`.
+pub fn encode_purchase_with_authorization_calldata(
+    recipient: Address,
+    auth: IRub3License::PaymentAuthorization,
+) -> String {
+    let call = IRub3License::purchaseWithAuthorizationCall { recipient, auth };
+    format!("0x{}", hex::encode(call.abi_encode()))
+}
+
+/// Whether a contract-call failure was the network rather than the chain.
+///
+/// A reverted `eth_call` and a dead endpoint arrive as the same Rust type; only
+/// the first is an answer. Anything the node *responded* to - including a
+/// revert - is a settled fact about the contract.
+fn is_transport(e: &alloy::contract::Error) -> bool {
+    matches!(
+        e,
+        alloy::contract::Error::TransportError(alloy::transports::RpcError::Transport(_))
+    )
+}
+
 /// Fetches the receipt for `tx_hash` and returns the token id minted to
 /// `recipient` by the matching ERC-721 `Transfer(0x0, recipient, tokenId)` log
 /// emitted from `contract`.
@@ -723,6 +930,173 @@ mod tests {
         let err = mint_token_id(VALID_RPC, "not-a-hash", Address::ZERO, Address::ZERO).unwrap_err();
         assert!(matches!(err, RpcError::InvalidInput(_)), "{err}");
         assert!(!err.is_retryable(), "{err}");
+    }
+
+    /// The typehash is the difference between the front-runnable EIP-3009 path
+    /// and the safe one, so it is pinned to its literal preimage here rather
+    /// than trusted to a copied constant.
+    #[test]
+    fn receive_with_authorization_typehash_matches_its_preimage() {
+        assert_eq!(
+            RECEIVE_WITH_AUTHORIZATION_TYPEHASH,
+            alloy::primitives::keccak256(
+                // The `\` line continuation drops the newline and the leading
+                // whitespace, so this is one unbroken type string.
+                "ReceiveWithAuthorization(address from,address to,uint256 value,\
+                 uint256 validAfter,uint256 validBefore,bytes32 nonce)"
+                    .as_bytes()
+            ),
+            "the typehash must be keccak256 of the exact EIP-3009 type string",
+        );
+    }
+
+    /// The digest a buyer signs is what authorises the money to move, so it is
+    /// checked against a vector computed independently with `cast`:
+    ///
+    /// ```text
+    /// ENC=$(cast abi-encode "f(bytes32,address,address,uint256,uint256,uint256,bytes32)" \
+    ///        0xd099...3de8 0x1111...11 0x2222...22 5000000 0 1000000 0x3333...33)
+    /// cast keccak 0x1901<domainSeparator><cast keccak $ENC>
+    /// ```
+    #[test]
+    fn receive_authorization_digest_matches_an_independent_vector() {
+        let digest = receive_authorization_digest(
+            b256!("0101010101010101010101010101010101010101010101010101010101010101"),
+            "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            "0x2222222222222222222222222222222222222222"
+                .parse()
+                .unwrap(),
+            U256::from(5_000_000u64),
+            U256::ZERO,
+            U256::from(1_000_000u64),
+            b256!("3333333333333333333333333333333333333333333333333333333333333333"),
+        );
+
+        assert_eq!(
+            digest,
+            b256!("139fd1f41f7fd692a669a5017ad6158e4642e7b11c3432e802cdde30faa473d6"),
+        );
+    }
+
+    /// Every field is signed, so changing any one of them must change the
+    /// digest. A field silently dropped from the struct hash would let a
+    /// submitter alter it after the buyer signed.
+    #[test]
+    fn receive_authorization_digest_covers_every_field() {
+        let ds = b256!("0101010101010101010101010101010101010101010101010101010101010101");
+        let from: Address = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        let payee: Address = "0x2222222222222222222222222222222222222222"
+            .parse()
+            .unwrap();
+        let nonce = b256!("3333333333333333333333333333333333333333333333333333333333333333");
+        let base = receive_authorization_digest(
+            ds,
+            from,
+            payee,
+            U256::from(5u64),
+            U256::ZERO,
+            U256::from(100u64),
+            nonce,
+        );
+
+        let other: Address = "0x4444444444444444444444444444444444444444"
+            .parse()
+            .unwrap();
+        let variants = [
+            receive_authorization_digest(
+                b256!("0202020202020202020202020202020202020202020202020202020202020202"),
+                from,
+                payee,
+                U256::from(5u64),
+                U256::ZERO,
+                U256::from(100u64),
+                nonce,
+            ),
+            receive_authorization_digest(
+                ds,
+                other,
+                payee,
+                U256::from(5u64),
+                U256::ZERO,
+                U256::from(100u64),
+                nonce,
+            ),
+            receive_authorization_digest(
+                ds,
+                from,
+                other,
+                U256::from(5u64),
+                U256::ZERO,
+                U256::from(100u64),
+                nonce,
+            ),
+            receive_authorization_digest(
+                ds,
+                from,
+                payee,
+                U256::from(6u64),
+                U256::ZERO,
+                U256::from(100u64),
+                nonce,
+            ),
+            receive_authorization_digest(
+                ds,
+                from,
+                payee,
+                U256::from(5u64),
+                U256::from(1u64),
+                U256::from(100u64),
+                nonce,
+            ),
+            receive_authorization_digest(
+                ds,
+                from,
+                payee,
+                U256::from(5u64),
+                U256::ZERO,
+                U256::from(101u64),
+                nonce,
+            ),
+            receive_authorization_digest(
+                ds,
+                from,
+                payee,
+                U256::from(5u64),
+                U256::ZERO,
+                U256::from(100u64),
+                b256!("4444444444444444444444444444444444444444444444444444444444444444"),
+            ),
+        ];
+
+        for (i, v) in variants.iter().enumerate() {
+            assert_ne!(base, *v, "field {i} is not covered by the digest");
+        }
+    }
+
+    #[test]
+    fn encode_purchase_with_authorization_matches_selector() {
+        // keccak256("purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,uint8,bytes32,bytes32))")[..4]
+        let recipient: Address = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        let auth = IRub3License::PaymentAuthorization {
+            from: recipient,
+            validAfter: U256::ZERO,
+            validBefore: U256::from(1u64),
+            salt: B256::ZERO,
+            v: 27,
+            r: B256::ZERO,
+            s: B256::ZERO,
+        };
+        let data = encode_purchase_with_authorization_calldata(recipient, auth);
+        assert!(
+            data.starts_with("0x6bf8b185"),
+            "unexpected selector in {data}",
+        );
     }
 
     #[test]

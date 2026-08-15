@@ -412,14 +412,89 @@ without `activate()` + cooldown + purchase), so `--features headless` and
 **Deferred to §2.2**
 - USDC via EIP-3009. The headless purchase path is ETH-only today; §2.2 adds `purchaseWithAuthorization` and has headless prefer it when the contract advertises it
 
-### 2.2 — USDC purchase via EIP-3009 `[not started]`
+### 2.2 - USDC purchase via EIP-3009 `[complete]`
 
-Machine money. Agents hold stablecoins, not ETH; card rails can't onboard them at all.
+Machine money. Agents hold stablecoins, not ETH; card rails can't onboard them at all. Two rails now, and they mint identically: an agent holding only USDC obtains a licence, and the ETH path is byte-for-byte what it was.
 
-- Contracts: `purchaseWithAuthorization(...)` — accepts a USDC EIP-3009 `transferWithAuthorization` signature; anyone (developer, facilitator, or the buyer itself) may submit, so the purchase is gasless for the buyer. `priceToken` (USDC address) + `priceAmount` alongside the existing ETH `price`; either path mints identically.
-- Same addition to `renew()` for subscriptions.
-- Wrapper/CLI: headless purchase (§2.1) prefers the USDC path when the contract advertises it; ETH remains the fallback.
-- Compatibility goal: anything that speaks x402 can pay for a rub3 license — this is the prerequisite for Bazaar-style catalog listings (§3.3).
+**`receiveWithAuthorization`, not `transferWithAuthorization`** - `Rub3License.sol`
+
+The spec named the transfer variant; the implementation uses the receive variant, and the difference is the whole safety story rather than a detail. Both carry the same six signed fields under different typehashes. `transferWithAuthorization` may be submitted by anyone *to the token*, so an attacker watching the mempool could push a buyer's authorization straight at USDC, moving the money into the licence contract **without** the mint - nonce burnt, buyer paid, no licence, no recovery. That is precisely the unrecoverable-funds failure the money path exists to prevent. `receiveWithAuthorization` requires `msg.sender == to`, and `to` is the licence contract, so the authorization is spendable *only* through `purchaseWithAuthorization`, which always mints. Payment and mint become inseparable. EIP-3009 added the variant for this exact attack and USDC implements it, so nothing is given up: anyone may still submit the purchase, which is what keeps it gasless for the buyer.
+
+**Binding what EIP-3009 does not sign** - `Rub3License.sol`
+
+The token signs `from`, `to`, `value`, `validAfter`, `validBefore`, `nonce`. The *mint recipient* is not among them, so left alone a submitter could pass their own address and take the licence with the buyer's money. rub3 derives the nonce instead of accepting it:
+
+- `purchaseAuthorizationNonce(recipient, salt) = keccak256(tag, address(this), recipient, salt)`, and `Rub3Subscription.renewAuthorizationNonce(tokenId, salt)` with a different tag. A changed recipient (or token id) derives a different nonce, which yields a digest the buyer never signed, and the token rejects it
+- Distinct domain tags (`rub3.PurchaseAuthorization.v1` / `rub3.RenewAuthorization.v1`) mean a purchase authorization can never be spent as a renewal, or the reverse
+- `address(this)` sits in the preimage as well. The token already binds the contract through `to`; this makes the nonce worthless anywhere else regardless
+- `value` is **not** a parameter - it is the listed price read at execution time. A buyer therefore cannot be charged more than their signature covers: if the price moved after they signed, the digest stops matching and the purchase reverts rather than overcharging
+- Replay is the token's own single-use `(from, nonce)` accounting. On top of it, `_payWithAuthorization` measures the contract's balance before and after and requires it to have risen by the price, so a mint cannot happen unless the money actually arrived - true even against a payment token that fails silently
+- `nonReentrant` (OZ `ReentrancyGuardTransient`) on both authorization entry points, because the payment token is an external call the owner configures
+
+**One mint, two rails** - `Rub3Access.sol`, `Rub3Subscription.sol`
+
+Duplicated mint logic is how the two paths would drift. `Rub3Access` gained a private `_mintPurchased(to, payer)` and `Rub3Subscription` a private `_mintSubscription(to, payer)`; `purchase` and `purchaseWithAuthorization` differ only in how payment is taken and who is named as `payer` (`msg.sender` on the ETH rail, `auth.from` on the other, where `msg.sender` may be a facilitator who paid nothing but gas). `renew` and `renewWithAuthorization` share `_extend` the same way. `_resolveAuthorizedRecipient` is deliberately *not* `_resolveRecipient`: a zero recipient means the buyer who signed, never the submitter.
+
+**Sale terms and how the rail is advertised** - `Rub3License.sol`
+
+- `address public priceToken` + `uint256 public priceAmount` alongside `price`, and `setTokenPrice(address,uint256)` mirroring `setPrice` - it moves what is *offered*, never what was granted
+- Advertisement is on-chain by construction: the wrapper reads `priceToken()`. Zero, a revert (a contract deployed before §2.2 has no such function and no fallback), or empty return data all mean "ETH only" and are treated identically. A *transport* failure is not one of those and is propagated rather than silently falling back to the wrong currency
+- A constructor/setter probe rejects a `priceToken` with no code or one that cannot answer `authorizationState`, so a contract cannot advertise a rail that reverts for every buyer; `IncompatiblePriceToken`. An amount with no token is rejected as `TokenPriceInconsistent`. A token with a zero amount is allowed - a free tier is legitimate and still takes the buyer's signature
+- `withdrawToken(address,address)` alongside `withdraw`, or everything paid on the stablecoin rail would be stranded
+
+**How the token-denominated renewal price relates to `renewPrice`** - `Rub3Subscription.sol`
+
+They are **two independent snapshots of two independently listed prices, not a conversion**. The contract holds no oracle and cannot derive a USDC amount from a wei amount, so `renewPriceToken[tokenId]` and `renewPriceAmount[tokenId]` are written once at mint from the listed `priceToken` / `priceAmount`, at the same instant and by the same rule as `renewPrice[tokenId]` is written from `price` - the *listed* prices, not the amounts paid. Consequences, all deliberate:
+
+- §2.4's "renewal terms are frozen per token" now covers both rails. `renewWithAuthorization` charges the snapshot, so a developer cannot reprice a held subscription in either currency
+- A token minted while the contract offered no stablecoin rail carries none: `renewWithAuthorization` reverts `TokenPaymentUnavailable`. It renews in ETH, which every token always can, so no holder is ever stranded
+- `_afterClaim` carries the predecessor's `expiresAt` and `renewPrice` across as before, and takes the stablecoin rail from *this* contract's listing rather than the predecessor's. `IRub3Predecessor` is the view slice frozen at §2.4 and a pre-§2.2 predecessor cannot answer for a rail it never had, so reading one across would brick the claim for exactly the holders migration exists to serve. Same shape as `period`: the successor's own terms govern what the carried price buys, and the claim is where the holder accepts them
+- Events widened once more: `Purchased(tokenId, recipient, payer, expiresAt, renewPrice, renewPriceToken, renewPriceAmount)` and `Renewed(tokenId, expiresAt, priceToken, pricePaid)`, where a zero `priceToken` means the amount is wei
+
+**Constructor: `SaleTerms`** - both concrete contracts
+
+`price`, `priceToken`, and `priceAmount` are one `SaleTerms` struct rather than three loose arguments. Passing them loosely put `Rub3Subscription` one stack slot over solc's limit in the constructor ABI decoder; grouping also names the concept and keeps the two rails visibly parallel. `Rub3Access` stays at 10 constructor arguments and `Rub3Subscription` at 11. `forge create` takes the struct as a parenthesised tuple, `"(<price>,<priceToken>,<priceAmount>)"`. Threaded through `script/Deploy.s.sol` (new optional `PRICE_TOKEN` / `PRICE_AMOUNT`), all three Foundry fixtures, and both wrapper e2e tests.
+
+**Leaving room for §2.3** - a shaping choice, not a framework
+
+`_payEth` and `_payWithAuthorization` are now the only two places in the contracts where a payment is taken; every entry point delegates to one of them and then mints. The protocol fee splits what has just arrived, so §2.3 changes those two functions and nothing else - no entry point, no mint path, and no test fixture has to be restructured a second time.
+
+**Wrapper** - `crates/rub3-wrapper/`
+
+- `rpc.rs`: `token_rail` (the one `eth_call` that decides the rail), `erc20_balance_of`, `token_domain_separator`, `purchase_authorization_nonce`, the pure `receive_authorization_digest`, and `encode_purchase_with_authorization_calldata`. The EIP-712 domain is **read** from the token's `DOMAIN_SEPARATOR()` rather than rebuilt from name/version, so a signature cannot drift from whichever USDC version is actually deployed; the nonce is read from the licence contract for the same reason
+- `activation.rs`: `choose_rail` prefers the stablecoin rail when the contract advertises one **and** the wallet holds at least `priceAmount` of it, and falls back to ETH otherwise with a printed reason. The balance check is what makes the preference safe to state unconditionally - it never steers an agent into a transaction that could only revert. `authorize_purchase` signs the digest through the existing `Signer` trait, so a KMS backend serves the money path with no new capability
+- The choice is observable: `HeadlessOutcome::PurchasedAndActivated { token_id, paid }` carries `PaymentRail::Eth { price_wei }` or `PaymentRail::Erc3009 { token, amount }`, and `main.rs` already prints the outcome verbatim
+
+**Test token: a mock, not a fork** - `contracts/test/mocks/MockEIP3009Token.sol`
+
+`forge test` and the anvil-gated e2e both run with no network and no `.env`, so a fork test would make two green jobs depend on an RPC endpoint and a pinned block, and a fresh anvil has no USDC to buy with. What needs exercising is the *authorization protocol* - the EIP-712 domain, the canonical typehashes, `msg.sender == to`, single-use nonces - all of which EIP-3009 specifies rather than USDC. The mock implements exactly that surface with the same domain shape and typehash strings as Circle's FiatTokenV2 (each of the four constants checked against `cast keccak`), at 6 decimals, and deliberately models none of USDC's blocklist, pausing, or proxy, which the licence contracts never touch. It ships `transferWithAuthorization` too, so a test can prove that path is *not* usable against a receive-signed authorization. Two companions: `SilentEIP3009Token` (answers the probe, moves no money) and `NotAToken`.
+
+**Ownership invariants (§2.4) swept in the same pass**
+
+- Forbidden-selector list grows 25 → 27: `setRenewPriceToken(uint256,address)` and `setRenewPriceAmount(uint256,uint256)`, the setters that would unfreeze the new per-token snapshots. Every stated count updated together - `test/Rub3Invariants.t.sol`, the copy-pasteable loop in `contracts/contracts.md`, `architecture.md`'s bytecode table, and §2.4 below
+- `test_audit_scannerIsSound` gained `purchaseWithAuthorization` as a positive control
+- Both "owner does its worst" tests now also exercise `setTokenPrice` and `withdrawToken`; the subscription one deploys with both rails listed and asserts the held token's `renewPriceToken` / `renewPriceAmount` survive the owner repointing and sweeping everything
+- No new external function is a revocation surface: none of them can change `ownerOf`, `isValid`, or `activate` for an issued token
+
+**Tests** - 127 forge tests, up from 90; wrapper e2e 9, up from 7
+
+- `test/Rub3TokenPurchase.t.sol` (new): 37 tests. The buyer is funded with stablecoin and left at a zero ETH balance in every one of them, and a separate submitter sends every transaction. Replay of a used authorization; the same salt against a different recipient; a front-runner trying to divert the mint, then trying to strip it by calling the token directly, then trying `receiveWithAuthorization` itself; an authorization submitted at the wrong contract, as the wrong intent (purchase-as-renewal), and against the wrong token id; expired, not-yet-valid, and cancelled windows; a price move after signing rejecting rather than overcharging; the silent token proving the balance-delta check; the constructor probes; both rails minting identically on both contracts; supply cap on the new rail; recipient defaulting to the buyer and not the submitter; a gift purchase; subscription snapshots frozen on both rails across a repricing; a token minted before the rail existed renewing in ETH only; and §2.4's mint-ordering guarantee re-checked from inside `onERC721Received` on the new path
+- `rpc.rs`: 4 new unit tests - the typehash against its literal preimage, the digest against a vector computed independently with `cast`, every signed field proving it changes the digest, and the calldata selector
+- `tests/headless_e2e.rs`: 2 new anvil tests - a purchase on the stablecoin rail (asserting exactly `priceAmount` left the wallet in USDC, that it arrived at the contract, and that the ETH spent is gas only, orders of magnitude under the listed ETH price), and the fallback when the agent holds no USDC. Balances are read with `cast`, not through the code under test
+- All 90 pre-§2.2 forge tests pass with their bodies unchanged; only constructor fixtures moved, to the `SaleTerms` tuple
+
+**Verification**
+- `forge test`: 127 pass, 0 failed
+- Wrapper matrix, all eight bundles: pass. `cargo clippy --all-targets -- -D warnings`: clean (and a latent `clippy::zombie_processes` failure in `tests/session_onchain_e2e.rs`, which only surfaces under a bundle CI does not run clippy on, fixed in passing)
+- Anvil e2e: `headless` 9/9 including both new arms, `session_verify_onchain_e2e` 1/1
+- The `cast` recipe now in `contracts/contracts.md` run verbatim against anvil: mock USDC + `Rub3Access` deployed, buyer signs with `cast wallet sign --data`, the *deployer* submits, and the buyer ends holding token 0 having spent 5 USDC and exactly zero wei
+
+**Deliberately not done**
+- No hardcoded USDC address anywhere. `priceToken` is per-deploy and the wrapper reads it off the contract, so "which USDC deployment" is the developer's choice on any chain, not rub3's
+- No `transferWithAuthorization` fallback for x402 clients that sign the other typehash. It would reintroduce the front-running hole and be a second payment path to drift; an x402 facilitator that speaks EIP-3009 can sign `ReceiveWithAuthorization` just as easily
+- No fee split, no fee plumbing, no hook interface (§2.3 owns that)
+- The buyer is gasless, but the *wrapper* is not a facilitator: it signs the authorization and submits it itself, so it still needs gas for `purchaseWithAuthorization` and `activate`. What §2.2 removes is the need to hold ETH for the **price**. Fully gasless agents need a third-party submitter, which the contracts already permit and §4.2 builds
+
 
 ### 2.3 — Rub3Factory + protocol fee `[not started]`
 
@@ -466,7 +541,7 @@ contract Rub3Factory {
 - New events `WrapperHashAdded`, `WrapperHashRevoked`, `SuccessorUpdated`, `Claimed`; new errors `ZeroWrapperHash`, `WrapperHashAlreadyKnown`, `WrapperHashNotValid`, `RevocationReasonRequired`, `SelfReference`, `NoPredecessor`, `SuccessorNotDeclared`, `PredecessorTokenAlreadyClaimed`
 
 **Per-token renewal snapshot** - `Rub3Subscription.sol`
-- `mapping(uint256 => uint256) public renewPrice`, written once by `purchase()` from the listed `price` (not the amount paid - overpaying at mint does not inflate the snapshot). No setter exists
+- `mapping(uint256 => uint256) public renewPrice`, written once by `purchase()` from the listed `price` (not the amount paid - overpaying at mint does not inflate the snapshot). No setter exists. §2.2 adds `renewPriceToken` / `renewPriceAmount` under the same rule
 - `renew()` charges `renewPrice[tokenId]`, never the current `price`, and now calls `_requireOwned` before reading the snapshot
 - **Constructor probes the predecessor, in two layers.** `predecessor` is immutable, so an address that cannot answer what the claim path reads would brick every holder's claim forever with redeployment the only remedy. `Rub3License` rejects a non-zero predecessor that has no code or cannot answer `successor()`, the base read slice; each concrete contract then layers on a model check over the same discriminator, `period()`. `Rub3Subscription` requires the predecessor to answer it, plus `expiresAt(0)` and `renewPrice(0)`, the two getters `_afterClaim` actually reads (both are mapping getters, so they answer `0` for any id and need no minted token); `Rub3Access` requires it to *fail*, because an access license carries nothing across in `_afterClaim`, so a subscription predecessor would let any subscriber - including one lapsed years ago - mint a perpetual license for free. Cross-model succession is therefore impossible by construction, in both directions. All layers revert `IncompatiblePredecessor(address)`, declared on the base. The probe deliberately does not read `ownerOf` (it reverts for an unminted id on a valid predecessor) and does not assert the *value* of `successor()` (the predecessor points here only after this deploy; `claimFromPredecessor` still enforces the value at claim time)
 - `period` was already immutable; together the two are the whole of "renewal terms are frozen per token". The freeze cuts both ways - a price *cut* does not reach held tokens either. A developer who wants to pass one on deploys a successor and lets holders claim onto it
@@ -481,7 +556,7 @@ contract Rub3Factory {
 
 **No-revocation audit** - `test/Rub3Invariants.t.sol`
 - `_bytecodeHasSelector` scans deployed runtime code for a selector constant (solc emits each external function's selector as a literal `PUSH4` in the dispatcher, so absence from the code is absence from the ABI). `_assertNoFunction` asserts absence two independent ways: not in the bytecode, *and* a raw call carrying the selector reverts (there is no fallback to swallow it)
-- 25 forbidden signatures × 3 deployed contracts (`Rub3Access`, `Rub3Subscription`, and a successor `Rub3Access`): burn, admin transfer / seizure, pause, direct invalidation of a token or its terms (including `setPeriod(uint256)`, whose absence is what keeps the renewal term a held token buys frozen), proxy/upgrade hooks, the removed `setWrapperHash` and any way to rewrite the set, forced migration, and `setPredecessor`
+- 27 forbidden signatures × 3 deployed contracts (`Rub3Access`, `Rub3Subscription`, and a successor `Rub3Access`) - 25 at §2.4, plus the two §2.2 added for its own per-token snapshots: burn, admin transfer / seizure, pause, direct invalidation of a token or its terms (including `setPeriod(uint256)`, whose absence is what keeps the renewal term a held token buys frozen), proxy/upgrade hooks, the removed `setWrapperHash` and any way to rewrite the set, forced migration, and `setPredecessor`
 - A positive control (`test_audit_scannerIsSound`) proves the scanner finds selectors that *do* exist and that an unknown selector really reverts - without it the absence assertions prove nothing
 - Behavioural companions: the contract owner cannot `transferFrom` / `safeTransferFrom` / `approve` a token it does not hold; and an "owner does its worst" test runs every owner-only function that exists (max out the price, add a hash, revoke every hash, repoint the successor, drain the balance, hand ownership to an attacker, who repeats it and then renounces) and asserts `ownerOf`, `isValid`, `activate`, `renewPrice`, and transfer all survive
 
@@ -495,7 +570,7 @@ contract Rub3Factory {
 - **Mutation-tested**: 13 deliberate regressions applied one at a time to `src/`, each caught by the named test - old contract refusing to validate once a successor is set (G1), the contract owner being allowed to push a migration (G2), the trust rule re-reading the live successor pointer (G3) or honoring unclaimed successor tokens, a resurrectable revoked hash, hash status reaching `isValid`, `renew` charging the current price, reason-less revocation, dropping the `Rub3Access` model probe so a subscription predecessor deploys, and re-adding `setWrapperHash` / `burn` / `pause` / `setPredecessor`. No mutation survived
 - Anvil round-trip with `cast`: deploy v1 + v2, claim rejected before `setSuccessor` and accepted after, v1 token still owned + activatable afterwards, `honorsContract` true on both arms and still true after v1 repoints its successor away
 - `script/Deploy.s.sol` broadcast against anvil in all three hash configurations (`WRAPPER_HASHES` multi, `WRAPPER_HASH` shorthand, none) plus `PREDECESSOR`
-- The audit snippet documented in `contracts/contracts.md` run verbatim against a live deployment: all 25 forbidden selectors absent, positive control found. The snippet, `architecture.md`'s bytecode table and `test_audit_noRevocationSurface` name one identical set
+- The audit snippet documented in `contracts/contracts.md` run verbatim against a live deployment: all forbidden selectors absent, positive control found. The snippet, `architecture.md`'s bytecode table and `test_audit_noRevocationSurface` name one identical set
 - `crates/rub3-wrapper/tests/session_onchain_e2e.rs`: passes against anvil with the new 10-arg constructor
 
 **Deliberately not added** - each of these would be a revocation surface: an emergency pause, an owner burn, an admin transfer, an un-revoke for the hash set, a settable `predecessor`, a `renewPrice` setter, and any kill switch able to stop a wrapper binary already running. The honest limit stands: hash revocation informs new downloads and activations only.

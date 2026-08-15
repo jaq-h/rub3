@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {Rub3Access}       from "../src/Rub3Access.sol";
+import {Rub3License}      from "../src/Rub3License.sol";
 import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 
 /// @notice Deploys either Rub3Access or Rub3Subscription from environment variables.
@@ -26,6 +27,12 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 ///                     `addWrapperHash(bytes32)`. Empty = deploy with no hashes yet.
 ///   WRAPPER_HASH    - single-hash shorthand for WRAPPER_HASHES. Ignored when
 ///                     WRAPPER_HASHES is set; a zero hash is treated as "none".
+///   PRICE_TOKEN     - ERC-20 (USDC or any EIP-3009 token) accepted alongside ETH
+///                     (default: 0x0 = ETH only). Must implement EIP-3009; the
+///                     constructor probes it and reverts if it does not.
+///   PRICE_AMOUNT    - purchase price in PRICE_TOKEN's smallest unit (USDC has 6
+///                     decimals, so 5000000 = 5 USDC). Must be 0 when PRICE_TOKEN
+///                     is unset. 0 with a token set is a free stablecoin tier.
 ///   SUPPLY_CAP      — max mintable tokens; 0 = uncapped (default: 0)
 ///   OWNER           — contract owner address; defaults to the broadcaster
 ///   COOLDOWN_BLOCKS — blocks between activations per token (default: 1800, ~1hr on Base;
@@ -55,6 +62,8 @@ contract Deploy is Script {
         uint256        price         = vm.envUint("PRICE");
 
         // ── Optional params ───────────────────────────────────────────────────
+        address priceToken     = vm.envOr("PRICE_TOKEN",     address(0));
+        uint256 priceAmount    = vm.envOr("PRICE_AMOUNT",    uint256(0));
         uint256 supplyCap      = vm.envOr("SUPPLY_CAP",      uint256(0));
         uint256 cooldownBlocks = vm.envOr("COOLDOWN_BLOCKS", uint256(1800));
         address owner_         = vm.envOr("OWNER",           msg.sender);
@@ -66,6 +75,12 @@ contract Deploy is Script {
         address predecessor    = vm.envOr("PREDECESSOR", address(0));
         // Launch release binary hashes. The set is append-only from here on.
         bytes32[] memory wrapperHashes = _wrapperHashes();
+        // Both rails in one value; `priceAmount` must be 0 when no token is set.
+        Rub3License.SaleTerms memory sale = Rub3License.SaleTerms({
+            price:       price,
+            priceToken:  priceToken,
+            priceAmount: priceAmount
+        });
 
         // ── Deploy ────────────────────────────────────────────────────────────
         vm.startBroadcast();
@@ -75,12 +90,12 @@ contract Deploy is Script {
         if (_eq(contractType, "access")) {
             deployed = address(new Rub3Access(
                 name_, symbol_, identityModel, tbaImpl, wrapperHashes,
-                price, supplyCap, cooldownBlocks, predecessor, owner_
+                sale, supplyCap, cooldownBlocks, predecessor, owner_
             ));
         } else if (_eq(contractType, "subscription")) {
             deployed = address(new Rub3Subscription(
                 name_, symbol_, identityModel, tbaImpl, wrapperHashes,
-                price, supplyCap, period, cooldownBlocks, predecessor, owner_
+                sale, supplyCap, period, cooldownBlocks, predecessor, owner_
             ));
         } else {
             revert(string.concat("Deploy: unknown CONTRACT_TYPE '", contractType, "' (expected 'access' or 'subscription')"));
@@ -103,6 +118,12 @@ contract Deploy is Script {
             console.log("  tbaImpl:       %s", tbaImpl);
         }
         console.log("  price:         %d wei", price);
+        if (priceToken == address(0)) {
+            console.log("  priceToken:    none  (ETH only)");
+        } else {
+            console.log("  priceToken:    %s", priceToken);
+            console.log("  priceAmount:   %d  (token's smallest unit)", priceAmount);
+        }
         console.log("  supplyCap:     %d  (%s)", supplyCap, supplyCap == 0 ? "uncapped" : "capped");
         console.log("  cooldown:      %d blocks (~%d sec on Base)", cooldownBlocks, cooldownBlocks * 2);
         console.log("  wrapperHashes: %d seeded%s",

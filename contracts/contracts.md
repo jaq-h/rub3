@@ -148,7 +148,9 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | `TOKEN_NAME` | yes | ERC-721 name (e.g. `"My App License"`) |
 | `TOKEN_SYMBOL` | yes | ERC-721 symbol (e.g. `MAL`) |
 | `IDENTITY_MODEL` | yes | `0` = wallet is user_id; `1` = TBA is user_id |
-| `PRICE` | yes | Purchase price in wei |
+| `PRICE` | yes | Purchase price in wei (the ETH rail) |
+| `PRICE_TOKEN` | no | ERC-20 accepted alongside ETH, e.g. USDC. Must implement EIP-3009 - the constructor probes it and reverts with `IncompatiblePriceToken` if it does not. `0x0` (default) = ETH only |
+| `PRICE_AMOUNT` | no | Purchase price in `PRICE_TOKEN`'s smallest unit (USDC has 6 decimals, so `5000000` = 5 USDC). Must be `0` when `PRICE_TOKEN` is unset, or the deploy reverts with `TokenPriceInconsistent`. An independent quote, never converted from `PRICE` |
 | `WRAPPER_HASHES` | no | Comma-separated `bytes32` SHA-256s of the launch release's wrapper binaries, one per platform. Seeds the append-only hash set; empty is valid |
 | `WRAPPER_HASH` | no | Single-hash shorthand for `WRAPPER_HASHES`. Ignored when `WRAPPER_HASHES` is set; a zero hash means "none" |
 | `PREDECESSOR` | no | License contract whose holders may migrate onto this one via `claimFromPredecessor`. Frozen at deploy; `0x0` (default) accepts no migrations |
@@ -156,6 +158,100 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | `COOLDOWN_BLOCKS` | no | Blocks between activations per token (default `1800` ≈ 1 hr on Base; floor `15` ≈ 30 s is enforced on-chain) |
 | `OWNER` | no | Contract owner address; defaults to broadcaster |
 | `PERIOD` | subscription only | Subscription length in seconds |
+
+## Paying in USDC (EIP-3009)
+
+A contract deployed with `PRICE_TOKEN` sells on two rails at once. `purchase(address)` keeps taking ETH exactly as before; `purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,uint8,bytes32,bytes32))` takes a stablecoin payment the buyer authorised off-chain, and **anyone may submit it** - the developer, a facilitator, or the buyer. That is what makes it gasless for the buyer, and an agent holding only USDC can obtain a licence without ever owning ETH.
+
+Read what a contract offers (this is also exactly how the wrapper decides which rail to use - a zero token, or a revert from a contract deployed before §2.2, both mean "ETH only"):
+
+```bash
+cast call <CONTRACT_ADDRESS> "priceToken()(address)"  --rpc-url $RPC
+cast call <CONTRACT_ADDRESS> "priceAmount()(uint256)" --rpc-url $RPC
+cast call <CONTRACT_ADDRESS> "price()(uint256)"       --rpc-url $RPC   # the ETH rail
+```
+
+Change what is offered to *future* buyers (owner only; it reaches nothing already issued, and a subscription snapshots both rails per token at mint):
+
+```bash
+cast send <CONTRACT_ADDRESS> "setTokenPrice(address,uint256)" <USDC> 5000000 \
+  --rpc-url $RPC --private-key $DEPLOYER_KEY
+cast send <CONTRACT_ADDRESS> "setTokenPrice(address,uint256)" \
+  0x0000000000000000000000000000000000000000 0 \
+  --rpc-url $RPC --private-key $DEPLOYER_KEY   # stop offering the rail
+```
+
+### Buying with an authorization
+
+Three steps: derive the nonce from the contract, sign `ReceiveWithAuthorization` over the *token's* EIP-712 domain, then have anyone submit it.
+
+```bash
+# 1. The nonce is derived by the contract, not chosen freely. It commits to the
+#    mint recipient, so a submitter cannot redirect the licence to themselves.
+SALT=0x$(openssl rand -hex 32)
+NONCE=$(cast call <CONTRACT_ADDRESS> "purchaseAuthorizationNonce(address,bytes32)(bytes32)" \
+  <BUYER> $SALT --rpc-url $RPC)
+
+# 2. Sign the authorization. `to` is the licence contract, `value` is
+#    `priceAmount()` exactly, and the domain is the token's own - read `name()`
+#    and `version()` off the token rather than assuming, then cross-check:
+#    the typed data below must hash to the token's DOMAIN_SEPARATOR().
+cat > auth.json <<EOF
+{
+  "types": {
+    "EIP712Domain": [
+      {"name": "name", "type": "string"},
+      {"name": "version", "type": "string"},
+      {"name": "chainId", "type": "uint256"},
+      {"name": "verifyingContract", "type": "address"}
+    ],
+    "ReceiveWithAuthorization": [
+      {"name": "from", "type": "address"},
+      {"name": "to", "type": "address"},
+      {"name": "value", "type": "uint256"},
+      {"name": "validAfter", "type": "uint256"},
+      {"name": "validBefore", "type": "uint256"},
+      {"name": "nonce", "type": "bytes32"}
+    ]
+  },
+  "primaryType": "ReceiveWithAuthorization",
+  "domain": {
+    "name": "USDC", "version": "2",
+    "chainId": 8453, "verifyingContract": "<USDC>"
+  },
+  "message": {
+    "from": "<BUYER>", "to": "<CONTRACT_ADDRESS>", "value": "5000000",
+    "validAfter": "0", "validBefore": "$(( $(date +%s) + 900 ))",
+    "nonce": "$NONCE"
+  }
+}
+EOF
+SIG=$(cast wallet sign --data --from-file auth.json --private-key $BUYER_KEY)
+R=0x${SIG:2:64}; S=0x${SIG:66:64}; V=$((16#${SIG:130:2}))
+
+# 3. Anyone submits it. `recipient` of 0x0 mints to the buyer who signed - never
+#    to the submitter. The buyer spends no gas and no ETH.
+cast send <CONTRACT_ADDRESS> \
+  "purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,uint8,bytes32,bytes32))" \
+  0x0000000000000000000000000000000000000000 \
+  "(<BUYER>,0,<VALID_BEFORE>,$SALT,$V,$R,$S)" \
+  --rpc-url $RPC --private-key $SUBMITTER_KEY
+```
+
+Renewing a subscription is the same shape against `renewAuthorizationNonce(uint256,bytes32)` and `renewWithAuthorization(uint256,(...))`, charging that token's frozen `renewPriceAmount` of its frozen `renewPriceToken` - never the current listing.
+
+### Why `receiveWithAuthorization`
+
+EIP-3009 defines two ways to spend the same six signed fields. `transferWithAuthorization` may be submitted by anyone *to the token*, which would let an observer move a buyer's USDC into the licence contract without the mint, burning the nonce and leaving the buyer paid-up with nothing. `receiveWithAuthorization` requires `msg.sender == to`, so the licence contract is the only address that can spend the authorization at all, and spending it always mints. Everything else that could be redirected is pinned the same way: the recipient (and, for renewals, the token id) is bound into the derived nonce, replay is the token's single-use nonce, and the licence contract additionally checks that its balance really rose by the price before minting.
+
+### Withdrawing proceeds
+
+`withdraw(address payable)` takes the ETH balance; `withdrawToken(address,address)` takes the whole balance of an ERC-20:
+
+```bash
+cast send <CONTRACT_ADDRESS> "withdrawToken(address,address)" <USDC> <TREASURY> \
+  --rpc-url $RPC --private-key $DEPLOYER_KEY
+```
 
 ## Managing the wrapper hash set after deployment
 
@@ -245,6 +341,7 @@ for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
            "pause()" "unpause()" "paused()" "setPaused(bool)" \
            "revoke(uint256)" "revokeToken(uint256)" "invalidate(uint256)" \
            "setExpiresAt(uint256,uint256)" "setRenewPrice(uint256,uint256)" \
+           "setRenewPriceToken(uint256,address)" "setRenewPriceAmount(uint256,uint256)" \
            "setPeriod(uint256)" \
            "upgradeTo(address)" "upgradeToAndCall(address,bytes)" "initialize()" \
            "setWrapperHash(bytes32)" "removeWrapperHash(bytes32)" \
@@ -255,16 +352,15 @@ for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
 done
 ```
 
-Silence means exactly one thing: none of those 25 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical template built from this repo at the same deploy configuration. That comparison is not set up yet.
+Silence means exactly one thing: none of those 27 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical template built from this repo at the same deploy configuration. That comparison is not set up yet.
 
 Sanity-check the method itself against a selector that *is* there - `cast sig "activate(uint256)"` should be found.
 
 ## Planned contract evolution
 
-The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot), which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
+The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot) and the §2.2 stablecoin rail, both of which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
 
 - **`Rub3Factory`** (§2.3) — canonical deployment path; stamps an immutable 2–3% protocol fee split into `purchase()`/`renew()`; registry and marketplace list factory deploys only
-- **USDC purchases** (§2.2) — `purchaseWithAuthorization` via EIP-3009 `transferWithAuthorization`; gasless for the buyer
 - **`contentURI`** (§3.1) — content-addressed binary location on-chain, making the contract a complete distribution record
 - **Concurrent seats** (§3.4) — `maxConcurrentSessions[tokenId] = K` generalizing `activeSessionId` for agent fleets
 - **`Rub3Metered`** (§4.1) — per-launch / per-session micropayment billing

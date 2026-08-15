@@ -27,14 +27,41 @@ contract Rub3Subscription is Rub3License {
     ///         contract writes it after the token exists.
     mapping(uint256 => uint256) public renewPrice;
 
+    /// @notice The ERC-20 this token renews in, snapshotted from `priceToken` at
+    ///         mint. `address(0)` means the token was minted while the contract
+    ///         offered no stablecoin rail, and so renews in ETH only.
+    ///
+    ///         Write-once at mint, like {renewPrice}, and for the same reason:
+    ///         it is a renewal *term*, and renewal terms are frozen per token.
+    mapping(uint256 => address) public renewPriceToken;
+
+    /// @notice What this token costs to renew on the stablecoin rail, in
+    ///         `renewPriceToken`'s smallest unit, snapshotted from `priceAmount`
+    ///         at mint.
+    ///
+    ///         **This is a second snapshot, not a conversion of {renewPrice}.**
+    ///         The contract has no oracle and never derives one rail's price
+    ///         from the other's; the developer quotes both, and a mint freezes
+    ///         whichever were listed at that instant. The two are therefore
+    ///         independent, and a token minted when `priceAmount` was `0` and
+    ///         `priceToken` unset simply has no stablecoin renewal - it renews
+    ///         in ETH at {renewPrice}, which every token always can.
+    mapping(uint256 => uint256) public renewPriceAmount;
+
     event Purchased(
         uint256 indexed tokenId,
         address indexed recipient,
         address indexed payer,
         uint256 expiresAt,
-        uint256 renewPrice
+        uint256 renewPrice,
+        address renewPriceToken,
+        uint256 renewPriceAmount
     );
-    event Renewed(uint256 indexed tokenId, uint256 expiresAt, uint256 pricePaid);
+
+    /// @notice A renewal. `priceToken` is `address(0)` when paid in ETH, in
+    ///         which case `pricePaid` is wei; otherwise `pricePaid` is in
+    ///         `priceToken`'s smallest unit.
+    event Renewed(uint256 indexed tokenId, uint256 expiresAt, address priceToken, uint256 pricePaid);
 
     constructor(
         string    memory name_,
@@ -42,7 +69,7 @@ contract Rub3Subscription is Rub3License {
         uint8            identityModel_,
         address          tbaImplementation_,
         bytes32[] memory wrapperHashes_,
-        uint256          price_,
+        SaleTerms memory sale_,
         uint256          supplyCap_,
         uint256          period_,
         uint256          cooldownBlocks_,
@@ -50,7 +77,7 @@ contract Rub3Subscription is Rub3License {
         address          owner_
     ) Rub3License(
         name_, symbol_, identityModel_, tbaImplementation_, wrapperHashes_,
-        price_, supplyCap_, cooldownBlocks_, predecessor_, owner_
+        sale_, supplyCap_, cooldownBlocks_, predecessor_, owner_
     ) {
         period = period_;
 
@@ -76,23 +103,62 @@ contract Rub3Subscription is Rub3License {
         }
     }
 
-    /// @notice Mint a fresh subscription token to `recipient`, starting now.
+    /// @notice Mint a fresh subscription token to `recipient`, starting now,
+    ///         paying in ETH.
     /// @dev    Passing `address(0)` mints to `msg.sender`.
     ///
-    /// Freezes this token's renewal price at whatever `price` is right now.
+    /// Freezes this token's renewal terms - both rails - at whatever is listed
+    /// right now.
     function purchase(address recipient) external payable returns (uint256 tokenId) {
-        uint256 due = price;
-        if (msg.value < due) revert InsufficientPayment(msg.value, due);
-        address to = _resolveRecipient(recipient);
+        _payEth(price);
+        return _mintSubscription(_resolveRecipient(recipient), msg.sender);
+    }
 
+    /// @notice Mint a fresh subscription token, paying `priceAmount` of
+    ///         `priceToken` with an EIP-3009 authorization the buyer signed
+    ///         off-chain. Anyone may submit it; see
+    ///         {Rub3Access-purchaseWithAuthorization} for why that is safe.
+    ///
+    /// @dev Passing `address(0)` as `recipient` mints to `auth.from`, the buyer.
+    function purchaseWithAuthorization(address recipient, PaymentAuthorization calldata auth)
+        external
+        nonReentrant
+        returns (uint256 tokenId)
+    {
+        address to = _resolveAuthorizedRecipient(recipient, auth.from);
+        _payWithAuthorization(
+            auth,
+            priceToken,
+            priceAmount,
+            purchaseAuthorizationNonce(to, auth.salt)
+        );
+        return _mintSubscription(to, auth.from);
+    }
+
+    /// @dev The one mint, reached by both rails, and the only place a
+    ///      subscription token's terms are ever written.
+    ///
+    ///      Snapshots the *listed* prices, not the amounts paid: overpaying at
+    ///      mint does not inflate what the holder renews at. Every per-token
+    ///      mapping is written against the reserved id before {_safeMint} hands
+    ///      control to a contract recipient, so `onERC721Received` can never
+    ///      observe a token whose terms are still at their defaults (§2.4).
+    function _mintSubscription(address to, address payer) private returns (uint256 tokenId) {
         tokenId = _reserveNextId();
-        uint256 newExpiry = block.timestamp + period;
-        expiresAt[tokenId]  = newExpiry;
-        renewPrice[tokenId] = due;
+
+        uint256 newExpiry  = block.timestamp + period;
+        uint256 dueEth     = price;
+        address dueToken   = priceToken;
+        uint256 dueAmount  = priceAmount;
+
+        expiresAt[tokenId]        = newExpiry;
+        renewPrice[tokenId]       = dueEth;
+        renewPriceToken[tokenId]  = dueToken;
+        renewPriceAmount[tokenId] = dueAmount;
 
         _safeMint(to, tokenId);
 
-        emit Purchased(tokenId, to, msg.sender, newExpiry, due);
+        emit Purchased(tokenId, to, payer, newExpiry, dueEth, dueToken, dueAmount);
     }
 
     /// @notice Extend `tokenId` by one period at that token's snapshotted price.
@@ -105,15 +171,56 @@ contract Rub3Subscription is Rub3License {
     /// cost to stay subscribed is fixed at the moment they bought.
     function renew(uint256 tokenId) external payable {
         _requireOwned(tokenId);
+        _payEth(renewPrice[tokenId]);
+        _extend(tokenId, address(0), renewPrice[tokenId]);
+    }
 
-        uint256 due = renewPrice[tokenId];
-        if (msg.value < due) revert InsufficientPayment(msg.value, due);
+    /// @notice Extend `tokenId` by one period, paying its snapshotted
+    ///         `renewPriceAmount` of `renewPriceToken` with an EIP-3009
+    ///         authorization. Anyone may submit it, so a subscription stays
+    ///         renewable by an agent that holds no ETH at all.
+    ///
+    /// Charges the token's own snapshot, never the current `priceAmount` - the
+    /// stablecoin rail is frozen per token exactly like the ETH one, so a
+    /// developer cannot reprice a held subscription on either. A token minted
+    /// before this contract offered a stablecoin rail has no snapshot to charge
+    /// and reverts with `TokenPaymentUnavailable`; it renews in ETH, which it
+    /// always can.
+    ///
+    /// The nonce is derived from `tokenId`, so a submitter cannot redirect a
+    /// renewal onto some other holder's token, and the renewal tag makes a
+    /// purchase authorization unusable here.
+    function renewWithAuthorization(uint256 tokenId, PaymentAuthorization calldata auth)
+        external
+        nonReentrant
+    {
+        _requireOwned(tokenId);
+        address token  = renewPriceToken[tokenId];
+        uint256 amount = renewPriceAmount[tokenId];
+        _payWithAuthorization(auth, token, amount, renewAuthorizationNonce(tokenId, auth.salt));
+        _extend(tokenId, token, amount);
+    }
 
-        uint256 current = expiresAt[tokenId];
-        uint256 base    = current > block.timestamp ? current : block.timestamp;
+    /// @notice The EIP-3009 nonce a renewal authorization must carry.
+    ///
+    /// The renewal counterpart of
+    /// {Rub3License-purchaseAuthorizationNonce}: it binds the signature to one
+    /// token id under a distinct domain tag.
+    function renewAuthorizationNonce(uint256 tokenId, bytes32 salt)
+        public
+        view
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(_RENEW_AUTHORIZATION, address(this), tokenId, salt));
+    }
+
+    /// @dev The one extension, reached by both rails.
+    function _extend(uint256 tokenId, address token, uint256 amountPaid) private {
+        uint256 current   = expiresAt[tokenId];
+        uint256 base      = current > block.timestamp ? current : block.timestamp;
         uint256 newExpiry = base + period;
         expiresAt[tokenId] = newExpiry;
-        emit Renewed(tokenId, newExpiry, due);
+        emit Renewed(tokenId, newExpiry, token, amountPaid);
     }
 
     /// @notice True iff `tokenId` exists and has not yet expired.
@@ -141,5 +248,15 @@ contract Rub3Subscription is Rub3License {
         IRub3Predecessor pred = IRub3Predecessor(predecessor);
         expiresAt[tokenId]  = pred.expiresAt(predecessorTokenId);
         renewPrice[tokenId] = pred.renewPrice(predecessorTokenId);
+
+        // The stablecoin rail is *this* contract's own listing, not the
+        // predecessor's. `IRub3Predecessor` is the view slice frozen at §2.4 and
+        // a predecessor deployed before §2.2 cannot answer for a rail it never
+        // had, so reading one across would brick the claim for exactly the
+        // holders migration exists to serve. A claimed token therefore renews in
+        // ETH at the carried price - which is what the predecessor granted - and
+        // in this contract's listed token at its listed amount if it offers one.
+        renewPriceToken[tokenId]  = priceToken;
+        renewPriceAmount[tokenId] = priceAmount;
     }
 }

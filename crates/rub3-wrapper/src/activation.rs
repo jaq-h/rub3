@@ -335,7 +335,9 @@ Signer sources, highest precedence first:
 // ── Headless activation ───────────────────────────────────────────────────────
 
 #[cfg(feature = "headless")]
-pub use self::headless::{ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome};
+pub use self::headless::{
+    ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome, PaymentRail,
+};
 
 #[cfg(feature = "headless")]
 mod headless {
@@ -359,6 +361,20 @@ mod headless {
         pub token_id: Option<u64>,
     }
 
+    /// Which currency a purchase was settled in, and how much of it.
+    ///
+    /// Reported inside [`HeadlessOutcome::PurchasedAndActivated`] so the rail
+    /// the wrapper chose is visible in the one line the CLI prints, rather than
+    /// something an operator has to reconstruct from the chain.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum PaymentRail {
+        /// Native ETH: the transaction carried the price as its value.
+        Eth { price_wei: String },
+        /// EIP-3009 stablecoin (§2.2): the buyer signed an authorization over
+        /// `amount` of `token`, and the transaction itself carried no value.
+        Erc3009 { token: String, amount: String },
+    }
+
     /// What a successful [`ensure_headless`] actually did - an orchestrator
     /// reads this to tell "launched from cache" apart from "spent money".
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,7 +384,7 @@ mod headless {
         /// A token was already held; `activate()` minted a new session.
         Activated,
         /// A token was purchased first, then activated.
-        PurchasedAndActivated { token_id: u64, price_wei: String },
+        PurchasedAndActivated { token_id: u64, paid: PaymentRail },
     }
 
     /// Everything that can stop a headless activation, in a shape an
@@ -653,13 +669,10 @@ mod headless {
             }
             (None, Some(held)) => (held, HeadlessOutcome::Activated),
             (None, None) => {
-                let (id, price) = purchase(signer, ctx, contract, wallet)?;
+                let (id, paid) = purchase(signer, ctx, contract, wallet)?;
                 (
                     id,
-                    HeadlessOutcome::PurchasedAndActivated {
-                        token_id: id,
-                        price_wei: price.to_string(),
-                    },
+                    HeadlessOutcome::PurchasedAndActivated { token_id: id, paid },
                 )
             }
         };
@@ -752,17 +765,26 @@ mod headless {
         Ok((session, outcome))
     }
 
-    /// Buys a token for `wallet` and returns `(token_id, price_wei)`.
+    /// How long a purchase authorization stays spendable, in seconds.
     ///
-    /// Mirrors the interactive purchase flow (§1.7) exactly - same supply
-    /// check, same calldata, same `Transfer` log parse to recover the minted
-    /// id - with the broadcast done by the signer instead of a human's wallet.
+    /// The wrapper signs and broadcasts in the same breath, so this only has to
+    /// survive congestion, not a human. Keeping it short bounds how long a
+    /// signature that never landed is worth anything to anyone who saw it.
+    const AUTHORIZATION_TTL_SECS: u64 = 900;
+
+    /// Buys a token for `wallet` and returns `(token_id, rail)`.
+    ///
+    /// Mirrors the interactive purchase flow (§1.7) - same supply check, same
+    /// `Transfer` log parse to recover the minted id - with the broadcast done
+    /// by the signer instead of a human's wallet, and with one addition: it
+    /// pays in the contract's stablecoin when the contract advertises one and
+    /// the wallet can cover it, and in ETH otherwise (§2.2).
     fn purchase(
         signer: &dyn Signer,
         ctx: &HeadlessContext,
         contract: Address,
         wallet: Address,
-    ) -> Result<(u64, U256), HeadlessError> {
+    ) -> Result<(u64, PaymentRail), HeadlessError> {
         let supply_cap = rpc::supply_cap(&ctx.rpc_url, contract)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
         let minted = rpc::next_token_id(&ctx.rpc_url, contract)
@@ -771,19 +793,44 @@ mod headless {
             return Err(HeadlessError::SoldOut { supply_cap, minted });
         }
 
-        let price = rpc::token_price(&ctx.rpc_url, contract)
-            .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
-        let calldata = decode_calldata(&rpc::encode_purchase_calldata(wallet))?;
+        let (plan, paid) = match choose_rail(ctx, contract, wallet)? {
+            Some(token_price) => {
+                let auth = authorize_purchase(signer, ctx, contract, wallet, &token_price)?;
+                let calldata = decode_calldata(&rpc::encode_purchase_with_authorization_calldata(
+                    wallet, auth,
+                ))?;
+                (
+                    TxPlan {
+                        to: contract,
+                        // The stablecoin rail carries no ETH at all: the price
+                        // moves inside the token, and this transaction is pure
+                        // calldata plus gas.
+                        value: U256::ZERO,
+                        input: calldata,
+                    },
+                    PaymentRail::Erc3009 {
+                        token: crate::identity::format_addr(token_price.token),
+                        amount: token_price.amount.to_string(),
+                    },
+                )
+            }
+            None => {
+                let price = rpc::token_price(&ctx.rpc_url, contract)
+                    .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+                (
+                    TxPlan {
+                        to: contract,
+                        value: price,
+                        input: decode_calldata(&rpc::encode_purchase_calldata(wallet))?,
+                    },
+                    PaymentRail::Eth {
+                        price_wei: price.to_string(),
+                    },
+                )
+            }
+        };
 
-        let tx_hash = tx::send(
-            &ctx.rpc_url,
-            signer,
-            &TxPlan {
-                to: contract,
-                value: price,
-                input: calldata,
-            },
-        )?;
+        let tx_hash = tx::send(&ctx.rpc_url, signer, &plan)?;
 
         let receipt =
             rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash).map_err(|e| unconfirmed(&tx_hash, e))?;
@@ -796,7 +843,95 @@ mod headless {
         let token_id = rpc::mint_token_id(&ctx.rpc_url, &tx_hash, contract, wallet)
             .map_err(|e| HeadlessError::ActivationFailed(e.to_string()))?;
 
-        Ok((token_id, price))
+        Ok((token_id, paid))
+    }
+
+    /// Picks the rail: the stablecoin one when the contract advertises it *and*
+    /// the wallet holds enough of that token, ETH otherwise.
+    ///
+    /// The balance check is what makes the preference safe to state
+    /// unconditionally. An agent that holds the stablecoin should never be made
+    /// to hold ETH for the price as well; an agent that does not hold it must
+    /// not be steered into a transaction that can only revert.
+    fn choose_rail(
+        ctx: &HeadlessContext,
+        contract: Address,
+        wallet: Address,
+    ) -> Result<Option<rpc::TokenPrice>, HeadlessError> {
+        let Some(token_price) = rpc::token_rail(&ctx.rpc_url, contract)
+            .map_err(|e| HeadlessError::Rpc(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+
+        let balance = rpc::erc20_balance_of(&ctx.rpc_url, token_price.token, wallet)
+            .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+
+        if balance >= token_price.amount {
+            return Ok(Some(token_price));
+        }
+
+        eprintln!(
+            "rub3: falling back to the ETH rail - {} holds {} of {}, price is {}",
+            crate::identity::format_addr(wallet),
+            balance,
+            crate::identity::format_addr(token_price.token),
+            token_price.amount,
+        );
+        Ok(None)
+    }
+
+    /// Signs the EIP-3009 authorization that pays for one purchase.
+    ///
+    /// Everything that binds the authorization is read from the chain rather
+    /// than assumed here: the nonce from the licence contract (it is what ties
+    /// the signature to the mint recipient) and the EIP-712 domain from the
+    /// payment token itself. The wrapper contributes only the salt and the
+    /// validity window.
+    fn authorize_purchase(
+        signer: &dyn Signer,
+        ctx: &HeadlessContext,
+        contract: Address,
+        wallet: Address,
+        token_price: &rpc::TokenPrice,
+    ) -> Result<rpc::IRub3License::PaymentAuthorization, HeadlessError> {
+        use alloy::primitives::B256;
+        use rand::RngCore;
+
+        let mut salt_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut salt_bytes);
+        let salt = B256::from(salt_bytes);
+
+        let nonce = rpc::purchase_authorization_nonce(&ctx.rpc_url, contract, wallet, salt)
+            .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+        let domain_separator = rpc::token_domain_separator(&ctx.rpc_url, token_price.token)
+            .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+
+        let valid_after = U256::ZERO;
+        let valid_before =
+            U256::from(chrono::Utc::now().timestamp().max(0) as u64 + AUTHORIZATION_TTL_SECS);
+
+        let digest = rpc::receive_authorization_digest(
+            domain_separator,
+            wallet,
+            contract,
+            token_price.amount,
+            valid_after,
+            valid_before,
+            nonce,
+        );
+
+        let signature = signer.sign_prehash(digest).map_err(HeadlessError::Signer)?;
+
+        Ok(rpc::IRub3License::PaymentAuthorization {
+            from: wallet,
+            validAfter: valid_after,
+            validBefore: valid_before,
+            salt,
+            v: 27 + u8::from(signature.v()),
+            r: B256::from(signature.r().to_be_bytes::<32>()),
+            s: B256::from(signature.s().to_be_bytes::<32>()),
+        })
     }
 
     /// The token an unqualified run activates: the lowest id the signer holds.
