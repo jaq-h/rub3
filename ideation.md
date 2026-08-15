@@ -112,7 +112,7 @@ The wrapper reads the identity model from the contract at session creation. The 
 ## Key Decisions
 
 - **Chain: Base.** Where x402/USDC machine-payment volume lives; Coinbase on-ramp for humans; ENS support; `alloy` Rust crate. Chain abstracted behind config.
-- **Money: USDC first.** Purchases via EIP-3009 `transferWithAuthorization` — gasless for the buyer, compatible with everything that speaks x402. ETH pricing remains supported.
+- **Money: USDC first.** Purchases via EIP-3009 `receiveWithAuthorization` - gasless for the buyer, and signable by any x402 client that speaks EIP-3009. ETH pricing remains supported. Why the receive variant and not `transferWithAuthorization` is argued in [architecture.md](architecture.md) → "Money".
 - **Headless first.** All crypto (signing, calldata encoding, receipt polling) is native Rust — the agent path needs no webview at all. `headless` builds exclude `wry`/`tao` entirely: smaller binary, no GUI dependencies, container-friendly.
 - **Seats, not devices.** Agent fleets clone VMs and scale horizontally as a legitimate pattern. Concurrency is licensed as K on-chain seats per token, not bound to hardware.
 - **SIWE-style sessions.** Wrapper requests a signed statement from the wallet: `H(app_id || tokenId || user_id || nonce || expires_at)`. This is the session token — no backend, no JWT, no cookie. Cached locally, verified cryptographically on each launch.

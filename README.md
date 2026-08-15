@@ -61,7 +61,10 @@ rub3/
 │   ├── test/
 │   │   ├── Rub3Access.t.sol
 │   │   ├── Rub3Subscription.t.sol
-│   │   └── Rub3Invariants.t.sol      # Ownership invariants (§2.4) + no-revocation bytecode audit
+│   │   ├── Rub3Invariants.t.sol      # Ownership invariants (§2.4) + no-revocation bytecode audit
+│   │   ├── Rub3TokenPurchase.t.sol   # Stablecoin rail (§2.2): EIP-3009 authorization, replay, front-running
+│   │   └── mocks/
+│   │       └── MockEIP3009Token.sol  # Faithful EIP-3009 stand-in for USDC, plus its negative fixtures
 │   ├── script/
 │   │   └── Deploy.s.sol              # Deploy either contract to any EVM chain
 │   ├── foundry.toml
@@ -204,8 +207,8 @@ rub3-wrapper --headless --token-id 3 --binary /path/to/your/app
 
 `--headless` requires a build with the `headless` feature; other builds exit 18.
 
-Before launching the wrapped binary the wrapper removes all four
-`RUB3_AGENT_*` variables (`RUB3_AGENT_KEY`, `RUB3_AGENT_KEYSTORE`,
+Before launching the wrapped binary the wrapper removes every `RUB3_AGENT_*`
+credential variable (`RUB3_AGENT_KEY`, `RUB3_AGENT_KEYSTORE`,
 `RUB3_AGENT_KEYSTORE_PASSWORD`, `RUB3_AGENT_KEYSTORE_PASSWORD_FILE`) from the
 child's environment, so it does not hand the licensed product the agent
 credential or the location of one. This is unconditional: there is no flag to
@@ -227,11 +230,39 @@ silent fall-through to a keystore.
 | `RUB3_AGENT_KEYSTORE_PASSWORD_FILE` | File holding the keystore password - preferred, because a file can be mode 0600 |
 | `RUB3_AGENT_KEYSTORE_PASSWORD` | Keystore password, inline |
 
+### Spend policy
+
+| Variable | Meaning |
+|---|---|
+| `RUB3_AGENT_MAX_TOKEN_AMOUNT` | The most this agent may authorize on a contract's stablecoin rail, an integer in that payment token's own smallest unit (USDC has 6 decimals, so 5 USDC is `5000000`) |
+
+This one is policy, not a credential, so unlike the signer sources above it is
+**not** stripped from the wrapped binary's environment.
+
+There is no default, and until it is set the stablecoin rail is **unavailable**
+rather than unlimited: the wrapper falls back to ETH and prints why. A default
+is not well defined here, because the unit belongs to whichever token the
+contract lists and decimals differ between tokens, so any fixed number would be
+wrongly scaled for some of them. A malformed value is a hard error, never a
+silent zero and never a silent unlimited.
+
+A contract's ETH price and its stablecoin price are independent quotes with no
+on-chain relation - the contract holds no oracle - so this ceiling is what
+bounds the amount an agent will sign for. It is weighed after the rail is known
+to be advertised, affordable, and signable, and before anything is signed: an
+authorization is submittable by anyone, so one that exists for a refused amount
+has already let the money go. A listed amount above it exits 22 and buys nothing
+on either rail, rather than quietly switching currency, so a policy breach is
+distinguishable from a network failure. An agent that holds none of the token is
+not refused: it buys in ETH, exactly as it did before the stablecoin rail
+existed.
+
 For KMS, HSM, or enclave-backed keys, implement the `Signer` trait and pass it
 to `activation::ensure_headless` directly. Its only primitive is "sign this
 32-byte digest", so no key material ever enters the wrapper's process. Exactly
-one type in the crate - `signer::LocalSigner` - holds a raw key at all, and no
-`RUB3_AGENT_*` variable survives into the wrapped binary's environment.
+one type in the crate - `signer::LocalSigner` - holds a raw key at all, and none
+of the `RUB3_AGENT_*` credential variables listed above survives into the
+wrapped binary's environment.
 
 ### Exit codes
 
@@ -260,6 +291,7 @@ activation failure.
 | 19 | Chain id mismatch between endpoint and build | Fix `RPC_URL` |
 | 20 | `--token-id` names a token this signer does not hold | Fix the id, or drop the flag to purchase |
 | 21 | Purchase broadcast but not confirmed - timed out, or the receipt query kept failing | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
+| 22 | The listed price is above the configured spend ceiling. The ceiling is weighed before anything is signed, so the rail was not exercised and this is no evidence it is otherwise usable | Terminal - raise `RUB3_AGENT_MAX_TOKEN_AMOUNT` if the price is acceptable, or do not buy |
 
 Code 21 is deliberately not 14: the price may already have left the wallet, so
 a blind retry can buy a second license. Once the named transaction has mined,
@@ -309,12 +341,13 @@ See [implementation.md](implementation.md) for the full roadmap.
 - Tier-3 on-chain re-verification: `session::verify_onchain` confirms tx status/contract/block hash; `try_session_fast_path` re-verifies ~1 in 5 cold starts (offline errors fall open, verdict-contradicting errors fall closed). Covered by an anvil-gated E2E test (`tests/session_onchain_e2e.rs`)
 - Identity models: `identityModel` + `tbaImplementation` on-chain, local ERC-6551 TBA derivation (`identity.rs`), identity fields signed into the session preimage
 - Purchase UI: in-wrapper purchase flow for tier 3+ (price/supply reads, calldata encoding, receipt polling, minted-token recovery)
-- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 90 forge tests
+- Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 131 forge tests
 - Ownership invariants (§2.4): append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor` and the `honorsContract` trust rule, per-token `renewPrice` snapshot, and a no-revocation bytecode audit
+- **USDC purchases via EIP-3009 (§2.2):** `purchaseWithAuthorization` / `renewWithAuthorization` alongside the ETH path, taking a payment authorization the buyer signs off-chain that anyone may submit - so an agent holding only stablecoins can obtain a licence without ever owning ETH. Uses `receiveWithAuthorization` (payee-only) so the authorization cannot be spent outside the licence contract, and binds the mint recipient into the derived nonce so a submitter cannot redirect it. Both rails reach one mint; subscriptions freeze both per token. The authorization carries an opaque `bytes signature`, so an EIP-1271 smart-contract wallet buys on the same entry point as an EOA - which requires a payment token exposing Circle's FiatTokenV2_2-style `bytes` overload of `receiveWithAuthorization`; a token implementing only EIP-3009's `(v, r, s)` form is not supported. The wrapper's headless path prefers the stablecoin rail whenever the contract advertises one, the wallet can cover it, and the operator's `RUB3_AGENT_MAX_TOKEN_AMOUNT` ceiling covers the listed amount - see [Spend policy](#spend-policy)
 - Deploy script: `forge script` deploys either contract to any EVM chain from env vars
 - **Headless activation (the agent front door):** `activation::ensure_headless(signer, ctx)` runs `tokensOfOwner` → purchase if empty → cooldown check → `activate()` → local session signature → `verify_local` → persist, in one call. A `Signer` trait (env key / encrypted keystore / KMS-backed impl) keeps raw key handling in a single auditable type; `webview` and `headless` are independent Cargo features, and a headless build links no GUI dependency at all. `--headless [--token-id N]` with documented exit codes, covered by an anvil-gated E2E
 
-**Not yet implemented (agent-first roadmap):** USDC purchases via EIP-3009, `Rub3Factory` with immutable protocol fee split, CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
+**Not yet implemented (agent-first roadmap):** `Rub3Factory` with immutable protocol fee split, CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
 
 ## Direction
 

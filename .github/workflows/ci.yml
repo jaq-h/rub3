@@ -101,7 +101,7 @@ jobs:
   #                                               a stated reason - one parameter
   #                                               per hashed field is the point).
   #
-  #   cargo fmt --all -- --check                  exit 1, 11 diff hunks in a
+  #   cargo fmt --all -- --check                  exit 1, 13 diff hunks in a
   #                                               single file:
   #                                               tests/session_onchain_e2e.rs
   #                                               (hand-aligned argument lists
@@ -109,12 +109,13 @@ jobs:
   #                                               per line). Every other file in
   #                                               the workspace is rustfmt-clean.
   #
-  # That last file is owned by the concurrent section-2.4 branch, which is
-  # rewriting its constructor-argument list - exactly the region rustfmt would
-  # reflow. Formatting it here would hand that branch a pointless conflict, so
-  # the fmt step stays `continue-on-error` until 2.4 lands and its owner runs
-  # rustfmt over it. At that point drop the `continue-on-error` below and fmt
-  # becomes a real gate too.
+  # That file has carried the same hand-aligned constructor-argument lists since
+  # before section 2.4, and section 2.2 rewrote them again for the SaleTerms
+  # tuple - exactly the region rustfmt would reflow, which is why the drift has
+  # been deferred rather than fixed in passing each time. Nothing owns it
+  # concurrently now: the fmt step stays `continue-on-error` only until somebody
+  # runs rustfmt over that one file. At that point drop the `continue-on-error`
+  # below and fmt becomes a real gate too.
   #
   # The fmt failure is scoped to the STEP, not the job, so clippy regressions now
   # turn this check red. clippy runs with `-D warnings` on purpose: plain
@@ -179,13 +180,12 @@ jobs:
   # job publishes and pins those ranges. It implements no comparison, and neither
   # does the wrapper yet - see contracts/contracts.md -> "Read this first".
   #
-  # contracts/foundry.toml sets bytecode_hash = "none" to make that possible.
-  # Measured on this branch, with the default ("ipfs") and without it:
-  #
-  #   adding one comment line to Rub3License.sol   ipfs: e5590970... (moved)
-  #                                                none: 57ef9e36... (unchanged)
-  #   renaming contracts/src -> contracts_src      ipfs: 60c76f0f... (moved)
-  #                                                none: 57ef9e36... (unchanged)
+  # contracts/foundry.toml sets bytecode_hash = "none" to make that possible:
+  # under solc's default ("ipfs") a comment line or a source path would move
+  # every fingerprint. The measured perturbation table lives in
+  # contracts/contracts.md -> "Reproducible builds and canonical fingerprints",
+  # which states the outcomes without quoting fingerprints that move whenever
+  # the contracts legitimately change.
   #
   # The script self-checks that setting and fails loudly if it is ever reverted.
   # It discovers the deployable contracts from the artifacts of the build it

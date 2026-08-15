@@ -192,11 +192,7 @@ pub fn personal_sign(signer: &dyn Signer, preimage: &[u8; 32]) -> Result<String,
     let digest = crate::license::personal_sign_hash(preimage);
     let sig = signer.sign_prehash(B256::from(digest))?;
 
-    let mut out = [0u8; 65];
-    out[..32].copy_from_slice(&sig.r().to_be_bytes::<32>());
-    out[32..64].copy_from_slice(&sig.s().to_be_bytes::<32>());
-    out[64] = 27 + u8::from(sig.v());
-    Ok(format!("0x{}", hex::encode(out)))
+    Ok(format!("0x{}", hex::encode(sig.as_bytes())))
 }
 
 // ── Local signer - the only holder of raw key material ────────────────────────

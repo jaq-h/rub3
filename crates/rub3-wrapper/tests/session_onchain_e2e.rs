@@ -63,6 +63,10 @@ impl Drop for AnvilGuard {
     }
 }
 
+// `AnvilGuard::drop` does kill + wait; clippy cannot see through the guard.
+// Only surfaces under a bundle that compiles this file alongside `headless`,
+// which the default-feature CI clippy run does not.
+#[allow(clippy::zombie_processes)]
 fn start_anvil() -> AnvilGuard {
     let child = Command::new("anvil")
         .args(["--port", &PORT.to_string(), "--silent"])
@@ -93,7 +97,11 @@ fn start_anvil() -> AnvilGuard {
 fn forge_create_rub3_access() -> String {
     // 10 constructor args:
     //   name, symbol, identityModel, tbaImplementation, wrapperHashes,
-    //   price, supplyCap, cooldownBlocks, predecessor, owner
+    //   sale, supplyCap, cooldownBlocks, predecessor, owner
+    //
+    // `sale` is the `SaleTerms` tuple of contracts §2.2 - (price in wei,
+    // priceToken, priceAmount) - passed to `forge create` as a parenthesised
+    // tuple. A zero priceToken advertises no stablecoin rail.
     //
     // `wrapperHashes` is the append-only hash set (contracts §2.4), seeded here
     // with a single stand-in release hash - the zero hash is rejected on-chain
@@ -111,8 +119,11 @@ fn forge_create_rub3_access() -> String {
             "--private-key", DEPLOYER_KEY,
             "--rpc-url", &rpc_url(),
             "--constructor-args",
-            "Rub3 Test", "RUB3", "0", zero_addr, wrapper_hashes, "0", "0", "15",
-            zero_addr, DEPLOYER_ADDR,
+            "Rub3 Test", "RUB3", "0", zero_addr, wrapper_hashes,
+            // SaleTerms: (price wei, priceToken, priceAmount). This fixture
+            // sells for free on the ETH rail and advertises no token rail.
+            "(0,0x0000000000000000000000000000000000000000,0)",
+            "0", "15", zero_addr, DEPLOYER_ADDR,
         ])
         .output()
         .expect("failed to run forge create");

@@ -27,10 +27,16 @@ contract Rub3AccessTest is Test {
         out[0] = h;
     }
 
+    /// ETH-only sale terms - what every fixture below except the stablecoin
+    /// suite deploys with.
+    function _sale(uint256 price) internal pure returns (Rub3License.SaleTerms memory) {
+        return Rub3License.SaleTerms({price: price, priceToken: address(0), priceAmount: 0});
+    }
+
     function setUp() public {
         nft = new Rub3Access(
             "Rub3 Test", "R3T", IDENTITY, TBA_IMPL,
-            _hashes(WRAPPER_HASH), PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS,
+            _hashes(WRAPPER_HASH), _sale(PRICE), SUPPLY_CAP, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
         vm.deal(alice, 10 ether);
@@ -54,7 +60,8 @@ contract Rub3AccessTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.InvalidIdentityModel.selector, 2));
         new Rub3Access(
             "x", "x", 2, TBA_IMPL, _hashes(WRAPPER_HASH),
-            PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS, NO_PREDECESSOR, owner
+            _sale(PRICE), SUPPLY_CAP, COOLDOWN_BLOCKS,
+            NO_PREDECESSOR, owner
         );
     }
 
@@ -62,7 +69,8 @@ contract Rub3AccessTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.CooldownTooSmall.selector, 14, 15));
         new Rub3Access(
             "x", "x", IDENTITY, TBA_IMPL, _hashes(WRAPPER_HASH),
-            PRICE, SUPPLY_CAP, 14, NO_PREDECESSOR, owner
+            _sale(PRICE), SUPPLY_CAP, 14,
+            NO_PREDECESSOR, owner
         );
     }
 
@@ -70,7 +78,7 @@ contract Rub3AccessTest is Test {
         vm.expectRevert(Rub3License.TbaImplementationForbidden.selector);
         new Rub3Access(
             "x", "x", 0, address(0xBEEF),
-            _hashes(WRAPPER_HASH), PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS,
+            _hashes(WRAPPER_HASH), _sale(PRICE), SUPPLY_CAP, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
     }
@@ -79,7 +87,7 @@ contract Rub3AccessTest is Test {
         vm.expectRevert(Rub3License.TbaImplementationRequired.selector);
         new Rub3Access(
             "x", "x", 1, address(0),
-            _hashes(WRAPPER_HASH), PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS,
+            _hashes(WRAPPER_HASH), _sale(PRICE), SUPPLY_CAP, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
     }
@@ -88,7 +96,7 @@ contract Rub3AccessTest is Test {
         address impl = address(0xDEAD);
         Rub3Access acct = new Rub3Access(
             "Rub3 Acct", "R3A", 1, impl,
-            _hashes(WRAPPER_HASH), PRICE, SUPPLY_CAP, COOLDOWN_BLOCKS,
+            _hashes(WRAPPER_HASH), _sale(PRICE), SUPPLY_CAP, COOLDOWN_BLOCKS,
             NO_PREDECESSOR, owner
         );
         assertEq(acct.identityModel(),     1);

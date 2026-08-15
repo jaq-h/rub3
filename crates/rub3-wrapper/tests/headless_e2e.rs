@@ -23,15 +23,21 @@
 
 #![cfg(all(feature = "cooldown", feature = "headless"))]
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use alloy::primitives::Address;
-use rub3_wrapper::activation::{ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome};
+use alloy::primitives::{Address, B256};
+use rub3_wrapper::activation::{
+    ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome, PaymentRail,
+    ENV_MAX_TOKEN_AMOUNT, EXIT_PRICE_ABOVE_POLICY,
+};
 use rub3_wrapper::rpc;
-use rub3_wrapper::signer::{resolve_signer, Signer, ENV_AGENT_KEY};
+use rub3_wrapper::signer::{resolve_signer, Signer, SignerError, ENV_AGENT_KEY};
 use rub3_wrapper::{session, session_store};
 
 // Anvil's built-in account #0 - deterministic, documented, holds nothing real.
@@ -66,6 +72,14 @@ const PRICE_WEI: &str = "10000000000000000";
 
 /// What the faucet sends the agent when the test wants it solvent.
 const FUNDING_ETH: &str = "1ether";
+
+/// Price the fixture charges on the stablecoin rail: 5 USDC at 6 decimals.
+const USDC_PRICE: &str = "5000000";
+
+/// What the mock USDC faucet mints an agent: 1000 USDC.
+const USDC_FUNDING: &str = "1000000000";
+
+const ZERO_ADDR: &str = "0x0000000000000000000000000000000000000000";
 
 // ── Tool availability ─────────────────────────────────────────────────────────
 
@@ -147,45 +161,113 @@ fn start_anvil() -> AnvilGuard {
 
 // ── Subprocess helpers ────────────────────────────────────────────────────────
 
-/// Deploys `Rub3Access` with the given price, supply cap, and cooldown.
+/// Deploys `Rub3Access` selling for ETH only.
+fn deploy_access(price_wei: &str, supply_cap: &str, cooldown_blocks: &str) -> String {
+    deploy_access_with_rail(price_wei, ZERO_ADDR, "0", supply_cap, cooldown_blocks)
+}
+
+/// Deploys `Rub3Access` with both rails configured.
 ///
 /// Constructor args (10): name, symbol, identityModel, tbaImplementation,
-/// wrapperHashes, price, supplyCap, cooldownBlocks, predecessor, owner.
+/// wrapperHashes, sale, supplyCap, cooldownBlocks, predecessor, owner.
+///
+/// `sale` is the `SaleTerms` tuple of contracts §2.2 - `(price, priceToken,
+/// priceAmount)` - which `forge create` takes as a parenthesised tuple. A zero
+/// `priceToken` advertises no stablecoin rail, which is what the wrapper reads
+/// to decide which currency to pay in.
 ///
 /// `wrapperHashes` is the append-only hash set (contracts §2.4), seeded with a
 /// single stand-in release hash - the zero hash is rejected on-chain because it
 /// is the `Unknown` sentinel. `predecessor` is zero: no migration source.
-fn deploy_access(price_wei: &str, supply_cap: &str, cooldown_blocks: &str) -> String {
+fn deploy_access_with_rail(
+    price_wei: &str,
+    price_token: &str,
+    price_amount: &str,
+    supply_cap: &str,
+    cooldown_blocks: &str,
+) -> String {
     let wrapper_hashes = "[0x1111111111111111111111111111111111111111111111111111111111111111]";
-    let zero_addr = "0x0000000000000000000000000000000000000000";
-    let output = Command::new("forge")
-        .current_dir(contracts_dir())
-        .args([
-            "create",
-            "src/Rub3Access.sol:Rub3Access",
-            "--broadcast",
-            "--private-key",
-            DEPLOYER_KEY,
-            "--rpc-url",
-            &rpc_url(),
-            "--constructor-args",
+    let sale = format!("({price_wei},{price_token},{price_amount})");
+    forge_create(
+        "src/Rub3Access.sol:Rub3Access",
+        &[
             "Rub3 Headless Test",
             "RUB3H",
             "0",
-            zero_addr,
+            ZERO_ADDR,
             wrapper_hashes,
-            price_wei,
+            &sale,
             supply_cap,
             cooldown_blocks,
-            zero_addr,
+            ZERO_ADDR,
             DEPLOYER_ADDR,
-        ])
+        ],
+    )
+}
+
+/// Deploys the EIP-3009 stand-in for USDC from the Foundry test tree.
+///
+/// The forge suite justifies the mock over a fork or a deployed token in
+/// `contracts/test/mocks/MockEIP3009Token.sol`; the same reasoning applies
+/// here, with more force - anvil starts empty, so there is no USDC to buy with
+/// unless the test deploys one.
+fn deploy_mock_usdc() -> String {
+    forge_create("test/mocks/MockEIP3009Token.sol:MockEIP3009Token", &[])
+}
+
+/// Deploys an EIP-3009 token that passes the licence contract's constructor
+/// probe and holds balances, but exposes no `DOMAIN_SEPARATOR()`.
+///
+/// The one shape of payment token an authorization cannot be built for
+/// off-chain, and therefore the fixture for "a contract-level failure on a
+/// token-side read selects ETH rather than ending the run".
+fn deploy_mock_without_domain_separator() -> String {
+    forge_create(
+        "test/mocks/MockEIP3009Token.sol:NoDomainSeparatorEIP3009Token",
+        &[],
+    )
+}
+
+/// Deploys a spec-conformant EIP-3009 token that implements only the
+/// `(uint8 v, bytes32 r, bytes32 s)` form of `receiveWithAuthorization`.
+///
+/// The licence contracts call the `bytes signature` overload, the FiatTokenV2_2
+/// form that also admits EIP-1271 smart-wallet signatures, so a token like this
+/// deploys onto a licence contract happily - the constructor probe only reads
+/// `authorizationState` - and then reverts for every buyer. It is the fixture
+/// for the wrapper's pre-flight, which is where that is caught.
+fn deploy_mock_without_signature_overload() -> String {
+    forge_create(
+        "test/mocks/MockEIP3009Token.sol:NoSignatureOverloadEIP3009Token",
+        &[],
+    )
+}
+
+fn forge_create(target: &str, constructor_args: &[&str]) -> String {
+    let url = rpc_url();
+    let mut args = vec![
+        "create",
+        target,
+        "--broadcast",
+        "--private-key",
+        DEPLOYER_KEY,
+        "--rpc-url",
+        &url,
+    ];
+    if !constructor_args.is_empty() {
+        args.push("--constructor-args");
+        args.extend_from_slice(constructor_args);
+    }
+
+    let output = Command::new("forge")
+        .current_dir(contracts_dir())
+        .args(&args)
         .output()
         .expect("failed to run forge create");
 
     if !output.status.success() {
         panic!(
-            "forge create failed: status={:?}\nstdout:\n{}\nstderr:\n{}",
+            "forge create {target} failed: status={:?}\nstdout:\n{}\nstderr:\n{}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
@@ -199,6 +281,69 @@ fn deploy_access(price_wei: &str, supply_cap: &str, cooldown_blocks: &str) -> St
         }
     }
     panic!("could not find 'Deployed to:' in forge output:\n{stdout}");
+}
+
+/// Mints mock USDC to `to` through the token's test faucet.
+fn mint_usdc(token: &str, to: Address, amount: &str) {
+    let to_hex = format!("0x{}", hex::encode(to.as_slice()));
+    let output = Command::new("cast")
+        .args([
+            "send",
+            token,
+            "mint(address,uint256)",
+            &to_hex,
+            amount,
+            "--private-key",
+            DEPLOYER_KEY,
+            "--rpc-url",
+            &rpc_url(),
+        ])
+        .output()
+        .expect("failed to run cast send mint");
+    assert!(
+        output.status.success(),
+        "minting USDC to {to_hex} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// Reads a native ETH balance through `cast`, for the same reason as
+/// [`usdc_balance`]: the assertions should not depend on the code under test.
+fn eth_balance(who: Address) -> u128 {
+    let who_hex = format!("0x{}", hex::encode(who.as_slice()));
+    let output = Command::new("cast")
+        .args(["balance", &who_hex, "--rpc-url", &rpc_url()])
+        .output()
+        .expect("failed to run cast balance");
+    assert!(output.status.success(), "cast balance failed");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("cast balance did not return a number")
+}
+
+/// Reads an ERC-20 balance through `cast`, independently of the wrapper's own
+/// RPC helpers - so the assertions do not trust the code under test.
+fn usdc_balance(token: &str, who: Address) -> u128 {
+    let who_hex = format!("0x{}", hex::encode(who.as_slice()));
+    let output = Command::new("cast")
+        .args([
+            "call",
+            token,
+            "balanceOf(address)(uint256)",
+            &who_hex,
+            "--rpc-url",
+            &rpc_url(),
+        ])
+        .output()
+        .expect("failed to run cast call balanceOf");
+    assert!(output.status.success(), "balanceOf failed");
+    let raw = String::from_utf8_lossy(&output.stdout);
+    raw.split_whitespace()
+        .next()
+        .expect("empty balanceOf output")
+        .parse()
+        .expect("balanceOf did not return a number")
 }
 
 /// Sends ETH from anvil's faucet account to `to`.
@@ -266,6 +411,10 @@ impl Agent {
         let session_dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var(ENV_AGENT_KEY, &key_hex);
         std::env::set_var("RUB3_SESSION_DIR", session_dir.path());
+        // The spend ceiling is process-global like the key. Cleared here rather
+        // than only on drop, so a test that means to run without one cannot
+        // inherit a previous test's.
+        std::env::remove_var(ENV_MAX_TOKEN_AMOUNT);
 
         // Resolve through the production path so the test exercises the real
         // env-var source, not a test-only constructor.
@@ -285,7 +434,59 @@ impl Drop for Agent {
     fn drop(&mut self) {
         std::env::remove_var(ENV_AGENT_KEY);
         std::env::remove_var("RUB3_SESSION_DIR");
+        std::env::remove_var(ENV_MAX_TOKEN_AMOUNT);
     }
+}
+
+/// A [`Signer`] that counts how many times it was asked to sign, and otherwise
+/// delegates unchanged.
+///
+/// The spend ceiling's guarantee is that no authorization for a refused amount
+/// is ever *produced*, not merely that the run exits non-zero. An exit code
+/// cannot show that: it reads the same whether the refusal came before or after
+/// a valid 900-second authorization was signed and handed to an RPC endpoint
+/// that could broadcast it. Counting the signing calls is what distinguishes
+/// the two.
+struct CountingSigner<'a> {
+    inner: &'a dyn Signer,
+    calls: AtomicUsize,
+}
+
+impl<'a> CountingSigner<'a> {
+    fn wrapping(inner: &'a dyn Signer) -> Self {
+        Self {
+            inner,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Signer for CountingSigner<'_> {
+    fn address(&self) -> Address {
+        self.inner.address()
+    }
+
+    fn sign_prehash(&self, hash: B256) -> Result<alloy::primitives::Signature, SignerError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.sign_prehash(hash)
+    }
+
+    fn source(&self) -> &'static str {
+        self.inner.source()
+    }
+}
+
+/// Sets the operator's stablecoin spend ceiling for the current test.
+///
+/// Required before the stablecoin rail is usable at all: there is no default,
+/// because the ceiling is denominated in the payment token's own smallest unit
+/// and decimals differ between tokens. Cleared by [`Agent`]'s drop.
+fn set_spend_ceiling(amount: &str) {
+    std::env::set_var(ENV_MAX_TOKEN_AMOUNT, amount);
 }
 
 fn ctx(contract: &str, token_id: Option<u64>) -> HeadlessContext {
@@ -335,14 +536,14 @@ fn headless_purchase_activate_persist_e2e() {
         .expect("headless activation should succeed");
 
     match &outcome {
-        HeadlessOutcome::PurchasedAndActivated {
-            token_id,
-            price_wei,
-        } => {
+        HeadlessOutcome::PurchasedAndActivated { token_id, paid } => {
             assert_eq!(*token_id, 0, "first mint should be token id 0");
             assert_eq!(
-                price_wei, PRICE_WEI,
-                "should have paid the advertised price"
+                paid,
+                &PaymentRail::Eth {
+                    price_wei: PRICE_WEI.to_string()
+                },
+                "a contract advertising no stablecoin rail must be paid in ETH",
             );
         }
         other => panic!("expected PurchasedAndActivated, got {other:?}"),
@@ -664,4 +865,785 @@ fn headless_chain_id_mismatch_e2e() {
         other => panic!("expected ChainIdMismatch, got {other:?}"),
     }
     assert_eq!(err.exit_code(), 19);
+}
+
+// ── The stablecoin rail (§2.2) ────────────────────────────────────────────────
+
+/// The §2.2 thesis end to end: a contract that advertises a USDC price is paid
+/// in USDC, and the agent's ETH balance is spent on gas alone.
+///
+/// The agent is funded with ETH deliberately, because it broadcasts its own
+/// transaction here and every transaction costs gas. What the test proves is
+/// the *price* moved in USDC and not in ETH: the token balance falls by exactly
+/// the listed amount, and the ETH spent is far below the ETH price the same
+/// contract also lists.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_purchases_on_the_stablecoin_rail_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    // Exactly the listed price: the ceiling is inclusive, and a run at the
+    // ceiling is the boundary worth exercising on the happy path.
+    set_spend_ceiling(USDC_PRICE);
+
+    let eth_before = eth_balance(agent.address());
+
+    let (session, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("headless activation on the stablecoin rail should succeed");
+
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { token_id, paid } => {
+            assert_eq!(*token_id, 0);
+            match paid {
+                PaymentRail::Erc3009 { token, amount } => {
+                    assert!(
+                        token.eq_ignore_ascii_case(&usdc),
+                        "should name the advertised token, got {token}",
+                    );
+                    assert_eq!(amount, USDC_PRICE, "should pay the advertised amount");
+                }
+                other => panic!("expected the stablecoin rail, got {other:?}"),
+            }
+        }
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    // The price really moved in USDC.
+    let spent_usdc: u128 =
+        USDC_FUNDING.parse::<u128>().unwrap() - usdc_balance(&usdc, agent.address());
+    assert_eq!(
+        spent_usdc,
+        USDC_PRICE.parse::<u128>().unwrap(),
+        "exactly the listed stablecoin price left the wallet",
+    );
+    assert_eq!(
+        usdc_balance(&usdc, contract_addr),
+        USDC_PRICE.parse::<u128>().unwrap(),
+        "and arrived at the contract",
+    );
+
+    // And the ETH price did not: what left the wallet is gas for two
+    // transactions, orders of magnitude below the 0.01 ETH listed price.
+    let eth_spent = eth_before - eth_balance(agent.address());
+    assert!(
+        eth_spent < PRICE_WEI.parse::<u128>().unwrap(),
+        "ETH spent ({eth_spent}) must be gas only, well under the ETH price",
+    );
+
+    // And it is a real licence: owned, activated, verifiable.
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address()
+    );
+    assert_eq!(session.token_id, 0);
+    session::verify_local(&session).expect("locally signed session must verify");
+    session::verify_onchain(&session, &rpc_url()).expect("session must verify on-chain");
+}
+
+/// The fallback, which is the other half of "prefers USDC when advertised".
+///
+/// Same contract, same advertised rail - but this agent holds no USDC, so the
+/// wrapper pays in ETH rather than broadcasting a transaction that could only
+/// revert.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_falls_back_to_eth_without_stablecoin_balance_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    set_spend_ceiling(USDC_PRICE);
+    // Deliberately no `mint_usdc`: the agent holds none of the listed token, so
+    // the balance check is the only thing left that can select ETH.
+
+    let (_, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("headless activation should fall back to ETH");
+
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { paid, .. } => assert_eq!(
+            paid,
+            &PaymentRail::Eth {
+                price_wei: PRICE_WEI.to_string()
+            },
+            "an agent holding no USDC must pay in ETH",
+        ),
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    assert_eq!(
+        usdc_balance(&usdc, contract_addr),
+        0,
+        "nothing paid in USDC"
+    );
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address()
+    );
+}
+
+/// An unset ceiling makes the stablecoin rail unavailable, not unlimited.
+///
+/// The agent here can afford the listed USDC price several times over and the
+/// contract advertises the rail, so nothing but the missing configuration
+/// selects ETH. Proving it buys in ETH rather than failing is the standing
+/// requirement that §2.2 breaks nothing: ETH is the fallback, not a deprecated
+/// path.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_falls_back_to_eth_without_a_spend_ceiling_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    // Deliberately no `set_spend_ceiling`.
+
+    let (_, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("an unconfigured ceiling must fall back to ETH, not fail");
+
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { paid, .. } => assert_eq!(
+            paid,
+            &PaymentRail::Eth {
+                price_wei: PRICE_WEI.to_string()
+            },
+            "no configured ceiling means no stablecoin rail",
+        ),
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    assert_eq!(
+        usdc_balance(&usdc, contract_addr),
+        0,
+        "no stablecoin may move without an operator-set ceiling",
+    );
+    assert_eq!(
+        usdc_balance(&usdc, agent.address()),
+        USDC_FUNDING.parse::<u128>().unwrap(),
+        "and the agent's stablecoin balance is untouched",
+    );
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address(),
+        "the licence was still obtained, in ETH",
+    );
+}
+
+/// A price above the configured ceiling is a refusal, not a fallback.
+///
+/// The distinction is the point: an orchestrator must be able to tell "this
+/// costs more than my policy allows" from "the network failed", so this exits
+/// with its own code, spends nothing on either rail, and mints nothing.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_refuses_a_price_above_the_spend_ceiling_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    // One unit under the listed price: the rail is otherwise fully usable -
+    // advertised, affordable, the token's domain is readable, and the purchase
+    // pre-flights clean - so the ceiling is the only thing that can stop it.
+    let ceiling = USDC_PRICE.parse::<u128>().unwrap() - 1;
+    set_spend_ceiling(&ceiling.to_string());
+
+    let eth_before = eth_balance(agent.address());
+
+    let err = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect_err("a price above the ceiling must refuse");
+
+    assert_eq!(
+        err.exit_code(),
+        EXIT_PRICE_ABOVE_POLICY,
+        "a policy refusal has its own exit code, got {err}",
+    );
+    assert!(
+        matches!(err, HeadlessError::PriceAbovePolicy { .. }),
+        "got {err:?}",
+    );
+
+    let detail = err
+        .machine_detail()
+        .expect("a policy refusal must be machine-readable");
+    assert!(detail.contains(&format!("listed={USDC_PRICE}")), "{detail}");
+    assert!(detail.contains(&format!("maximum={ceiling}")), "{detail}");
+    assert!(
+        detail
+            .to_ascii_lowercase()
+            .contains(&usdc.trim_start_matches("0x").to_ascii_lowercase()),
+        "the refused token must be named: {detail}",
+    );
+
+    // Nothing was spent and nothing was minted: not in USDC, and not by
+    // quietly taking the ETH rail instead.
+    assert_eq!(
+        usdc_balance(&usdc, agent.address()),
+        USDC_FUNDING.parse::<u128>().unwrap(),
+        "no stablecoin left the wallet",
+    );
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "a refusal must mint nothing",
+    );
+    assert!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).is_err(),
+        "token 0 must not exist",
+    );
+    // Not one wei moved either, so the refusal cannot have quietly become an
+    // ETH purchase: no transaction was broadcast at all, not even for gas.
+    assert_eq!(
+        eth_balance(agent.address()),
+        eth_before,
+        "a refusal must not fall back to the ETH rail",
+    );
+}
+
+/// The other side of the same rule, and the regression case: the ceiling may
+/// only refuse a purchase the agent would otherwise have made.
+///
+/// Same contract and the same over-ceiling listing as above, but this agent
+/// holds none of the payment token. It could never have spent a unit of it, so
+/// ETH is not a fallback from a policy refusal - it is the path this agent was
+/// always on, exactly as before §2.2. Refusing here would break a run that used
+/// to succeed.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_buys_in_eth_when_it_holds_none_of_an_over_ceiling_token_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    // Deliberately no `mint_usdc`, with the same ceiling the refusal test uses.
+    let ceiling = USDC_PRICE.parse::<u128>().unwrap() - 1;
+    set_spend_ceiling(&ceiling.to_string());
+
+    let (_, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .unwrap_or_else(|err| {
+            panic!(
+                "an agent holding none of the payment token must stay on the ETH path, not be \
+                 refused over money it could not have spent: {err} (exit {})",
+                err.exit_code()
+            )
+        });
+
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { paid, .. } => assert_eq!(
+            paid,
+            &PaymentRail::Eth {
+                price_wei: PRICE_WEI.to_string()
+            },
+            "an unaffordable rail is not a policy question",
+        ),
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address(),
+        "the licence was obtained, in ETH",
+    );
+    assert_eq!(
+        usdc_balance(&usdc, contract_addr),
+        0,
+        "and nothing moved on the rail policy would have refused",
+    );
+}
+
+/// A payment token that answers the constructor probe but has no
+/// `DOMAIN_SEPARATOR()` selects ETH rather than ending the run.
+///
+/// EIP-3009 mandates the authorization functions and `authorizationState`, not
+/// that getter, so a token like this deploys onto a licence contract happily.
+/// An agent that could have bought in ETH must not be stopped by it.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_falls_back_to_eth_when_the_token_has_no_domain_separator_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let token = deploy_mock_without_domain_separator();
+    let contract = deploy_access_with_rail(PRICE_WEI, &token, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    // Funded and within policy, so the only thing that can select ETH is the
+    // token's missing getter.
+    mint_usdc(&token, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    let (session, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a token without DOMAIN_SEPARATOR() must not end the activation");
+
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { paid, .. } => assert_eq!(
+            paid,
+            &PaymentRail::Eth {
+                price_wei: PRICE_WEI.to_string()
+            },
+            "a token that cannot be signed for must select ETH",
+        ),
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    assert_eq!(
+        usdc_balance(&token, contract_addr),
+        0,
+        "nothing paid in a token no authorization could be built for",
+    );
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address()
+    );
+    session::verify_onchain(&session, &rpc_url()).expect("session must verify on-chain");
+}
+
+/// A refused price must leave no signed authorization behind anywhere.
+///
+/// The regression this pins: the ceiling once ran *after* the purchase was
+/// signed and pre-flighted, so an above-ceiling run had already produced a
+/// valid authorization for the full listed amount and shipped it to the RPC
+/// endpoint as `eth_call` calldata. `purchaseWithAuthorization` is submittable
+/// by anyone by design, so anything in that request path could have broadcast
+/// it and moved more than the ceiling allowed. The exit code was 22 either way,
+/// which is exactly why this asserts on the signing itself: zero calls, because
+/// nothing on the path to a refusal signs anything.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_signs_nothing_when_the_price_is_above_the_spend_ceiling_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    // Advertised, affordable and signable, with a ceiling one unit under the
+    // listed price: the rail is refused on price alone.
+    let ceiling = USDC_PRICE.parse::<u128>().unwrap() - 1;
+    set_spend_ceiling(&ceiling.to_string());
+
+    let counting = CountingSigner::wrapping(agent.signer.as_ref());
+    let err = ensure_headless(&counting, &ctx(&contract, None))
+        .expect_err("a price above the ceiling must refuse");
+
+    assert!(
+        matches!(err, HeadlessError::PriceAbovePolicy { .. }),
+        "got {err:?}",
+    );
+    assert_eq!(err.exit_code(), EXIT_PRICE_ABOVE_POLICY, "{err}");
+
+    assert_eq!(
+        counting.calls(),
+        0,
+        "a refused purchase must not sign anything: an authorization the policy \
+         refuses is spendable by whoever sees it",
+    );
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "and nothing was broadcast on either rail",
+    );
+}
+
+/// A payment token that answers every read but cannot actually be paid with
+/// selects ETH, without spending a wei of gas finding out.
+///
+/// `NoSignatureOverloadEIP3009Token` implements EIP-3009 exactly as written -
+/// the `(v, r, s)` form - so it is conforming, it holds real balances, and the
+/// licence contract's constructor probe accepts it. What it lacks is the
+/// `bytes signature` overload the licence contract calls. Nothing the wrapper
+/// can read off either contract says so, which is why the rail decision
+/// pre-flights the real `purchaseWithAuthorization` call: the agent buys in ETH
+/// and the run completes, rather than broadcasting a transaction that could
+/// only revert.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_falls_back_to_eth_when_the_token_lacks_the_signature_overload_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let token = deploy_mock_without_signature_overload();
+    let contract = deploy_access_with_rail(PRICE_WEI, &token, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    // Advertised, affordable, signable, and priced exactly at the ceiling so it
+    // is within policy: the run reaches the pre-flight, and the token refusing
+    // the call is the only thing that can select ETH. A ceiling below the price
+    // here would refuse on price and stop proving the fallback.
+    mint_usdc(&token, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    let (session, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a token missing the overload must not end the activation");
+
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { paid, .. } => assert_eq!(
+            paid,
+            &PaymentRail::Eth {
+                price_wei: PRICE_WEI.to_string()
+            },
+            "a token that cannot be paid with must select ETH",
+        ),
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    assert_eq!(
+        usdc_balance(&token, contract_addr),
+        0,
+        "nothing paid in a token that cannot take the payment",
+    );
+    assert_eq!(
+        usdc_balance(&token, agent.address()),
+        USDC_FUNDING.parse::<u128>().unwrap(),
+        "and the agent still holds every unit of it",
+    );
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address()
+    );
+    session::verify_onchain(&session, &rpc_url()).expect("session must verify on-chain");
+}
+
+/// The other half of the same rule: a *transport* failure on a token-side read
+/// is never a fallback.
+///
+/// The contract advertises a rail and the agent is funded, so the run would buy
+/// in USDC. Pointing it at a dead endpoint must stop it rather than let a
+/// blinking node silently change the currency.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_transport_failure_on_a_token_read_is_a_hard_error_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    // A port nothing is listening on: every read fails at the socket, which is
+    // the one class of failure that must never be read as an answer.
+    let mut dead = ctx(&contract, None);
+    dead.rpc_url = "http://127.0.0.1:1".to_string();
+
+    let err = ensure_headless(agent.signer.as_ref(), &dead)
+        .expect_err("an unreachable node must not be read as a rail decision");
+    assert!(
+        matches!(err, HeadlessError::Rpc(_)),
+        "an unreachable node is a chain error, got {err:?}",
+    );
+
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "and nothing was bought on either rail",
+    );
+
+    // The run above stops at chain-id resolution, so it never reaches the
+    // token-side reads. These do: both must classify a dead socket as
+    // transport, because that is the classification the rail decision branches
+    // on when it refuses to treat a silent node as an answer.
+    let usdc_addr: Address = usdc.parse().expect("malformed token address");
+    assert!(
+        rpc::erc20_balance_of(&dead.rpc_url, usdc_addr, agent.address())
+            .expect_err("a dead endpoint cannot report a balance")
+            .is_transport(),
+        "balanceOf against a dead node must be transport, never a contract answer",
+    );
+    assert!(
+        rpc::token_domain_separator(&dead.rpc_url, usdc_addr)
+            .expect_err("a dead endpoint cannot report a domain separator")
+            .is_transport(),
+        "DOMAIN_SEPARATOR() against a dead node must be transport, never a contract answer",
+    );
+}
+
+// ── A node that goes away on one call and answers every other ────────────────
+
+/// Forwards JSON-RPC to anvil, except for one call, whose connection it closes
+/// with no reply.
+///
+/// The wrapper reaches the chain through a single URL, so this is the only way
+/// to fail exactly one of the token-side reads at the socket while the rest of
+/// the run proceeds normally. Dropping the connection is what a node going away
+/// mid-call looks like from the client, and it is the failure the rail decision
+/// must never read as "this contract has no stablecoin rail".
+struct BlockingProxy {
+    url: String,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BlockingProxy {
+    /// Blocks any `eth_call` whose body names both `token` and `selector`, the
+    /// 4-byte function selector as lowercase hex without `0x`. Together those
+    /// two identify one function on one contract: the licence contract's own
+    /// `balanceOf` never carries the payment token's address.
+    fn blocking(token: &str, selector: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy");
+        let url = format!("http://{}", listener.local_addr().expect("proxy addr"));
+        // The accept loop polls a shutdown flag, so it must not park in
+        // `accept`. `relay` undoes this on each accepted stream; see there.
+        listener.set_nonblocking(true).expect("proxy non-blocking");
+
+        let upstream = format!("127.0.0.1:{PORT}");
+        let needle_token = token.trim_start_matches("0x").to_ascii_lowercase();
+        let needle_selector = selector.trim_start_matches("0x").to_ascii_lowercase();
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        let upstream = upstream.clone();
+                        let token = needle_token.clone();
+                        let selector = needle_selector.clone();
+                        std::thread::spawn(move || relay(client, &upstream, &token, &selector));
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            url,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for BlockingProxy {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Relays one client connection, request by request, until it blocks a call or
+/// either side goes quiet.
+fn relay(mut client: TcpStream, upstream_addr: &str, token: &str, selector: &str) {
+    // `accept` on the BSD socket layer returns a stream carrying the
+    // listener's non-blocking flag. Left set, the first read below returns
+    // `WouldBlock` before the request has arrived and this proxy would drop
+    // every connection instead of the one call it means to block.
+    if client.set_nonblocking(false).is_err() {
+        return;
+    }
+    let _ = client.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut upstream: Option<TcpStream> = None;
+
+    loop {
+        let Some(request) = read_http_message(&mut client) else {
+            return;
+        };
+        let body = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        if body.contains(token) && body.contains(selector) {
+            return;
+        }
+
+        if upstream.is_none() {
+            match TcpStream::connect(upstream_addr) {
+                Ok(stream) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                    upstream = Some(stream);
+                }
+                Err(_) => return,
+            }
+        }
+        let stream = upstream.as_mut().expect("upstream connected above");
+
+        if stream.write_all(&request).is_err() {
+            return;
+        }
+        let Some(response) = read_http_message(stream) else {
+            return;
+        };
+        if client.write_all(&response).is_err() {
+            return;
+        }
+    }
+}
+
+/// Reads one complete HTTP message: headers, then exactly `Content-Length`
+/// bytes. Both anvil and the wrapper's client send framed messages, never
+/// chunked, so a missing length means a message this proxy cannot relay and
+/// the caller gives up rather than forwarding a truncated one.
+fn read_http_message(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+
+    loop {
+        if let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse().ok())?;
+            if buf.len() >= head_end + 4 + length {
+                return Some(buf);
+            }
+        }
+
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// A node that answers everything except the payment token's `balanceOf`.
+///
+/// The run gets far enough to read the rail off the contract, then the balance
+/// read fails at the socket. Selecting ETH there would be the wrapper deciding
+/// the currency on a node's silence.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_transport_failure_on_the_token_balance_read_is_a_hard_error_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    let proxy = BlockingProxy::blocking(&usdc, "70a08231");
+    let mut blinking = ctx(&contract, None);
+    blinking.rpc_url = proxy.url.clone();
+
+    let err = ensure_headless(agent.signer.as_ref(), &blinking)
+        .expect_err("a node that goes away on balanceOf must not select a currency");
+    assert!(
+        matches!(err, HeadlessError::Rpc(_)),
+        "a silent node is a chain error, got {err:?}",
+    );
+
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "and nothing was bought, least of all in ETH",
+    );
+}
+
+/// The same, one read later: everything answers except the payment token's
+/// `DOMAIN_SEPARATOR()`.
+///
+/// A token that *answers* that call with a revert selects ETH, because that is
+/// a settled fact about the token. A node that fails to answer it is not, and
+/// must stop the run.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_transport_failure_on_the_domain_separator_read_is_a_hard_error_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    let proxy = BlockingProxy::blocking(&usdc, "3644e515");
+    let mut blinking = ctx(&contract, None);
+    blinking.rpc_url = proxy.url.clone();
+
+    let err = ensure_headless(agent.signer.as_ref(), &blinking)
+        .expect_err("a node that goes away on DOMAIN_SEPARATOR() must not select a currency");
+    assert!(
+        matches!(err, HeadlessError::Rpc(_)),
+        "a silent node is a chain error, got {err:?}",
+    );
+
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "and nothing was bought, least of all in ETH",
+    );
 }
