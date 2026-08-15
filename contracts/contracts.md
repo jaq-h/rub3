@@ -241,13 +241,18 @@ To arrive at the same fingerprint from a checkout of this repository at a given 
 
 | Input | Value | Where it is pinned |
 |---|---|---|
-| `solc_version` | `0.8.28` | `contracts/foundry.toml` |
+| `solc_version` | `0.8.28` (recorded as `0.8.28+commit.7893614a`) | `contracts/foundry.toml` |
 | `optimizer` | `true` | `contracts/foundry.toml` |
 | `optimizer_runs` | `200` | `contracts/foundry.toml` |
 | `evm_version` | `cancun` | `contracts/foundry.toml` |
 | `bytecode_hash` | `none` | `contracts/foundry.toml` |
 | `openzeppelin-contracts` | `b8c7b9e82d2b340cf82f2913c38e3a0bac2f96ae` | `contracts/foundry.lock` |
 | `forge-std` | `0844d7e1fc5e60d77b68e469bff60265f236c398` | `contracts/foundry.lock` |
+| dependency revisions, cross-check | the same two revisions | submodule gitlinks, `git ls-tree HEAD contracts/lib/` |
+
+`contracts/foundry.lock` is checked in and is a convenient mirror of the submodule gitlinks; the gitlinks are the git-authoritative record, so `git ls-tree HEAD contracts/lib/` is an independent confirmation path that does not require trusting a generated file. `forge` derives it from those same gitlinks, so the two cannot disagree.
+
+The manifest records `solc_version` as the full compiler string including its `+commit` suffix, for example `0.8.28+commit.7893614a`, because the compiler build is part of the build identity and exact reproduction is the whole point. `foundry.toml` pins the `0.8.28` half; `forge` resolves it to that exact commit.
 
 Nothing else matters: not the `forge` version (it fetches the pinned `solc`), not the checkout path, not comments in the source.
 
@@ -277,7 +282,7 @@ scripts/canonical-bytecode-hashes.sh print
 
 ### The expected values, and the drift gate
 
-The current fingerprints live in [`canonical-bytecode.json`](canonical-bytecode.json), alongside the build inputs they were produced under. It is JSON because it is consumed by machines as much as by people: the CI gate diffs against it, and the wrapper will later compile the same table into the binary, so a `serde`-shaped file beats a prose table or a bare checksum list.
+The current fingerprints live in [`canonical-bytecode.json`](canonical-bytecode.json), alongside the build inputs they were produced under. Those inputs are read back out of an emitted artifact's own solc `metadata` block rather than out of `foundry.toml` text, so they describe the build that actually produced the hashes: a `[profile.*]` selection or a `FOUNDRY_*` environment override cannot record one set of inputs next to hashes compiled under another. The `bytecode_hash = "none"` guard is driven off that same artifact metadata for the same reason. It is JSON because it is consumed by machines as much as by people: the CI gate diffs against it, and the wrapper will later compile the same table into the binary, so a `serde`-shaped file beats a prose table or a bare checksum list.
 
 CI runs `scripts/canonical-bytecode-hashes.sh check` as a **blocking** job (`.github/workflows/ci.yml` -> `bytecode-fingerprints`). It rebuilds from scratch and fails if any fingerprint, or any pinned build input, differs from the manifest. When a contract change is intended, regenerate and commit the manifest in the same pull request:
 
@@ -287,7 +292,7 @@ scripts/canonical-bytecode-hashes.sh update
 
 Splitting that into a separate commit or pull request defeats the gate, which exists so that a fingerprint can never move without a reviewer seeing it move.
 
-New contracts under `contracts/src/` are picked up automatically; abstract bases such as `Rub3License` have no `deployedBytecode` of their own and are excluded by construction.
+New contracts under `contracts/src/` are picked up automatically, at any depth and including a second contract declared inside an existing file: discovery walks every `.sol` file under `contracts/src/` and derives both the artifact path and the manifest's `source` field from the file that declared each contract. Abstract bases such as `Rub3License` have no `deployedBytecode` of their own and are excluded by construction, since their declaration starts with `abstract`.
 
 ## Auditing the invariants before buying
 

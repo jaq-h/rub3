@@ -3,7 +3,7 @@
   "algorithm": "sha256(deployedBytecode.object)",
   "note": "Regenerate with scripts/canonical-bytecode-hashes.sh update. See contracts/contracts.md -> Reproducible builds.",
   "build": {
-    "solc_version": "0.8.28",
+    "solc_version": "0.8.28+commit.7893614a",
     "optimizer": true,
     "optimizer_runs": 200,
     "evm_version": "cancun",
