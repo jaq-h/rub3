@@ -583,6 +583,12 @@ mod headless {
         /// my policy allows" apart from "the network failed", and nothing on
         /// the network will change this answer. Never falls back to another
         /// rail, because a refusal is not a routing problem.
+        ///
+        /// It says the price was refused and nothing more. The rail is *not*
+        /// validated end to end first: doing that would mean signing an
+        /// authorization for the refused amount and handing it to an endpoint
+        /// that could broadcast it. So this outcome is not evidence that the
+        /// rail is otherwise healthy, and the message says so.
         PriceAbovePolicy {
             /// Which rail was refused, so an ETH ceiling reports through the
             /// same variant when it lands.
@@ -667,7 +673,10 @@ mod headless {
                     write!(
                         f,
                         ", above the configured maximum of {maximum}. Raise \
-                         {ENV_MAX_TOKEN_AMOUNT} if this price is acceptable"
+                         {ENV_MAX_TOKEN_AMOUNT} if this price is acceptable. This says only \
+                         that the price was refused: the rail was not exercised, because the \
+                         purchase pre-flight is deliberately not run for an amount policy \
+                         refuses, so it is no evidence the rail is otherwise usable"
                     )
                 }
                 HeadlessError::Config { var, detail } => {
@@ -1041,11 +1050,11 @@ mod headless {
     /// signed and already proven to execute.
     ///
     /// Everything the rail needs is resolved before one of these exists: the
-    /// payment token's EIP-712 domain, the buyer's signature over it, and an
-    /// `eth_call` of the exact transaction that will be broadcast. Once
-    /// [`choose_rail`] hands one back the rail is committed, and nothing
-    /// downstream can discover a reason it was unusable after the ETH path has
-    /// already been passed over.
+    /// payment token's EIP-712 domain, the operator's spend ceiling, the
+    /// buyer's signature, and an `eth_call` of the exact transaction that will
+    /// be broadcast. Once [`choose_rail`] hands one back the rail is committed,
+    /// and nothing downstream can discover a reason it was unusable after the
+    /// ETH path has already been passed over.
     pub(super) struct TokenRail {
         price: rpc::StablecoinPrice,
         auth: rpc::IRub3License::PaymentAuthorization,
@@ -1053,28 +1062,40 @@ mod headless {
 
     /// Picks the rail: the stablecoin one when the contract advertises it, the
     /// wallet can afford it, the payment token answers the reads an
-    /// authorization needs, the payment token *accepts* that authorization,
-    /// *and* the operator's ceiling covers the listed amount. ETH otherwise.
+    /// authorization needs, the operator's ceiling covers the listed amount,
+    /// *and* the payment token accepts the authorization that pays for it. ETH
+    /// otherwise.
     ///
-    /// The order of those five is load-bearing, and the ceiling is deliberately
-    /// last. The guard means "I would have paid this and policy says no", so it
-    /// may only fire once the rail was otherwise fully usable. An agent holding
-    /// none of the payment token, or facing a token it cannot pay with at all,
-    /// was never going to spend it, and must not be refused over money it could
-    /// not have moved.
+    /// **The order is load-bearing. The ceiling is weighed before anything is
+    /// signed, and nothing may be moved in front of it.** A refusal that has
+    /// already signed a valid authorization for the full amount and shipped it
+    /// to an endpoint that can broadcast it is not a refusal, it is the payment
+    /// with extra steps: `purchaseWithAuthorization` is submittable by anyone
+    /// by design, so disclosure *is* spending. The ceiling bounds what a single
+    /// authorization may carry, which means bounding whether one is created at
+    /// all. Hence: advertised -> affordable -> domain readable -> ceiling ->
+    /// sign -> pre-flight.
     ///
     /// That splits the outcomes cleanly in two, and they must not be blurred:
     ///
-    ///   * **The rail was usable and only the ceiling stopped it.** A refusal:
+    ///   * **The ceiling refused the listed price.** A refusal:
     ///     [`HeadlessError::PriceAbovePolicy`] and its own non-retryable exit
     ///     code, never a quiet ETH purchase instead. An orchestrator has to be
     ///     able to tell a policy breach from a network failure.
     ///   * **The rail was not usable at all** - not advertised, not affordable,
-    ///     no readable EIP-712 domain, an authorization the payment token will
-    ///     not accept, or no ceiling configured to size it by. ETH is then not
+    ///     no readable EIP-712 domain, no ceiling configured to size it by, or
+    ///     an authorization the payment token will not accept. ETH is then not
     ///     a fallback from anything: it is the path this agent was always on.
     ///     The printed reason names the fact that put it there and says nothing
     ///     about a spend limit.
+    ///
+    /// The accepted cost of signing last is that "otherwise usable" cannot
+    /// include the pre-flight: a token lacking the `bytes signature` overload
+    /// but priced *within* the ceiling still falls back to ETH, while one that
+    /// is both unusable and priced above the ceiling reports the refusal
+    /// instead. The refusal therefore does not claim the rail was healthy - see
+    /// [`HeadlessError::PriceAbovePolicy`] - and paying to find out would mean
+    /// disclosing the very authorization the ceiling exists to prevent.
     ///
     /// A **transport** failure on any of these reads is neither of those: it
     /// stops the run. That is why the reads branch on
@@ -1086,16 +1107,6 @@ mod headless {
     /// contract now also lists a token, because that token is imperfect, or
     /// because the agent cannot afford a listing that happens to exceed a
     /// ceiling.
-    ///
-    /// The authorization is signed before the ceiling is weighed, because the
-    /// pre-flight needs a real signature to run and its answer is one of the
-    /// "could this agent have paid at all" questions the ceiling comes after. A
-    /// refused purchase therefore leaves one signed authorization behind, seen
-    /// only by the RPC endpoint that answered the `eth_call`. It is spendable
-    /// only through this contract's `purchaseWithAuthorization`, which mints to
-    /// this wallet, so the worst it can do is deliver the licence the agent was
-    /// asking for - the same exposure the broadcast itself carries, one step
-    /// earlier.
     fn choose_rail(
         signer: &dyn Signer,
         ctx: &HeadlessContext,
@@ -1145,6 +1156,20 @@ mod headless {
             }
         };
 
+        // Before anything is signed, and nothing may be moved in front of this.
+        // An authorization the policy refuses must never exist: it is
+        // submittable by anyone, so handing one to an RPC endpoint spends the
+        // money whatever this function returns afterwards.
+        match SpendPolicy::from_env()?.check_token_amount(price.token, price.amount)? {
+            SpendVerdict::Allowed => {}
+            SpendVerdict::NoCeiling { var } => {
+                return Ok(eth_instead(format!(
+                    "no stablecoin spend ceiling is configured - set {var} to the most this \
+                     agent may authorize, in {token}'s own smallest unit",
+                )));
+            }
+        }
+
         let auth = authorize_purchase(
             signer,
             ctx,
@@ -1160,7 +1185,9 @@ mod headless {
         // the licence contract's constructor probe, and still reverts here. The
         // contract cannot detect that at deploy time, so the wrapper executes
         // the exact transaction it is about to send and reads the answer before
-        // any gas is spent.
+        // any gas is spent. It executes the whole purchase, so the revert it
+        // reports may be about the licence contract or the buyer rather than
+        // the overload: lead with what the chain said.
         match rpc::preflight_purchase_with_authorization(
             &ctx.rpc_url,
             contract,
@@ -1172,22 +1199,10 @@ mod headless {
             Err(e) if e.is_transport() => return Err(HeadlessError::Rpc(e.to_string())),
             Err(e) => {
                 return Ok(eth_instead(format!(
-                    "a purchase paid in {token} does not execute ({e}); the likeliest cause \
-                     is that {token} does not implement the `bytes signature` overload of \
-                     receiveWithAuthorization that this licence contract calls"
-                )));
-            }
-        }
-
-        // Last, once every other question has said yes. Everything above is a
-        // reason the agent could not have paid on this rail; only here is it a
-        // question of whether it should.
-        match SpendPolicy::from_env()?.check_token_amount(price.token, price.amount)? {
-            SpendVerdict::Allowed => {}
-            SpendVerdict::NoCeiling { var } => {
-                return Ok(eth_instead(format!(
-                    "no stablecoin spend ceiling is configured - set {var} to the most this \
-                     agent may authorize, in {token}'s own smallest unit",
+                    "a purchase paid in {token} does not execute: {e}. One possible cause is \
+                     that {token} does not implement the `bytes signature` overload of \
+                     receiveWithAuthorization that this licence contract calls; the revert \
+                     above is the authoritative detail"
                 )));
             }
         }

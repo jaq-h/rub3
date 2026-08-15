@@ -117,16 +117,45 @@ contract Rub3TokenPurchaseTest is Test {
         uint256 validBefore,
         bytes32 nonce
     ) internal view returns (bytes memory) {
+        return _signFor(
+            usdc.DOMAIN_SEPARATOR(), pk, signer, payee, value, validAfter, validBefore, nonce
+        );
+    }
+
+    /// The same, against an explicitly named EIP-712 domain.
+    ///
+    /// Every authorization is domain-separated by the token that will check it,
+    /// so a test that targets a payment token other than {usdc} has to sign
+    /// against *that* token's domain or it proves nothing but a bad signature.
+    function _signFor(
+        bytes32 domainSeparator,
+        uint256 pk,
+        address signer,
+        address payee,
+        uint256 value,
+        uint256 validAfter,
+        uint256 validBefore,
+        bytes32 nonce
+    ) internal pure returns (bytes memory) {
         bytes32 structHash = keccak256(
             abi.encode(
                 RECEIVE_TYPEHASH, signer, payee, value, validAfter, validBefore, nonce
             )
         );
-        bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", usdc.DOMAIN_SEPARATOR(), structHash)
-        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    /// Unpacks `r || s || v` so a signature built for the `bytes` form can be
+    /// handed to a token that only implements the split form.
+    function _split(bytes memory signature) internal pure returns (uint8 v, bytes32 r, bytes32 s) {
+        require(signature.length == 65, "signature must be 65 bytes");
+        assembly {
+            r := mload(add(signature, 0x20))
+            s := mload(add(signature, 0x40))
+            v := byte(0, mload(add(signature, 0x60)))
+        }
     }
 
     /// A purchase authorization for `recipient` on `target`, signed by `pk`.
@@ -626,6 +655,14 @@ contract Rub3TokenPurchaseTest is Test {
     /// does not, so the rail cannot be spent. The contract cannot detect this
     /// at deploy time, which is why the wrapper pre-flights the call before
     /// broadcasting and buys in ETH instead.
+    ///
+    /// The missing overload has to be the *only* difference, or this proves
+    /// nothing: the authorization is signed against the split token's own
+    /// EIP-712 domain, the revert carries no data (there is no such function
+    /// and no fallback, rather than a rejected signature), the very same signed
+    /// fields are then spent successfully through the form the token *does*
+    /// implement, and the identical authorization shape mints against
+    /// {MockEIP3009Token}. Give the fixture the overload and this test fails.
     function test_config_tokenWithoutTheSignatureOverloadDeploysButCannotBeSpent() public {
         NoSignatureOverloadEIP3009Token split = new NoSignatureOverloadEIP3009Token();
 
@@ -634,16 +671,58 @@ contract Rub3TokenPurchaseTest is Test {
 
         split.mint(buyer, 1_000_000_000);
 
-        // The signature never gets looked at: there is no such function on the
-        // token and no fallback to swallow the call.
-        Rub3License.PaymentAuthorization memory auth =
-            _purchaseAuth(BUYER_PK, strict, buyer, USDC_PRICE, "salt-1");
+        uint256 validBefore = block.timestamp + 1 hours;
+        bytes32 nonce = strict.purchaseAuthorizationNonce(buyer, "salt-1");
+        bytes memory signature = _signFor(
+            split.DOMAIN_SEPARATOR(),
+            BUYER_PK,
+            buyer,
+            address(strict),
+            USDC_PRICE,
+            0,
+            validBefore,
+            nonce
+        );
+        Rub3License.PaymentAuthorization memory auth = Rub3License.PaymentAuthorization({
+            from: buyer,
+            validAfter: 0,
+            validBefore: validBefore,
+            salt: "salt-1",
+            signature: signature
+        });
+
+        // Empty revert data: the call found no such function, rather than a
+        // signature check that said no.
         vm.prank(submitter);
-        vm.expectRevert();
+        vm.expectRevert(bytes(""));
         strict.purchaseWithAuthorization(address(0), auth);
 
         assertEq(strict.nextTokenId(), 0, "nothing was minted");
         assertEq(split.balanceOf(buyer), 1_000_000_000, "and nothing moved");
+
+        // The signature was good all along: the token spends these exact fields
+        // through the form it implements, so only the overload was missing.
+        (uint8 v, bytes32 r, bytes32 s) = _split(signature);
+        vm.prank(address(strict));
+        split.receiveWithAuthorization(
+            buyer, address(strict), USDC_PRICE, 0, validBefore, nonce, v, r, s
+        );
+        assertEq(
+            split.balanceOf(address(strict)),
+            USDC_PRICE,
+            "the authorization the licence contract could not spend was valid"
+        );
+
+        // And the identical authorization shape mints against a token that has
+        // the overload.
+        Rub3License.PaymentAuthorization memory sameShape =
+            _purchaseAuth(BUYER_PK, nft, buyer, USDC_PRICE, "salt-1");
+        vm.prank(submitter);
+        assertEq(
+            nft.ownerOf(nft.purchaseWithAuthorization(address(0), sameShape)),
+            buyer,
+            "the same shape of authorization buys against a FiatTokenV2_2-style token"
+        );
 
         // The licence contract itself is fine: the ETH rail sells as always.
         vm.deal(outsider, 1 ether);

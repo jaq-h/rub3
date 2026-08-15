@@ -240,13 +240,14 @@ silent zero and never a silent unlimited.
 
 A contract's ETH price and its stablecoin price are independent quotes with no
 on-chain relation - the contract holds no oracle - so this ceiling is what
-bounds the amount an agent will sign for. It is checked last, after the rail is
-known to be advertised, affordable, and signable, so it only ever weighs a
-purchase that would otherwise have happened. A listed amount above it on an
-otherwise usable rail exits 22 and buys nothing on either rail, rather than
-quietly switching currency, so a policy breach is distinguishable from a network
-failure. An agent that holds none of the token is not refused: it buys in ETH,
-exactly as it did before the stablecoin rail existed.
+bounds the amount an agent will sign for. It is weighed after the rail is known
+to be advertised, affordable, and signable, and before anything is signed: an
+authorization is submittable by anyone, so one that exists for a refused amount
+has already let the money go. A listed amount above it exits 22 and buys nothing
+on either rail, rather than quietly switching currency, so a policy breach is
+distinguishable from a network failure. An agent that holds none of the token is
+not refused: it buys in ETH, exactly as it did before the stablecoin rail
+existed.
 
 For KMS, HSM, or enclave-backed keys, implement the `Signer` trait and pass it
 to `activation::ensure_headless` directly. Its only primitive is "sign this

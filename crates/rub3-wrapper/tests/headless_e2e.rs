@@ -27,17 +27,17 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, B256};
 use rub3_wrapper::activation::{
     ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome, PaymentRail,
     ENV_MAX_TOKEN_AMOUNT, EXIT_PRICE_ABOVE_POLICY,
 };
 use rub3_wrapper::rpc;
-use rub3_wrapper::signer::{resolve_signer, Signer, ENV_AGENT_KEY};
+use rub3_wrapper::signer::{resolve_signer, Signer, SignerError, ENV_AGENT_KEY};
 use rub3_wrapper::{session, session_store};
 
 // Anvil's built-in account #0 - deterministic, documented, holds nothing real.
@@ -435,6 +435,48 @@ impl Drop for Agent {
         std::env::remove_var(ENV_AGENT_KEY);
         std::env::remove_var("RUB3_SESSION_DIR");
         std::env::remove_var(ENV_MAX_TOKEN_AMOUNT);
+    }
+}
+
+/// A [`Signer`] that counts how many times it was asked to sign, and otherwise
+/// delegates unchanged.
+///
+/// The spend ceiling's guarantee is that no authorization for a refused amount
+/// is ever *produced*, not merely that the run exits non-zero. An exit code
+/// cannot show that: it reads the same whether the refusal came before or after
+/// a valid 900-second authorization was signed and handed to an RPC endpoint
+/// that could broadcast it. Counting the signing calls is what distinguishes
+/// the two.
+struct CountingSigner<'a> {
+    inner: &'a dyn Signer,
+    calls: AtomicUsize,
+}
+
+impl<'a> CountingSigner<'a> {
+    fn wrapping(inner: &'a dyn Signer) -> Self {
+        Self {
+            inner,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Signer for CountingSigner<'_> {
+    fn address(&self) -> Address {
+        self.inner.address()
+    }
+
+    fn sign_prehash(&self, hash: B256) -> Result<alloy::primitives::Signature, SignerError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.sign_prehash(hash)
+    }
+
+    fn source(&self) -> &'static str {
+        self.inner.source()
     }
 }
 
@@ -1204,6 +1246,60 @@ fn headless_falls_back_to_eth_when_the_token_has_no_domain_separator_e2e() {
     session::verify_onchain(&session, &rpc_url()).expect("session must verify on-chain");
 }
 
+/// A refused price must leave no signed authorization behind anywhere.
+///
+/// The regression this pins: the ceiling once ran *after* the purchase was
+/// signed and pre-flighted, so an above-ceiling run had already produced a
+/// valid authorization for the full listed amount and shipped it to the RPC
+/// endpoint as `eth_call` calldata. `purchaseWithAuthorization` is submittable
+/// by anyone by design, so anything in that request path could have broadcast
+/// it and moved more than the ceiling allowed. The exit code was 22 either way,
+/// which is exactly why this asserts on the signing itself: zero calls, because
+/// nothing on the path to a refusal signs anything.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_signs_nothing_when_the_price_is_above_the_spend_ceiling_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    // Advertised, affordable and signable, with a ceiling one unit under the
+    // listed price: the rail is refused on price alone.
+    let ceiling = USDC_PRICE.parse::<u128>().unwrap() - 1;
+    set_spend_ceiling(&ceiling.to_string());
+
+    let counting = CountingSigner::wrapping(agent.signer.as_ref());
+    let err = ensure_headless(&counting, &ctx(&contract, None))
+        .expect_err("a price above the ceiling must refuse");
+
+    assert!(
+        matches!(err, HeadlessError::PriceAbovePolicy { .. }),
+        "got {err:?}",
+    );
+    assert_eq!(err.exit_code(), EXIT_PRICE_ABOVE_POLICY, "{err}");
+
+    assert_eq!(
+        counting.calls(),
+        0,
+        "a refused purchase must not sign anything: an authorization the policy \
+         refuses is spendable by whoever sees it",
+    );
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "and nothing was broadcast on either rail",
+    );
+}
+
 /// A payment token that answers every read but cannot actually be paid with
 /// selects ETH, without spending a wei of gas finding out.
 ///
@@ -1230,8 +1326,10 @@ fn headless_falls_back_to_eth_when_the_token_lacks_the_signature_overload_e2e() 
 
     let agent = Agent::new();
     fund(agent.address(), FUNDING_ETH);
-    // Advertised, affordable, signable, and within policy: the only thing that
-    // can select ETH is the token refusing the call itself.
+    // Advertised, affordable, signable, and priced exactly at the ceiling so it
+    // is within policy: the run reaches the pre-flight, and the token refusing
+    // the call is the only thing that can select ETH. A ceiling below the price
+    // here would refuse on price and stop proving the fallback.
     mint_usdc(&token, agent.address(), USDC_FUNDING);
     set_spend_ceiling(USDC_PRICE);
 
