@@ -65,6 +65,7 @@ rub3/
 │   ├── script/
 │   │   └── Deploy.s.sol              # Deploy either contract to any EVM chain
 │   ├── foundry.toml
+│   ├── remappings.txt                 # Import remappings pinned in-tree (a reproducibility input)
 │   ├── foundry.lock                  # Pinned dependency revisions, mirrors the submodule gitlinks
 │   ├── canonical-bytecode.json       # Expected sha256 of each contract's deployedBytecode + immutable ranges
 │   ├── .env.example

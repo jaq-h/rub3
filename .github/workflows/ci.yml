@@ -191,6 +191,29 @@ jobs:
   # When the contracts legitimately change, this job stays red until the
   # regenerated contracts/canonical-bytecode.json is committed in the same pull
   # request. That is the intended workflow, not a nuisance.
+  #
+  # WHY THIS ONE JOB PINS forge AND ITS SIBLINGS DO NOT
+  # The other foundry jobs here care only about what forge *compiles*, and
+  # foundry.toml pins solc_version, so any forge builds the same bytecode. This
+  # job also cares about what forge *emits*: the manifest records solc's own
+  # settings object as forge assembled it, and the check diffs the whole
+  # manifest. A forge release that starts passing an extra standard-json setting
+  # to the pinned solc, or stops passing one, would therefore turn this blocking
+  # job red on an unrelated pull request with no repo change and byte-identical
+  # fingerprints. A blocking check people learn to ignore is worse than no
+  # check, so this job alone pins the version. Leave the sibling jobs unpinned.
+  #
+  # HOW TO BUMP THE PIN
+  # Deliberately, and never on its own: raise the `version:` below, run
+  #
+  #     scripts/canonical-bytecode-hashes.sh update
+  #
+  # and commit the regenerated contracts/canonical-bytecode.json in the SAME
+  # pull request, so the recorded build inputs and the forge that produced them
+  # move together. This is the same workflow the index-based lock/gitlink
+  # cross-check already supports for a dependency bump. The fingerprints
+  # themselves should not move across a forge bump; if one does, the contracts
+  # or the pinned solc changed too, and that is worth understanding first.
   # ---------------------------------------------------------------------------
   bytecode-fingerprints:
     name: canonical bytecode fingerprints (blocking)
@@ -200,10 +223,15 @@ jobs:
         with:
           submodules: recursive
 
+      # Pinned on purpose; see HOW TO BUMP THE PIN above. This is the forge that
+      # produced the checked-in contracts/canonical-bytecode.json.
       - uses: foundry-rs/foundry-toolchain@v1.9.1
+        with:
+          version: v1.5.1
 
       # foundry.toml pins solc_version, so forge fetches that exact compiler
-      # regardless of its own version; solc is the load-bearing pin here.
+      # regardless of its own version; solc is the load-bearing pin for the
+      # fingerprints, and the forge pin above is for the recorded settings.
       - name: Show toolchain
         run: forge --version
 
