@@ -286,6 +286,8 @@ or, for every deployable contract at once, from the repo root:
 scripts/canonical-bytecode-hashes.sh print
 ```
 
+`print` applies the same guards as `check`: it reads the source and artifact directories from the resolved foundry config, so it cannot report on a build it did not perform, and it refuses to emit a fingerprint compiled under anything but `bytecode_hash = "none"`. A number it prints is therefore one you can compare against the manifest, not merely whatever the local environment happened to produce.
+
 ### The expected values, and the drift gate
 
 The current fingerprints live in [`canonical-bytecode.json`](canonical-bytecode.json), alongside the build inputs they were produced under. Those inputs are read back out of the emitted artifacts' own solc `metadata` blocks rather than out of `foundry.toml` text, so they describe the build that actually produced the hashes: a `[profile.*]` selection or a `FOUNDRY_*` environment override cannot record one set of inputs next to hashes compiled under another. The `bytecode_hash = "none"` guard is driven off that same artifact metadata for the same reason. Because the manifest publishes a single build block covering every fingerprint, the gate reads the compiler version and settings from every discovered contract's artifact and fails, naming both contracts and the field, if any two disagree; one set of build inputs has to hold for the whole of `contracts/src/`. It is JSON because it is consumed by machines as much as by people: the CI gate diffs against it, and the wrapper will later compile the same table into the binary, so a `serde`-shaped file beats a prose table or a bare checksum list.

@@ -35,17 +35,30 @@ done
 
 cd "$contracts_dir"
 
-# --force so a stale out/ cannot make a drifted build look clean.
+# Both directories come from the resolved config rather than being hardcoded,
+# because `forge build` honours whatever the active profile or a FOUNDRY_*
+# override selects. Reading them anywhere else would let this script hash
+# artifacts from a build it did not perform.
+foundry_src="$(forge config --json | jq -er '.src')" || {
+  echo "error: could not read the source directory from 'forge config --json'." >&2
+  exit 1
+}
+foundry_out="$(forge config --json | jq -er '.out')" || {
+  echo "error: could not read the artifact directory from 'forge config --json'." >&2
+  exit 1
+}
+
+# --force so a stale build output directory cannot make a drifted build look clean.
 forge build --force >/dev/null
 
-# forge writes artifacts as out/<declaring file basename>/<contract name>.json,
+# forge writes artifacts as <out>/<declaring file basename>/<contract name>.json,
 # so both the artifact path and the manifest's `source` field are derived from
 # the file that actually declared the contract rather than assumed from its
 # name. That keeps a contract in a subdirectory, and a second contract declared
 # inside an existing file, honest.
 artifact_of() {
   local name="$1" source="$2"
-  printf 'out/%s/%s.json' "$(basename "$source")" "$name"
+  printf '%s/%s/%s.json' "$foundry_out" "$(basename "$source")" "$name"
 }
 
 # sha256 of the raw bytes, not of the hex text: the hex string's case and its
@@ -86,14 +99,14 @@ entries=()
 while IFS= read -r line; do
   if [ -n "$line" ]; then entries+=("$line"); fi
 done < <(
-  find src -type f -name '*.sol' -print0 \
+  find "$foundry_src" -type f -name '*.sol' -print0 \
     | while IFS= read -r -d '' file; do
         { grep -oE '^[[:space:]]*contract[[:space:]]+[A-Za-z0-9_]+' "$file" || true; } \
           | awk -v f="$file" '{print $2 "\t" f}'
       done \
     | sort
 )
-[ "${#entries[@]}" -gt 0 ] || { echo "error: no deployable contracts found under contracts/src" >&2; exit 1; }
+[ "${#entries[@]}" -gt 0 ] || { echo "error: no deployable contracts found under contracts/$foundry_src" >&2; exit 1; }
 
 # The manifest keys contracts by name, and forge writes artifacts to
 # out/<file basename>/<contract>.json, so a name declared twice is ambiguous in
@@ -139,11 +152,6 @@ for entry in "${entries[@]}"; do
   sources+=("$source")
   hashes+=("$hash")
 done
-
-if [ "$mode" = "print" ]; then
-  for i in "${!names[@]}"; do printf '%s\t%s\n' "${names[$i]}" "${hashes[$i]}"; done
-  exit 0
-fi
 
 # Build settings are read out of the emitted artifacts' own solc metadata, not
 # out of foundry.toml text, so the recorded inputs describe the build that
@@ -233,6 +241,14 @@ Set bytecode_hash = "none" in contracts/foundry.toml and make sure no profile or
 FOUNDRY_BYTECODE_HASH override is overriding it.
 MSG
   exit 1
+fi
+
+# Only now, past the guard and the per-artifact settings validation, so `print`
+# can never emit a fingerprint produced under the wrong build inputs. It stays
+# clear of the git and foundry.lock requirements, which come after this.
+if [ "$mode" = "print" ]; then
+  for i in "${!names[@]}"; do printf '%s\t%s\n' "${names[$i]}" "${hashes[$i]}"; done
+  exit 0
 fi
 
 if [ ! -f foundry.lock ]; then
