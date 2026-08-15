@@ -53,14 +53,16 @@ sol! {
 
         /// Mirrors `Rub3License.PaymentAuthorization`. Field order is part of
         /// the ABI encoding, so it must match the Solidity struct exactly.
+        ///
+        /// `signature` is opaque to the licence contract, which hands it
+        /// straight to the payment token: 65 bytes of `r || s || v` for an EOA
+        /// signer, or an EIP-1271 signature for a smart-contract wallet.
         struct PaymentAuthorization {
             address from;
             uint256 validAfter;
             uint256 validBefore;
             bytes32 salt;
-            uint8   v;
-            bytes32 r;
-            bytes32 s;
+            bytes   signature;
         }
 
         function purchaseWithAuthorization(address recipient, PaymentAuthorization calldata auth)
@@ -180,8 +182,13 @@ pub fn owner_of(rpc_url: &str, contract: Address, token_id: u64) -> Result<Addre
     })
 }
 
-/// Returns the purchase price (in wei) from the license contract's `price()` function.
-pub fn token_price(rpc_url: &str, contract: Address) -> Result<U256, RpcError> {
+/// Returns the purchase price (in wei) from the license contract's `price()`
+/// function - the ETH rail.
+///
+/// Named for the currency, not the licence: the stablecoin rail's price is
+/// [`stablecoin_rail`] returning a [`StablecoinPrice`], and the two are
+/// denominated in different units on the same money path.
+pub fn eth_price(rpc_url: &str, contract: Address) -> Result<U256, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
         let instance = IRub3License::new(contract, provider);
@@ -593,8 +600,11 @@ pub fn encode_purchase_calldata(recipient: Address) -> String {
 // ── Stablecoin rail (EIP-3009, §2.2) ──────────────────────────────────────────
 
 /// What a contract charges on its stablecoin rail.
+///
+/// Never wei: `amount` is denominated in `token`'s own smallest unit. The ETH
+/// rail's price is a bare `U256` of wei from [`eth_price`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TokenPrice {
+pub struct StablecoinPrice {
     /// The ERC-20 the contract accepts. Never the zero address - a contract
     /// with no rail is reported as `None` rather than a zero token.
     pub token: Address,
@@ -616,7 +626,10 @@ pub struct TokenPrice {
 /// A *transport* failure is none of those and is propagated: falling back to
 /// ETH because the node blinked would spend the wrong currency for the wrong
 /// reason.
-pub fn token_rail(rpc_url: &str, contract: Address) -> Result<Option<TokenPrice>, RpcError> {
+pub fn stablecoin_rail(
+    rpc_url: &str,
+    contract: Address,
+) -> Result<Option<StablecoinPrice>, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
         let instance = IRub3License::new(contract, provider);
@@ -638,7 +651,7 @@ pub fn token_rail(rpc_url: &str, contract: Address) -> Result<Option<TokenPrice>
             .await
             .map_err(|e| classify_call_error(&e))?;
 
-        Ok(Some(TokenPrice { token, amount }))
+        Ok(Some(StablecoinPrice { token, amount }))
     })
 }
 
@@ -739,6 +752,49 @@ pub fn encode_purchase_with_authorization_calldata(
 ) -> String {
     let call = IRub3License::purchaseWithAuthorizationCall { recipient, auth };
     format!("0x{}", hex::encode(call.abi_encode()))
+}
+
+/// Runs `purchaseWithAuthorization(recipient, auth)` as an `eth_call` from
+/// `buyer`, broadcasting nothing.
+///
+/// This is how the wrapper finds out, before spending gas, whether the
+/// contract's configured payment token implements the `bytes signature`
+/// overload of `receiveWithAuthorization` that the licence contract calls. A
+/// token that implements only EIP-3009's `(v, r, s)` form is conforming and
+/// passes the licence contract's constructor probe, but reverts here.
+///
+/// It has to be this rather than something cheaper. The contract cannot check
+/// it at deploy time, because a staticcall probe cannot tell "no such function"
+/// from "bad signature" - both revert. Scanning the token's runtime bytecode
+/// for the overload's selector cannot do it either: USDC sits behind a proxy,
+/// so its own code carries none of its selectors, and the scan would report a
+/// false negative on the very token this rail targets. Executing the exact call
+/// the wrapper is about to send is the one check that answers the question for
+/// whatever is really deployed at that address.
+///
+/// The calldata is identical to
+/// [`encode_purchase_with_authorization_calldata`] and the sender is the
+/// account that would broadcast it, so success here means the same call would
+/// succeed against the same state. A contract-level failure is a settled answer
+/// about the token; a transport failure is not, and is propagated.
+pub fn preflight_purchase_with_authorization(
+    rpc_url: &str,
+    contract: Address,
+    buyer: Address,
+    recipient: Address,
+    auth: IRub3License::PaymentAuthorization,
+) -> Result<(), RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        instance
+            .purchaseWithAuthorization(recipient, auth)
+            .from(buyer)
+            .call()
+            .await
+            .map(|_| ())
+            .map_err(|e| classify_call_error(&e))
+    })
 }
 
 /// Splits a failed `eth_call` into "the chain answered" and "the node did not".
@@ -880,8 +936,8 @@ mod tests {
     }
 
     #[test]
-    fn token_price_invalid_url_returns_transport_error() {
-        let err = token_price("not-a-url", Address::ZERO).unwrap_err();
+    fn eth_price_invalid_url_returns_transport_error() {
+        let err = eth_price("not-a-url", Address::ZERO).unwrap_err();
         assert!(matches!(err, RpcError::Transport(_)));
     }
 
@@ -1124,24 +1180,50 @@ mod tests {
 
     #[test]
     fn encode_purchase_with_authorization_matches_selector() {
-        // keccak256("purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,uint8,bytes32,bytes32))")[..4]
+        // keccak256("purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,bytes))")[..4]
         let recipient: Address = "0x1111111111111111111111111111111111111111"
             .parse()
             .unwrap();
-        let auth = IRub3License::PaymentAuthorization {
-            from: recipient,
+        let data = encode_purchase_with_authorization_calldata(recipient, sample_auth());
+        assert!(
+            data.starts_with("0x6a0221cb"),
+            "unexpected selector in {data}",
+        );
+    }
+
+    /// The signature is opaque bytes end to end: whatever the signer produced
+    /// reaches the payment token byte for byte, which is what lets an EIP-1271
+    /// smart-wallet signature of any length through the same entry point.
+    #[test]
+    fn encode_purchase_with_authorization_carries_the_signature_verbatim() {
+        let recipient: Address = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        for signature in [vec![0xABu8; 65], vec![0xCDu8; 200]] {
+            let auth = IRub3License::PaymentAuthorization {
+                signature: signature.clone().into(),
+                ..sample_auth()
+            };
+            let data = encode_purchase_with_authorization_calldata(recipient, auth);
+            assert!(
+                data.contains(&hex::encode(&signature)),
+                "signature of {} bytes was not encoded verbatim",
+                signature.len(),
+            );
+        }
+    }
+
+    fn sample_auth() -> IRub3License::PaymentAuthorization {
+        IRub3License::PaymentAuthorization {
+            from: "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
             validAfter: U256::ZERO,
             validBefore: U256::from(1u64),
             salt: B256::ZERO,
-            v: 27,
-            r: B256::ZERO,
-            s: B256::ZERO,
-        };
-        let data = encode_purchase_with_authorization_calldata(recipient, auth);
-        assert!(
-            data.starts_with("0x6bf8b185"),
-            "unexpected selector in {data}",
-        );
+            signature: vec![0x11u8; 65].into(),
+        }
     }
 
     #[test]
@@ -1328,7 +1410,7 @@ mod tests {
 
 /// How a node answers matters as much as what it says, and the split between
 /// "the chain answered" and "the node did not" decides whether the wrapper
-/// falls back to the ETH rail or stops. These drive [`token_rail`] against a
+/// falls back to the ETH rail or stops. These drive [`stablecoin_rail`] against a
 /// local socket that returns one fixed body, so each classification is
 /// exercised through the real public function rather than asserted about the
 /// classifier in isolation.
@@ -1406,7 +1488,7 @@ mod stub_node_tests {
         let node = StubNode::serving(
             r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32005,"message":"rate limit exceeded"}}"#,
         );
-        let err = token_rail(&node.url, Address::ZERO)
+        let err = stablecoin_rail(&node.url, Address::ZERO)
             .expect_err("a rate-limited node must not answer the rail question");
         assert!(
             err.is_transport(),
@@ -1421,7 +1503,7 @@ mod stub_node_tests {
         let node = StubNode::serving(
             r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":"execution timeout"}}"#,
         );
-        let err = token_rail(&node.url, Address::ZERO)
+        let err = stablecoin_rail(&node.url, Address::ZERO)
             .expect_err("an execution timeout must not answer the rail question");
         assert!(
             err.is_transport(),
@@ -1433,7 +1515,7 @@ mod stub_node_tests {
     #[test]
     fn a_malformed_response_body_is_a_node_failure_not_an_absent_rail() {
         let node = StubNode::serving("not json at all");
-        let err = token_rail(&node.url, Address::ZERO)
+        let err = stablecoin_rail(&node.url, Address::ZERO)
             .expect_err("an undeserializable response must not answer the rail question");
         assert!(
             err.is_transport(),
@@ -1449,7 +1531,7 @@ mod stub_node_tests {
             r#"{"jsonrpc":"2.0","id":0,"error":{"code":3,"message":"execution reverted"}}"#,
         );
         assert_eq!(
-            token_rail(&node.url, Address::ZERO).expect("a revert is a settled answer"),
+            stablecoin_rail(&node.url, Address::ZERO).expect("a revert is a settled answer"),
             None,
             "a reverted priceToken() means the ETH rail",
         );
@@ -1463,7 +1545,7 @@ mod stub_node_tests {
             r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":"execution reverted"}}"#,
         );
         assert_eq!(
-            token_rail(&node.url, Address::ZERO).expect("a revert is a settled answer"),
+            stablecoin_rail(&node.url, Address::ZERO).expect("a revert is a settled answer"),
             None,
         );
     }
@@ -1473,8 +1555,56 @@ mod stub_node_tests {
     fn empty_return_data_means_the_contract_offers_no_stablecoin_rail() {
         let node = StubNode::serving(r#"{"jsonrpc":"2.0","id":0,"result":"0x"}"#);
         assert_eq!(
-            token_rail(&node.url, Address::ZERO).expect("empty return data is a settled answer"),
+            stablecoin_rail(&node.url, Address::ZERO)
+                .expect("empty return data is a settled answer"),
             None,
+        );
+    }
+
+    fn preflight_against(node: &StubNode) -> RpcError {
+        preflight_purchase_with_authorization(
+            &node.url,
+            Address::ZERO,
+            Address::ZERO,
+            Address::ZERO,
+            IRub3License::PaymentAuthorization {
+                from: Address::ZERO,
+                validAfter: U256::ZERO,
+                validBefore: U256::from(1u64),
+                salt: B256::ZERO,
+                signature: vec![0x11u8; 65].into(),
+            },
+        )
+        .expect_err("the stub node never lets the call succeed")
+    }
+
+    /// The pre-flight decides whether a payment token is usable, so it splits
+    /// failures the same way every other token-side read does. A revert is the
+    /// answer it is looking for: the call the wrapper was about to broadcast
+    /// would have reverted too.
+    #[test]
+    fn a_reverted_preflight_is_a_contract_answer_not_a_node_failure() {
+        let node = StubNode::serving(
+            r#"{"jsonrpc":"2.0","id":0,"error":{"code":3,"message":"execution reverted"}}"#,
+        );
+        let err = preflight_against(&node);
+        assert!(
+            !err.is_transport(),
+            "a revert must not read as transport: {err}"
+        );
+    }
+
+    /// And a node that will not answer must never be read as "this token is
+    /// unusable", which would silently change the currency.
+    #[test]
+    fn a_preflight_against_a_failing_node_is_a_transport_failure() {
+        let node = StubNode::serving(
+            r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32005,"message":"rate limit exceeded"}}"#,
+        );
+        let err = preflight_against(&node);
+        assert!(
+            err.is_transport(),
+            "a rate limit must read as transport: {err}"
         );
     }
 }

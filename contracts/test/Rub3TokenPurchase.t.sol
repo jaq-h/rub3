@@ -7,8 +7,10 @@ import {Rub3License}       from "../src/Rub3License.sol";
 import {Rub3Subscription}  from "../src/Rub3Subscription.sol";
 import {
     MockEIP3009Token,
+    NoSignatureOverloadEIP3009Token,
     NotAToken,
-    SilentEIP3009Token
+    SilentEIP3009Token,
+    SmartWallet
 } from "./mocks/MockEIP3009Token.sol";
 
 /// @notice The stablecoin rail: `purchaseWithAuthorization` /
@@ -29,6 +31,9 @@ contract Rub3TokenPurchaseTest is Test {
 
     uint256 internal constant BUYER_PK    = 0xA11CE5E;
     uint256 internal constant OUTSIDER_PK = 0xDECAFBAD;
+    /// The key a smart-contract wallet's `isValidSignature` defers to. The
+    /// wallet holds the money; this key only says yes.
+    uint256 internal constant WALLET_OWNER_PK = 0x5A1E70;
 
     bytes32 internal constant WRAPPER_HASH    = keccak256("test-wrapper-v1");
     uint256 internal constant PRICE           = 0.05 ether;
@@ -98,23 +103,30 @@ contract Rub3TokenPurchaseTest is Test {
 
     /// Signs a `ReceiveWithAuthorization` exactly as a buyer's wallet would:
     /// EIP-712 over the *token's* domain, never the licence contract's.
+    ///
+    /// `signer` is the address the authorization is *from*, which is the wallet
+    /// for a smart-contract buyer and `vm.addr(pk)` for an EOA. Returns the
+    /// standard 65-byte `r || s || v` packing, which is what an EOA signature
+    /// is and what a signature checker recovers from.
     function _sign(
         uint256 pk,
+        address signer,
         address payee,
         uint256 value,
         uint256 validAfter,
         uint256 validBefore,
         bytes32 nonce
-    ) internal view returns (uint8 v, bytes32 r, bytes32 s) {
+    ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
             abi.encode(
-                RECEIVE_TYPEHASH, vm.addr(pk), payee, value, validAfter, validBefore, nonce
+                RECEIVE_TYPEHASH, signer, payee, value, validAfter, validBefore, nonce
             )
         );
         bytes32 digest = keccak256(
             abi.encodePacked("\x19\x01", usdc.DOMAIN_SEPARATOR(), structHash)
         );
-        (v, r, s) = vm.sign(pk, digest);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
     }
 
     /// A purchase authorization for `recipient` on `target`, signed by `pk`.
@@ -123,12 +135,27 @@ contract Rub3TokenPurchaseTest is Test {
         view
         returns (Rub3License.PaymentAuthorization memory auth)
     {
-        auth.from        = vm.addr(pk);
+        return _purchaseAuthFrom(pk, vm.addr(pk), target, recipient, value, salt);
+    }
+
+    /// The same, for a buyer whose `from` is not the address that signs: a
+    /// smart-contract wallet pays out of its own balance while its owner key
+    /// produces the signature.
+    function _purchaseAuthFrom(
+        uint256 pk,
+        address from,
+        Rub3License target,
+        address recipient,
+        uint256 value,
+        bytes32 salt
+    ) internal view returns (Rub3License.PaymentAuthorization memory auth) {
+        auth.from        = from;
         auth.validAfter  = 0;
         auth.validBefore = block.timestamp + 1 hours;
         auth.salt        = salt;
-        (auth.v, auth.r, auth.s) = _sign(
+        auth.signature   = _sign(
             pk,
+            from,
             address(target),
             value,
             auth.validAfter,
@@ -146,8 +173,9 @@ contract Rub3TokenPurchaseTest is Test {
         auth.validAfter  = 0;
         auth.validBefore = block.timestamp + 1 hours;
         auth.salt        = salt;
-        (auth.v, auth.r, auth.s) = _sign(
+        auth.signature   = _sign(
             pk,
+            vm.addr(pk),
             address(target),
             value,
             auth.validAfter,
@@ -261,6 +289,86 @@ contract Rub3TokenPurchaseTest is Test {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // 1b. Smart-contract wallets (EIP-1271)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// The reason the authorization carries opaque `bytes` rather than split
+    /// `(v, r, s)`: an ERC-4337-shaped agent wallet holds the USDC and has no
+    /// key of its own, so its signature is an EIP-1271 signature its own code
+    /// validates. It buys a licence on the same one entry point an EOA uses.
+    function test_smartWallet_eip1271BuyerGetsTheLicence() public {
+        SmartWallet wallet = new SmartWallet(vm.addr(WALLET_OWNER_PK));
+        usdc.mint(address(wallet), 1_000_000_000);
+
+        Rub3License.PaymentAuthorization memory auth = _purchaseAuthFrom(
+            WALLET_OWNER_PK, address(wallet), nft, address(wallet), USDC_PRICE, "salt-1"
+        );
+
+        vm.prank(submitter);
+        uint256 tokenId = nft.purchaseWithAuthorization(address(0), auth);
+
+        assertEq(nft.ownerOf(tokenId), address(wallet), "the smart wallet holds the licence");
+        assertEq(address(wallet).balance, 0, "and never held a wei of ETH");
+        assertEq(usdc.balanceOf(address(wallet)), 1_000_000_000 - USDC_PRICE);
+        assertEq(usdc.balanceOf(address(nft)), USDC_PRICE);
+    }
+
+    /// The same wallet, a signature it does not accept. The token's signature
+    /// checker asks the wallet, the wallet says no, and nothing happens: no
+    /// licence, and not a cent moved.
+    function test_smartWallet_aSignatureTheWalletRejectsBuysNothing() public {
+        SmartWallet wallet = new SmartWallet(vm.addr(WALLET_OWNER_PK));
+        usdc.mint(address(wallet), 1_000_000_000);
+
+        Rub3License.PaymentAuthorization memory auth = _purchaseAuthFrom(
+            OUTSIDER_PK, address(wallet), nft, address(wallet), USDC_PRICE, "salt-1"
+        );
+
+        vm.prank(submitter);
+        vm.expectRevert(MockEIP3009Token.InvalidSignature.selector);
+        nft.purchaseWithAuthorization(address(0), auth);
+
+        assertEq(nft.nextTokenId(), 0, "no licence was minted");
+        assertEq(usdc.balanceOf(address(wallet)), 1_000_000_000, "the wallet keeps its money");
+        assertEq(usdc.balanceOf(address(nft)), 0);
+    }
+
+    /// A smart wallet renews on the same terms, so the rail is not
+    /// purchase-only for the buyers it was widened for.
+    function test_smartWallet_renewsItsOwnSubscription() public {
+        SmartWallet wallet = new SmartWallet(vm.addr(WALLET_OWNER_PK));
+        usdc.mint(address(wallet), 1_000_000_000);
+
+        Rub3License.PaymentAuthorization memory buy = _purchaseAuthFrom(
+            WALLET_OWNER_PK, address(wallet), sub, address(wallet), USDC_PRICE, "salt-1"
+        );
+        vm.prank(submitter);
+        uint256 tokenId = sub.purchaseWithAuthorization(address(0), buy);
+        uint256 before  = sub.expiresAt(tokenId);
+
+        Rub3License.PaymentAuthorization memory renewal;
+        renewal.from        = address(wallet);
+        renewal.validAfter  = 0;
+        renewal.validBefore = block.timestamp + 1 hours;
+        renewal.salt        = "salt-2";
+        renewal.signature   = _sign(
+            WALLET_OWNER_PK,
+            address(wallet),
+            address(sub),
+            USDC_PRICE,
+            renewal.validAfter,
+            renewal.validBefore,
+            sub.renewAuthorizationNonce(tokenId, renewal.salt)
+        );
+
+        vm.prank(submitter);
+        sub.renewWithAuthorization(tokenId, renewal);
+
+        assertEq(sub.expiresAt(tokenId), before + PERIOD);
+        assertEq(usdc.balanceOf(address(sub)), USDC_PRICE * 2);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // 2. Replay, front-running, and misdirection
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -329,7 +437,7 @@ contract Rub3TokenPurchaseTest is Test {
         usdc.transferWithAuthorization(
             buyer, address(nft), USDC_PRICE,
             auth.validAfter, auth.validBefore, nonce,
-            auth.v, auth.r, auth.s
+            auth.signature
         );
 
         assertEq(usdc.balanceOf(buyer), 1_000_000_000, "the buyer keeps their money");
@@ -351,7 +459,7 @@ contract Rub3TokenPurchaseTest is Test {
         usdc.receiveWithAuthorization(
             buyer, address(nft), USDC_PRICE,
             auth.validAfter, auth.validBefore, nonce,
-            auth.v, auth.r, auth.s
+            auth.signature
         );
     }
 
@@ -413,8 +521,8 @@ contract Rub3TokenPurchaseTest is Test {
         auth.validAfter  = block.timestamp + 1 hours;
         auth.validBefore = block.timestamp + 2 hours;
         auth.salt        = "salt-1";
-        (auth.v, auth.r, auth.s) = _sign(
-            BUYER_PK, address(nft), USDC_PRICE, auth.validAfter, auth.validBefore,
+        auth.signature   = _sign(
+            BUYER_PK, buyer, address(nft), USDC_PRICE, auth.validAfter, auth.validBefore,
             nft.purchaseAuthorizationNonce(buyer, auth.salt)
         );
 
@@ -438,7 +546,7 @@ contract Rub3TokenPurchaseTest is Test {
             )
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(BUYER_PK, digest);
-        usdc.cancelAuthorization(buyer, nonce, v, r, s);
+        usdc.cancelAuthorization(buyer, nonce, abi.encodePacked(r, s, v));
 
         vm.prank(submitter);
         vm.expectRevert(MockEIP3009Token.AuthorizationUsedOrCanceled.selector);
@@ -509,6 +617,38 @@ contract Rub3TokenPurchaseTest is Test {
             abi.encodeWithSelector(Rub3License.IncompatiblePriceToken.selector, address(junk))
         );
         _deployAccess(_sale(PRICE, address(junk), USDC_PRICE));
+    }
+
+    /// The narrowing this rail accepts, stated as a test. A token implementing
+    /// only EIP-3009's `(v, r, s)` form is conforming and passes the
+    /// constructor probe - the probe reads `authorizationState`, which it has -
+    /// but the licence contract calls the `bytes signature` overload, which it
+    /// does not, so the rail cannot be spent. The contract cannot detect this
+    /// at deploy time, which is why the wrapper pre-flights the call before
+    /// broadcasting and buys in ETH instead.
+    function test_config_tokenWithoutTheSignatureOverloadDeploysButCannotBeSpent() public {
+        NoSignatureOverloadEIP3009Token split = new NoSignatureOverloadEIP3009Token();
+
+        Rub3Access strict = _deployAccess(_sale(PRICE, address(split), USDC_PRICE));
+        assertEq(strict.priceToken(), address(split), "the constructor probe accepts it");
+
+        split.mint(buyer, 1_000_000_000);
+
+        // The signature never gets looked at: there is no such function on the
+        // token and no fallback to swallow the call.
+        Rub3License.PaymentAuthorization memory auth =
+            _purchaseAuth(BUYER_PK, strict, buyer, USDC_PRICE, "salt-1");
+        vm.prank(submitter);
+        vm.expectRevert();
+        strict.purchaseWithAuthorization(address(0), auth);
+
+        assertEq(strict.nextTokenId(), 0, "nothing was minted");
+        assertEq(split.balanceOf(buyer), 1_000_000_000, "and nothing moved");
+
+        // The licence contract itself is fine: the ETH rail sells as always.
+        vm.deal(outsider, 1 ether);
+        vm.prank(outsider);
+        assertEq(strict.ownerOf(strict.purchase{value: PRICE}(outsider)), outsider);
     }
 
     function test_config_priceTokenMustHaveCode() public {

@@ -985,11 +985,10 @@ mod headless {
             return Err(HeadlessError::SoldOut { supply_cap, minted });
         }
 
-        let (plan, paid) = match choose_rail(ctx, contract, wallet)? {
+        let (plan, paid) = match choose_rail(signer, ctx, contract, wallet)? {
             Some(rail) => {
-                let auth = authorize_purchase(signer, ctx, contract, wallet, &rail)?;
                 let calldata = decode_calldata(&rpc::encode_purchase_with_authorization_calldata(
-                    wallet, auth,
+                    wallet, rail.auth,
                 ))?;
                 (
                     TxPlan {
@@ -1007,7 +1006,7 @@ mod headless {
                 )
             }
             None => {
-                let price = rpc::token_price(&ctx.rpc_url, contract)
+                let price = rpc::eth_price(&ctx.rpc_url, contract)
                     .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
                 (
                     TxPlan {
@@ -1038,28 +1037,31 @@ mod headless {
         Ok((token_id, paid))
     }
 
-    /// The stablecoin rail together with everything signing on it needs.
+    /// The stablecoin rail, with the authorization that pays for it already
+    /// signed and already proven to execute.
     ///
-    /// The payment token's EIP-712 domain is resolved here rather than at
-    /// signing time so that every "can this rail actually be used" question is
-    /// answered in one place. Once [`choose_rail`] hands one of these back the
-    /// rail is committed, and nothing downstream can discover a reason it is
-    /// unusable after the ETH path has already been passed over.
+    /// Everything the rail needs is resolved before one of these exists: the
+    /// payment token's EIP-712 domain, the buyer's signature over it, and an
+    /// `eth_call` of the exact transaction that will be broadcast. Once
+    /// [`choose_rail`] hands one back the rail is committed, and nothing
+    /// downstream can discover a reason it was unusable after the ETH path has
+    /// already been passed over.
     pub(super) struct TokenRail {
-        price: rpc::TokenPrice,
-        domain_separator: alloy::primitives::B256,
+        price: rpc::StablecoinPrice,
+        auth: rpc::IRub3License::PaymentAuthorization,
     }
 
     /// Picks the rail: the stablecoin one when the contract advertises it, the
     /// wallet can afford it, the payment token answers the reads an
-    /// authorization needs, *and* the operator's ceiling covers the listed
-    /// amount. ETH otherwise.
+    /// authorization needs, the payment token *accepts* that authorization,
+    /// *and* the operator's ceiling covers the listed amount. ETH otherwise.
     ///
-    /// The order of those four is load-bearing, and the ceiling is deliberately
+    /// The order of those five is load-bearing, and the ceiling is deliberately
     /// last. The guard means "I would have paid this and policy says no", so it
     /// may only fire once the rail was otherwise fully usable. An agent holding
-    /// none of the payment token was never going to spend it, and must not be
-    /// refused over money it could not have moved.
+    /// none of the payment token, or facing a token it cannot pay with at all,
+    /// was never going to spend it, and must not be refused over money it could
+    /// not have moved.
     ///
     /// That splits the outcomes cleanly in two, and they must not be blurred:
     ///
@@ -1068,10 +1070,11 @@ mod headless {
     ///     code, never a quiet ETH purchase instead. An orchestrator has to be
     ///     able to tell a policy breach from a network failure.
     ///   * **The rail was not usable at all** - not advertised, not affordable,
-    ///     no readable EIP-712 domain, or no ceiling configured to size it by.
-    ///     ETH is then not a fallback from anything: it is the path this agent
-    ///     was always on. The printed reason names the fact that put it there
-    ///     and says nothing about a spend limit.
+    ///     no readable EIP-712 domain, an authorization the payment token will
+    ///     not accept, or no ceiling configured to size it by. ETH is then not
+    ///     a fallback from anything: it is the path this agent was always on.
+    ///     The printed reason names the fact that put it there and says nothing
+    ///     about a spend limit.
     ///
     /// A **transport** failure on any of these reads is neither of those: it
     /// stops the run. That is why the reads branch on
@@ -1083,12 +1086,23 @@ mod headless {
     /// contract now also lists a token, because that token is imperfect, or
     /// because the agent cannot afford a listing that happens to exceed a
     /// ceiling.
+    ///
+    /// The authorization is signed before the ceiling is weighed, because the
+    /// pre-flight needs a real signature to run and its answer is one of the
+    /// "could this agent have paid at all" questions the ceiling comes after. A
+    /// refused purchase therefore leaves one signed authorization behind, seen
+    /// only by the RPC endpoint that answered the `eth_call`. It is spendable
+    /// only through this contract's `purchaseWithAuthorization`, which mints to
+    /// this wallet, so the worst it can do is deliver the licence the agent was
+    /// asking for - the same exposure the broadcast itself carries, one step
+    /// earlier.
     fn choose_rail(
+        signer: &dyn Signer,
         ctx: &HeadlessContext,
         contract: Address,
         wallet: Address,
     ) -> Result<Option<TokenRail>, HeadlessError> {
-        let Some(price) = rpc::token_rail(&ctx.rpc_url, contract)
+        let Some(price) = rpc::stablecoin_rail(&ctx.rpc_url, contract)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?
         else {
             return Ok(None);
@@ -1131,6 +1145,40 @@ mod headless {
             }
         };
 
+        let auth = authorize_purchase(
+            signer,
+            ctx,
+            contract,
+            wallet,
+            price.amount,
+            domain_separator,
+        )?;
+
+        // The licence contracts call the `bytes signature` overload of
+        // `receiveWithAuthorization`, which EIP-3009 does not mandate: a token
+        // implementing only the split `(v, r, s)` form is conforming, passes
+        // the licence contract's constructor probe, and still reverts here. The
+        // contract cannot detect that at deploy time, so the wrapper executes
+        // the exact transaction it is about to send and reads the answer before
+        // any gas is spent.
+        match rpc::preflight_purchase_with_authorization(
+            &ctx.rpc_url,
+            contract,
+            wallet,
+            wallet,
+            auth.clone(),
+        ) {
+            Ok(()) => {}
+            Err(e) if e.is_transport() => return Err(HeadlessError::Rpc(e.to_string())),
+            Err(e) => {
+                return Ok(eth_instead(format!(
+                    "a purchase paid in {token} does not execute ({e}); the likeliest cause \
+                     is that {token} does not implement the `bytes signature` overload of \
+                     receiveWithAuthorization that this licence contract calls"
+                )));
+            }
+        }
+
         // Last, once every other question has said yes. Everything above is a
         // reason the agent could not have paid on this rail; only here is it a
         // question of whether it should.
@@ -1144,10 +1192,7 @@ mod headless {
             }
         }
 
-        Ok(Some(TokenRail {
-            price,
-            domain_separator,
-        }))
+        Ok(Some(TokenRail { price, auth }))
     }
 
     /// Records why the stablecoin rail was passed over and selects ETH.
@@ -1177,7 +1222,8 @@ mod headless {
         ctx: &HeadlessContext,
         contract: Address,
         wallet: Address,
-        rail: &TokenRail,
+        amount: U256,
+        domain_separator: alloy::primitives::B256,
     ) -> Result<rpc::IRub3License::PaymentAuthorization, HeadlessError> {
         use alloy::primitives::B256;
         use rand::RngCore;
@@ -1194,10 +1240,10 @@ mod headless {
             U256::from(chrono::Utc::now().timestamp().max(0) as u64 + AUTHORIZATION_TTL_SECS);
 
         let digest = rpc::receive_authorization_digest(
-            rail.domain_separator,
+            domain_separator,
             wallet,
             contract,
-            rail.price.amount,
+            amount,
             valid_after,
             valid_before,
             nonce,
@@ -1210,10 +1256,24 @@ mod headless {
             validAfter: valid_after,
             validBefore: valid_before,
             salt,
-            v: 27 + u8::from(signature.v()),
-            r: B256::from(signature.r().to_be_bytes::<32>()),
-            s: B256::from(signature.s().to_be_bytes::<32>()),
+            signature: pack_signature(&signature).into(),
         })
+    }
+
+    /// The 65-byte `r || s || v` packing an EOA signature is, with `v` in
+    /// {27, 28}.
+    ///
+    /// The licence contract hands these bytes straight to the payment token,
+    /// whose signature checker recovers a signer from exactly this layout. A
+    /// smart-contract wallet's EIP-1271 signature is not built here and need
+    /// not look like this at all - it goes through the same field untouched -
+    /// but the wrapper's own signers are keys, so this is what they produce.
+    fn pack_signature(signature: &alloy::primitives::Signature) -> [u8; 65] {
+        let mut packed = [0u8; 65];
+        packed[..32].copy_from_slice(&signature.r().to_be_bytes::<32>());
+        packed[32..64].copy_from_slice(&signature.s().to_be_bytes::<32>());
+        packed[64] = 27 + u8::from(signature.v());
+        packed
     }
 
     /// The token an unqualified run activates: the lowest id the signer holds.

@@ -19,15 +19,15 @@ capabilities nor the headless front door. Cargo features are additive, so
 `--no-default-features` is mandatory when selecting another bundle:
 
 ```bash
-# tier-3 (adds onchain-write + cooldown): 72 lib tests
+# tier-3 (adds onchain-write + cooldown): 85 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
 
-# tier-3 + the headless (agent) front door: 117 lib tests
+# tier-3 + the headless (agent) front door: 136 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
 ```
 
-For reference, `--lib` counts per bundle: `tier-0` 32, `tier-1`/`tier-2` 62,
-`tier-3`/`tier-4` 72, `tier-3,headless` 117. Each total includes the one
+For reference, `--lib` counts per bundle: `tier-0` 44, `tier-1`/`tier-2` 75,
+`tier-3`/`tier-4` 85, `tier-3,headless` 136. Each total includes the one
 `#[ignore]`d network test, which a plain run skips, so a bundle reports one
 fewer as passed.
 
@@ -119,9 +119,10 @@ Drives `activation::ensure_headless` end to end with no webview involved: the te
 - `headless_purchases_on_the_stablecoin_rail_e2e` (§2.2) - deploys the EIP-3009 mock from `contracts/test/mocks/`, deploys a contract listing both rails, mints USDC to the agent, and asserts the outcome names `PaymentRail::Erc3009`, that exactly the listed stablecoin amount left the agent and arrived at the contract, and that the ETH spent is gas only - far under the ETH price the same contract lists. Balances are read with `cast`, not through the code under test
 - `headless_falls_back_to_eth_without_stablecoin_balance_e2e` (§2.2) - same contract, an agent holding no USDC → `PaymentRail::Eth`, with nothing paid in USDC
 - `headless_falls_back_to_eth_without_a_spend_ceiling_e2e` (§2.2) - a funded agent against an advertised rail with `RUB3_AGENT_MAX_TOKEN_AMOUNT` unset → `PaymentRail::Eth`, the agent's stablecoin balance untouched and the licence still obtained. An unset ceiling makes the rail unavailable, not unlimited
-- `headless_refuses_a_price_above_the_spend_ceiling_e2e` (§2.2) - an otherwise fully usable rail (advertised, affordable, domain readable) with a ceiling one unit under the listed price → exit code 22, `listed=`/`maximum=`/`token=` on the detail line, `nextTokenId` still 0 and the agent's ETH balance unchanged to the wei, so the refusal cannot have become an ETH purchase. A refusal, not a fallback
+- `headless_refuses_a_price_above_the_spend_ceiling_e2e` (§2.2) - an otherwise fully usable rail (advertised, affordable, domain readable, pre-flight clean) with a ceiling one unit under the listed price → exit code 22, `listed=`/`maximum=`/`token=` on the detail line, `nextTokenId` still 0 and the agent's ETH balance unchanged to the wei, so the refusal cannot have become an ETH purchase. A refusal, not a fallback
 - `headless_buys_in_eth_when_it_holds_none_of_an_over_ceiling_token_e2e` (§2.2) - the same contract and the same ceiling, but a wallet holding none of the payment token → succeeds on `PaymentRail::Eth`. The ceiling is checked last, so it only refuses a purchase that would otherwise have happened; this is the regression case for "nothing that bought a licence before §2.2 starts failing". Paired deliberately with the test above, because a future reordering is most likely to collapse the two
 - `headless_falls_back_to_eth_when_the_token_has_no_domain_separator_e2e` (§2.2) - a payment token that passes the licence contract's constructor probe but exposes no `DOMAIN_SEPARATOR()` (`NoDomainSeparatorEIP3009Token` in the mocks file) → `PaymentRail::Eth`, not an aborted activation
+- `headless_falls_back_to_eth_when_the_token_lacks_the_signature_overload_e2e` (§2.2) - a conforming EIP-3009 token that implements only the `(v, r, s)` form (`NoSignatureOverloadEIP3009Token`), so it is advertised, affordable, signable and within policy, and still cannot take the payment. The `eth_call` pre-flight of the real `purchaseWithAuthorization` catches it → `PaymentRail::Eth`, the agent's whole token balance intact, the licence still obtained and the session verified on-chain
 - `headless_transport_failure_on_a_token_read_is_a_hard_error_e2e` (§2.2) - the same funded, within-policy setup pointed at a dead endpoint → `HeadlessError::Rpc` and nothing bought, plus direct assertions that `rpc::erc20_balance_of` and `rpc::token_domain_separator` each classify a dead socket as transport rather than as a contract answer
 - `headless_transport_failure_on_the_token_balance_read_is_a_hard_error_e2e` and `headless_transport_failure_on_the_domain_separator_read_is_a_hard_error_e2e` (§2.2) - a proxy relays every call to anvil except one, the payment token's `balanceOf` and then its `DOMAIN_SEPARATOR()`, whose connection it closes unanswered → `HeadlessError::Rpc` and `nextTokenId` still 0. These are what actually exercise "a blinking node must never silently change the currency": delete either `is_transport` arm from `choose_rail` and the run selects ETH and succeeds, so both fail
 
@@ -136,13 +137,13 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
 
 ### Solidity suite (`contracts/`, run with `forge test` from `contracts/`)
 
-In-process EVM: no network, no `.env`. 127 tests across four files.
+In-process EVM: no network, no `.env`. 131 tests across four files.
 
 - **`test/Rub3Access.t.sol`** (26) - metadata, constructor validation, purchase, supply cap, activation and cooldown, owner gating
 - **`test/Rub3Subscription.t.sol`** (14) - expiry, renewal, `isValid`, and the per-token `renewPrice` snapshot of §2.4
 - **`test/Rub3Invariants.t.sol`** (50) - the ownership invariants: append-only hash set, the successor pattern, mint ordering and predecessor typing, and the no-revocation audit (27 forbidden signatures × 3 deployed contracts, with a positive control proving the scanner finds selectors that do exist)
-- **`test/Rub3TokenPurchase.t.sol`** (37) - the EIP-3009 stablecoin rail of §2.2. The buyer holds stablecoin and a zero ETH balance in every test, and a separate submitter sends every transaction: replay, front-running (diverting the mint, stripping it by calling the token directly, and calling `receiveWithAuthorization` as a third party), authorizations aimed at the wrong contract / wrong intent / wrong token id, the validity window and cancellation, a price move after signing, the balance-delta check, the constructor probes, both rails minting identically, and subscription renewal terms frozen on both rails
-- **`test/mocks/MockEIP3009Token.sol`** - a faithful minimal EIP-3009 token standing in for USDC, plus a silent token and a non-token. Why a mock rather than a fork or a deployed token is argued in the file's own header
+- **`test/Rub3TokenPurchase.t.sol`** (41) - the EIP-3009 stablecoin rail of §2.2. The buyer holds stablecoin and a zero ETH balance in every test, and a separate submitter sends every transaction: replay, front-running (diverting the mint, stripping it by calling the token directly, and calling `receiveWithAuthorization` as a third party), authorizations aimed at the wrong contract / wrong intent / wrong token id, the validity window and cancellation, a price move after signing, the balance-delta check, the constructor probes, both rails minting identically, subscription renewal terms frozen on both rails, an EIP-1271 smart-contract wallet buying and renewing (and a signature it rejects buying nothing), and a token implementing only EIP-3009's `(v, r, s)` form deploying happily and then being unspendable
+- **`test/mocks/MockEIP3009Token.sol`** - a faithful minimal EIP-3009 token standing in for USDC, validating signatures through OpenZeppelin's `SignatureChecker` exactly as Circle's FiatTokenV2_2 does, plus a silent token, a non-token, a token with no `DOMAIN_SEPARATOR()`, a token with only the split-signature form, and a `SmartWallet` EIP-1271 buyer. Why a mock rather than a fork or a deployed token is argued in the file's own header
 
 ### Test helpers (`tests/helpers/mod.rs`)
 

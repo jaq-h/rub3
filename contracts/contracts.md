@@ -149,7 +149,7 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | `TOKEN_SYMBOL` | yes | ERC-721 symbol (e.g. `MAL`) |
 | `IDENTITY_MODEL` | yes | `0` = wallet is user_id; `1` = TBA is user_id |
 | `PRICE` | yes | Purchase price in wei (the ETH rail) |
-| `PRICE_TOKEN` | no | ERC-20 accepted alongside ETH, e.g. USDC. Must implement EIP-3009 - the constructor probes it and reverts with `IncompatiblePriceToken` if it does not. `0x0` (default) = ETH only |
+| `PRICE_TOKEN` | no | ERC-20 accepted alongside ETH, e.g. USDC. Must implement EIP-3009 **including the Circle FiatTokenV2_2-style `receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)` overload that takes an opaque `bytes signature`**. A token implementing only EIP-3009's `(uint8 v, bytes32 r, bytes32 s)` form is *not* supported: it passes the constructor probe, which reads `authorizationState`, and then reverts for every buyer. See [Which payment tokens work](#which-payment-tokens-work). `0x0` (default) = ETH only |
 | `PRICE_AMOUNT` | no | Purchase price in `PRICE_TOKEN`'s smallest unit (USDC has 6 decimals, so `5000000` = 5 USDC). Must be `0` when `PRICE_TOKEN` is unset, or the deploy reverts with `TokenPriceInconsistent`. An independent quote, never converted from `PRICE` |
 | `WRAPPER_HASHES` | no | Comma-separated `bytes32` SHA-256s of the launch release's wrapper binaries, one per platform. Seeds the append-only hash set; empty is valid |
 | `WRAPPER_HASH` | no | Single-hash shorthand for `WRAPPER_HASHES`. Ignored when `WRAPPER_HASHES` is set; a zero hash means "none" |
@@ -161,7 +161,23 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 
 ## Paying in USDC (EIP-3009)
 
-A contract deployed with `PRICE_TOKEN` sells on two rails at once. `purchase(address)` keeps taking ETH exactly as before; `purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,uint8,bytes32,bytes32))` takes a stablecoin payment the buyer authorised off-chain, and **anyone may submit it** - the developer, a facilitator, or the buyer. That is what makes it gasless for the buyer, and an agent holding only USDC can obtain a licence without ever owning ETH.
+A contract deployed with `PRICE_TOKEN` sells on two rails at once. `purchase(address)` keeps taking ETH exactly as before; `purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,bytes))` takes a stablecoin payment the buyer authorised off-chain, and **anyone may submit it** - the developer, a facilitator, or the buyer. That is what makes it gasless for the buyer, and an agent holding only USDC can obtain a licence without ever owning ETH.
+
+### Which payment tokens work
+
+**The token rail requires a payment token that exposes the Circle FiatTokenV2_2-style `bytes signature` overload of `receiveWithAuthorization`.** A token that implements only the `(uint8 v, bytes32 r, bytes32 s)` form specified by EIP-3009 is **not supported** and cannot be used as `PRICE_TOKEN`, even though it is a conforming EIP-3009 token.
+
+That is a deliberate trade, made to admit smart-contract wallets. The `bytes` form validates through a signature checker: ECDSA recovery for a 65-byte EOA signature, falling through to EIP-1271 `isValidSignature` for a contract signer. Taking it means an ERC-4337 smart account - which is how a growing share of agent wallets hold funds, and agents are who this rail exists for - can buy a licence on the same single entry point an EOA uses. The split `(v, r, s)` form can only ever serve an EOA. Contract code is frozen at deploy, so supporting both later would mean a new deploy behind the successor pattern; narrower token support was judged the better price.
+
+Nothing on-chain can check this for you. The constructor probe reads `authorizationState`, which both forms have, and a staticcall probe for the overload itself cannot tell "no such function" from "bad signature" - both revert. So **verify it before deploying**, against the token address you are about to configure:
+
+```bash
+# Should print the overload. If your token only lists the (v, r, s) form,
+# it cannot be used as PRICE_TOKEN.
+cast interface <PRICE_TOKEN> --chain <CHAIN> | grep receiveWithAuthorization
+```
+
+A misconfiguration is not silent at runtime either, and it costs nobody a licence: the wrapper pre-flights the exact `purchaseWithAuthorization` call as an `eth_call` before broadcasting anything, and a token that reverts there selects the ETH rail with a printed reason naming the likely cause. No gas is spent and no activation is lost.
 
 Read what a contract offers (this is also exactly how the wrapper decides which rail to use - a zero token, or a revert from a contract deployed before §2.2, both mean "ETH only"):
 
@@ -235,21 +251,26 @@ cat > auth.json <<EOF
   }
 }
 EOF
+# `cast wallet sign` already returns the 0x-prefixed 65-byte r || s || v
+# signature the authorization carries. It is passed through whole - the licence
+# contract never splits it, and a smart-contract wallet's EIP-1271 signature
+# goes in the same field.
 SIG=$(cast wallet sign --data --from-file auth.json --private-key $BUYER_KEY)
-R=0x${SIG:2:64}; S=0x${SIG:66:64}; V=$((16#${SIG:130:2}))
 
 # 3. Anyone submits it. `recipient` of 0x0 mints to the buyer who signed - never
 #    to the submitter. The buyer spends no gas and no ETH.
 cast send <CONTRACT_ADDRESS> \
-  "purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,uint8,bytes32,bytes32))" \
+  "purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,bytes))" \
   0x0000000000000000000000000000000000000000 \
-  "(<BUYER>,0,<VALID_BEFORE>,$SALT,$V,$R,$S)" \
+  "(<BUYER>,0,<VALID_BEFORE>,$SALT,$SIG)" \
   --rpc-url $RPC --private-key $SUBMITTER_KEY
 ```
 
 Renewing a subscription is the same shape against `renewAuthorizationNonce(uint256,bytes32)` and `renewWithAuthorization(uint256,(...))`, charging that token's frozen `renewPriceAmount` of its frozen `renewPriceToken` - never the current listing.
 
 ### Why `receiveWithAuthorization`
+
+`signature` is opaque bytes rather than split `(v, r, s)`, which is what lets an EIP-1271 smart-contract wallet buy on the same entry point as an EOA - see [Which payment tokens work](#which-payment-tokens-work) for what that costs.
 
 EIP-3009 defines two ways to spend the same six signed fields. `transferWithAuthorization` may be submitted by anyone *to the token*, which would let an observer move a buyer's USDC into the licence contract without the mint, burning the nonce and leaving the buyer paid-up with nothing. `receiveWithAuthorization` requires `msg.sender == to`, so the licence contract is the only address that can spend the authorization at all, and spending it always mints. Everything else that could be redirected is pinned the same way: the recipient (and, for renewals, the token id) is bound into the derived nonce, replay is the token's single-use nonce, and the licence contract additionally checks that its balance really rose by the price before minting.
 

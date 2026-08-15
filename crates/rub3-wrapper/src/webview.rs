@@ -463,7 +463,7 @@ impl IpcState {
             return;
         }
 
-        let price = match crate::rpc::token_price(&self.rpc_url, contract_addr) {
+        let price = match crate::rpc::eth_price(&self.rpc_url, contract_addr) {
             Ok(p) => p,
             Err(e) => {
                 self.eval_err(&format!("price read failed: {e}"));

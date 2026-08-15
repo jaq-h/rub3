@@ -14,6 +14,18 @@ import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/Reentrancy
 /// Only {receiveWithAuthorization} is used, never `transferWithAuthorization`,
 /// and that choice is the whole front-running defence - see
 /// {Rub3License-_payWithAuthorization}.
+///
+/// **The `bytes signature` overload, not the `(v, r, s)` one.** This is a
+/// deliberate narrowing of which payment tokens work. EIP-3009 as written
+/// specifies the split form, and a token that implements only that form cannot
+/// be used as a `priceToken` here at all. Circle's FiatTokenV2_2 also exposes
+/// the `bytes` form, which validates through a signature checker: ECDSA
+/// recovery for a 65-byte signature, falling through to EIP-1271
+/// `isValidSignature` for a contract signer. Taking that form is what lets an
+/// ERC-4337 smart account buy a licence, and agent wallets are increasingly
+/// smart accounts - the buyers this rail exists for. Since the `bytes` form
+/// already accepts a 65-byte EOA signature unchanged, one entry point serves
+/// both kinds of buyer and there is no second payment path to drift.
 interface IERC3009 {
     function receiveWithAuthorization(
         address from,
@@ -22,9 +34,7 @@ interface IERC3009 {
         uint256 validAfter,
         uint256 validBefore,
         bytes32 nonce,
-        uint8   v,
-        bytes32 r,
-        bytes32 s
+        bytes calldata signature
     ) external;
 
     /// True once an authorization has been used or cancelled. Read by the
@@ -115,14 +125,19 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///         submitter who alters any of them produces a digest the token
     ///         refuses. `salt` is the buyer's own randomness, the only free
     ///         input to the nonce.
+    ///
+    ///         `signature` is opaque bytes rather than split `(v, r, s)` so the
+    ///         payment token decides what a valid signature is: 65 bytes of
+    ///         `r || s || v` from an EOA, or an EIP-1271 signature from a
+    ///         smart-contract wallet. This contract never inspects it, never
+    ///         branches on its length, and never recovers a signer from it -
+    ///         see {IERC3009}.
     struct PaymentAuthorization {
         address from;
         uint256 validAfter;
         uint256 validBefore;
         bytes32 salt;
-        uint8   v;
-        bytes32 r;
-        bytes32 s;
+        bytes   signature;
     }
 
     /// @notice 0 = access (user_id = wallet), 1 = account (user_id = TBA).
@@ -679,9 +694,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
             auth.validAfter,
             auth.validBefore,
             nonce,
-            auth.v,
-            auth.r,
-            auth.s
+            auth.signature
         );
 
         uint256 received = erc20.balanceOf(address(this)) - balanceBefore;
@@ -696,6 +709,16 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///      tries to pay. `authorizationState` is the probe: a view every
     ///      EIP-3009 token answers, for any argument, with no token minted and
     ///      no state touched.
+    ///
+    ///      It deliberately does **not** probe for the `bytes signature`
+    ///      overload of `receiveWithAuthorization` that {_payWithAuthorization}
+    ///      calls, and nothing here should be changed to try. A staticcall
+    ///      probe cannot tell "no such function" from "bad signature": both
+    ///      revert, so the probe would either reject conforming tokens or
+    ///      accept non-conforming ones, and being wrong in either direction at
+    ///      deploy time is frozen forever. Detecting a missing overload belongs
+    ///      off-chain, where the wrapper pre-flights the real call before
+    ///      broadcasting and falls back to the ETH rail if it fails.
     ///
     ///      An amount without a token is a misconfiguration in the other
     ///      direction - it reads as "5 USDC of nothing" - and is rejected too. A

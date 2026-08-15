@@ -718,7 +718,7 @@ contract Rub3InvariantsTest is Test {
                 address(nft),
                 bytes4(
                     keccak256(
-                        "purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,uint8,bytes32,bytes32))"
+                        "purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,bytes))"
                     )
                 )
             )

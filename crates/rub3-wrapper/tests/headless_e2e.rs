@@ -228,6 +228,21 @@ fn deploy_mock_without_domain_separator() -> String {
     )
 }
 
+/// Deploys a spec-conformant EIP-3009 token that implements only the
+/// `(uint8 v, bytes32 r, bytes32 s)` form of `receiveWithAuthorization`.
+///
+/// The licence contracts call the `bytes signature` overload, the FiatTokenV2_2
+/// form that also admits EIP-1271 smart-wallet signatures, so a token like this
+/// deploys onto a licence contract happily - the constructor probe only reads
+/// `authorizationState` - and then reverts for every buyer. It is the fixture
+/// for the wrapper's pre-flight, which is where that is caught.
+fn deploy_mock_without_signature_overload() -> String {
+    forge_create(
+        "test/mocks/MockEIP3009Token.sol:NoSignatureOverloadEIP3009Token",
+        &[],
+    )
+}
+
 fn forge_create(target: &str, constructor_args: &[&str]) -> String {
     let url = rpc_url();
     let mut args = vec![
@@ -1021,8 +1036,8 @@ fn headless_refuses_a_price_above_the_spend_ceiling_e2e() {
     fund(agent.address(), FUNDING_ETH);
     mint_usdc(&usdc, agent.address(), USDC_FUNDING);
     // One unit under the listed price: the rail is otherwise fully usable -
-    // advertised, affordable, and the token's domain is readable - so the
-    // ceiling is the only thing that can stop it.
+    // advertised, affordable, the token's domain is readable, and the purchase
+    // pre-flights clean - so the ceiling is the only thing that can stop it.
     let ceiling = USDC_PRICE.parse::<u128>().unwrap() - 1;
     set_spend_ceiling(&ceiling.to_string());
 
@@ -1181,6 +1196,68 @@ fn headless_falls_back_to_eth_when_the_token_has_no_domain_separator_e2e() {
         usdc_balance(&token, contract_addr),
         0,
         "nothing paid in a token no authorization could be built for",
+    );
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address()
+    );
+    session::verify_onchain(&session, &rpc_url()).expect("session must verify on-chain");
+}
+
+/// A payment token that answers every read but cannot actually be paid with
+/// selects ETH, without spending a wei of gas finding out.
+///
+/// `NoSignatureOverloadEIP3009Token` implements EIP-3009 exactly as written -
+/// the `(v, r, s)` form - so it is conforming, it holds real balances, and the
+/// licence contract's constructor probe accepts it. What it lacks is the
+/// `bytes signature` overload the licence contract calls. Nothing the wrapper
+/// can read off either contract says so, which is why the rail decision
+/// pre-flights the real `purchaseWithAuthorization` call: the agent buys in ETH
+/// and the run completes, rather than broadcasting a transaction that could
+/// only revert.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_falls_back_to_eth_when_the_token_lacks_the_signature_overload_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let token = deploy_mock_without_signature_overload();
+    let contract = deploy_access_with_rail(PRICE_WEI, &token, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    // Advertised, affordable, signable, and within policy: the only thing that
+    // can select ETH is the token refusing the call itself.
+    mint_usdc(&token, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    let (session, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a token missing the overload must not end the activation");
+
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { paid, .. } => assert_eq!(
+            paid,
+            &PaymentRail::Eth {
+                price_wei: PRICE_WEI.to_string()
+            },
+            "a token that cannot be paid with must select ETH",
+        ),
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    assert_eq!(
+        usdc_balance(&token, contract_addr),
+        0,
+        "nothing paid in a token that cannot take the payment",
+    );
+    assert_eq!(
+        usdc_balance(&token, agent.address()),
+        USDC_FUNDING.parse::<u128>().unwrap(),
+        "and the agent still holds every unit of it",
     );
     assert_eq!(
         rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
