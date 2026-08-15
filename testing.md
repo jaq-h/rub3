@@ -26,7 +26,7 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
 ```
 
-For reference, `--lib` counts per bundle: `tier-0` 44, `tier-1`/`tier-2` 75,
+For reference, `--lib` counts per bundle: `tier-0` 45, `tier-1`/`tier-2` 75,
 `tier-3`/`tier-4` 85, `tier-3,headless` 136. Each total includes the one
 `#[ignore]`d network test, which a plain run skips, so a bundle reports one
 fewer as passed.

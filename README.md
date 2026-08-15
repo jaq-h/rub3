@@ -61,7 +61,10 @@ rub3/
 │   ├── test/
 │   │   ├── Rub3Access.t.sol
 │   │   ├── Rub3Subscription.t.sol
-│   │   └── Rub3Invariants.t.sol      # Ownership invariants (§2.4) + no-revocation bytecode audit
+│   │   ├── Rub3Invariants.t.sol      # Ownership invariants (§2.4) + no-revocation bytecode audit
+│   │   ├── Rub3TokenPurchase.t.sol   # Stablecoin rail (§2.2): EIP-3009 authorization, replay, front-running
+│   │   └── mocks/
+│   │       └── MockEIP3009Token.sol  # Faithful EIP-3009 stand-in for USDC, plus its negative fixtures
 │   ├── script/
 │   │   └── Deploy.s.sol              # Deploy either contract to any EVM chain
 │   ├── foundry.toml
@@ -252,8 +255,9 @@ existed.
 For KMS, HSM, or enclave-backed keys, implement the `Signer` trait and pass it
 to `activation::ensure_headless` directly. Its only primitive is "sign this
 32-byte digest", so no key material ever enters the wrapper's process. Exactly
-one type in the crate - `signer::LocalSigner` - holds a raw key at all, and no
-`RUB3_AGENT_*` variable survives into the wrapped binary's environment.
+one type in the crate - `signer::LocalSigner` - holds a raw key at all, and none
+of the `RUB3_AGENT_*` credential variables listed above survives into the
+wrapped binary's environment.
 
 ### Exit codes
 
@@ -334,7 +338,7 @@ See [implementation.md](implementation.md) for the full roadmap.
 - Purchase UI: in-wrapper purchase flow for tier 3+ (price/supply reads, calldata encoding, receipt polling, minted-token recovery)
 - Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 131 forge tests
 - Ownership invariants (§2.4): append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor` and the `honorsContract` trust rule, per-token `renewPrice` snapshot, and a no-revocation bytecode audit
-- **USDC purchases via EIP-3009 (§2.2):** `purchaseWithAuthorization` / `renewWithAuthorization` alongside the ETH path, taking a payment authorization the buyer signs off-chain that anyone may submit - so an agent holding only stablecoins can obtain a licence without ever owning ETH. Uses `receiveWithAuthorization` (payee-only) so the authorization cannot be spent outside the licence contract, and binds the mint recipient into the derived nonce so a submitter cannot redirect it. Both rails reach one mint; subscriptions freeze both per token. The authorization carries an opaque `bytes signature`, so an EIP-1271 smart-contract wallet buys on the same entry point as an EOA - which requires a payment token exposing Circle's FiatTokenV2_2-style `bytes` overload of `receiveWithAuthorization`; a token implementing only EIP-3009's `(v, r, s)` form is not supported. The wrapper's headless path prefers the stablecoin rail whenever the contract advertises one and the wallet can cover it
+- **USDC purchases via EIP-3009 (§2.2):** `purchaseWithAuthorization` / `renewWithAuthorization` alongside the ETH path, taking a payment authorization the buyer signs off-chain that anyone may submit - so an agent holding only stablecoins can obtain a licence without ever owning ETH. Uses `receiveWithAuthorization` (payee-only) so the authorization cannot be spent outside the licence contract, and binds the mint recipient into the derived nonce so a submitter cannot redirect it. Both rails reach one mint; subscriptions freeze both per token. The authorization carries an opaque `bytes signature`, so an EIP-1271 smart-contract wallet buys on the same entry point as an EOA - which requires a payment token exposing Circle's FiatTokenV2_2-style `bytes` overload of `receiveWithAuthorization`; a token implementing only EIP-3009's `(v, r, s)` form is not supported. The wrapper's headless path prefers the stablecoin rail whenever the contract advertises one, the wallet can cover it, and the operator's `RUB3_AGENT_MAX_TOKEN_AMOUNT` ceiling covers the listed amount - see [Spend policy](#spend-policy)
 - Deploy script: `forge script` deploys either contract to any EVM chain from env vars
 - **Headless activation (the agent front door):** `activation::ensure_headless(signer, ctx)` runs `tokensOfOwner` → purchase if empty → cooldown check → `activate()` → local session signature → `verify_local` → persist, in one call. A `Signer` trait (env key / encrypted keystore / KMS-backed impl) keeps raw key handling in a single auditable type; `webview` and `headless` are independent Cargo features, and a headless build links no GUI dependency at all. `--headless [--token-id N]` with documented exit codes, covered by an anvil-gated E2E
 

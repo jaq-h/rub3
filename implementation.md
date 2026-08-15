@@ -745,7 +745,7 @@ Cut from the active roadmap with rationale; scaffolds are retained.
 | IPC (wrapper ↔ app) | Unix domain sockets / named pipes |
 | Smart contracts | Solidity, OpenZeppelin, Foundry |
 | Target chain | Base (primary). Config-abstracted for other EVM L2s |
-| Machine payments | USDC via EIP-3009 `transferWithAuthorization` |
+| Machine payments | USDC via EIP-3009 `receiveWithAuthorization` (see §2.2 for why not `transferWithAuthorization`) |
 | Distribution | Content-addressed storage (IPFS/Arweave), hash + URI on-chain |
 | Agent surface | `llms.txt`, Markdown docs, docs MCP server |
 | CLI | `clap` crate |
