@@ -1,9 +1,32 @@
 mod helpers;
 
+use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
 
 use k256::ecdsa::SigningKey;
 use rub3_wrapper::license::{self, LicenseProof};
+use rub3_wrapper::store::{self, StoreError};
+
+/// One lock for every test that loads a proof through `RUB3_LICENSE_DIR`.
+///
+/// The variable is process-global and libtest runs these tests on parallel
+/// threads, so without it one test's `remove_var` lands between another's
+/// `set_var` and its read: the reader then resolves the default directory,
+/// finds no proof there, and fails with a `NotFound` that has nothing to do
+/// with what it was asserting. Rare, but real - roughly one run in sixty.
+static LICENSE_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+/// Loads a proof out of `license_dir`, holding the lock across the whole
+/// set -> read -> unset window so no other test can observe the variable
+/// mid-flight.
+fn load_proof_from(license_dir: &Path, app_id: &str) -> Result<LicenseProof, StoreError> {
+    let _guard = LICENSE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("RUB3_LICENSE_DIR", license_dir);
+    let proof = store::load_proof(app_id);
+    std::env::remove_var("RUB3_LICENSE_DIR");
+    proof
+}
 
 const APP_ID: &str = "com.rub3.example";
 const TOKEN_ID: u64 = 1;
@@ -56,9 +79,7 @@ fn static_license_loads_and_verifies() {
         &static_signature(),
     );
 
-    std::env::set_var("RUB3_LICENSE_DIR", &license_dir);
-    let proof = rub3_wrapper::store::load_proof(APP_ID).expect("load failed");
-    std::env::remove_var("RUB3_LICENSE_DIR");
+    let proof = load_proof_from(&license_dir, APP_ID).expect("load failed");
 
     license::verify(&proof).expect("loaded proof should verify");
 }
@@ -117,9 +138,7 @@ fn dynamic_license_round_trips() {
 
     helpers::create_license_json(&license_dir, APP_ID, TOKEN_ID, &address, &signature);
 
-    std::env::set_var("RUB3_LICENSE_DIR", &license_dir);
-    let proof = rub3_wrapper::store::load_proof(APP_ID).expect("load failed");
-    std::env::remove_var("RUB3_LICENSE_DIR");
+    let proof = load_proof_from(&license_dir, APP_ID).expect("load failed");
 
     license::verify(&proof).expect("round-tripped dynamic proof should verify");
 }

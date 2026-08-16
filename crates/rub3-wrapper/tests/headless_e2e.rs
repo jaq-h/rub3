@@ -335,6 +335,23 @@ fn eth_balance(who: Address) -> u128 {
         .expect("cast balance did not return a number")
 }
 
+/// The number of transactions `who` has ever sent, read through `cast`.
+///
+/// The measure of "no transaction was sent": a refusal that has already
+/// broadcast something moves this, whatever else it reports.
+fn tx_count(who: Address) -> u64 {
+    let who_hex = format!("0x{}", hex::encode(who.as_slice()));
+    let output = Command::new("cast")
+        .args(["nonce", &who_hex, "--rpc-url", &rpc_url()])
+        .output()
+        .expect("failed to run cast nonce");
+    assert!(output.status.success(), "cast nonce failed");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("cast nonce did not return a number")
+}
+
 /// Reads an ERC-20 balance through `cast`, independently of the wrapper's own
 /// RPC helpers - so the assertions do not trust the code under test.
 fn usdc_balance(token: &str, who: Address) -> u128 {
@@ -821,6 +838,69 @@ fn headless_sold_out_e2e() {
     }
     assert_eq!(err.exit_code(), 12);
     assert!(err.machine_detail().unwrap().contains("supply_cap=1"));
+}
+
+// ── Pre-purchase code attestation ─────────────────────────────────────────────
+
+/// A contract whose deployed code is not the rub3 template is refused before
+/// anything is signed, and no transaction leaves the wrapper.
+///
+/// The fixture is a real, working, fully deployed contract that simply is not a
+/// rub3 licence - which is the shape of the actual threat. A modified copy of
+/// the templates would present the same way: it answers the reads, it looks
+/// like a licence contract, and its masked code hash is in no pinned table.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_refuses_a_contract_whose_code_is_not_canonical_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    // Real deployed code that is not a rub3 licence contract.
+    let impostor = deploy_mock_usdc();
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    let nonce_before = tx_count(agent.address());
+    let balance_before = eth_balance(agent.address());
+
+    let err = ensure_headless(agent.signer.as_ref(), &ctx(&impostor, None))
+        .expect_err("code that matches no canonical fingerprint must not be bought from");
+
+    match &err {
+        HeadlessError::NotCanonicalContract { contract, .. } => {
+            assert_eq!(
+                contract.to_lowercase(),
+                impostor.to_lowercase(),
+                "the refusal must name the address it refused"
+            );
+        }
+        other => panic!("expected NotCanonicalContract, got {other:?}"),
+    }
+    assert_eq!(err.exit_code(), 23);
+
+    let detail = err
+        .machine_detail()
+        .expect("a refusal carries a detail line");
+    assert!(
+        detail.contains("code_bytes="),
+        "the detail line must say how much code was there: {detail}"
+    );
+
+    // The whole point: the gate runs before the first signature, so nothing was
+    // broadcast and no gas was burned.
+    assert_eq!(
+        tx_count(agent.address()),
+        nonce_before,
+        "a refusal must not send a transaction"
+    );
+    assert_eq!(
+        eth_balance(agent.address()),
+        balance_before,
+        "a refusal must not spend gas"
+    );
 }
 
 /// Re-activating inside the cooldown window must report the remaining blocks so

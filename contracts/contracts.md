@@ -565,7 +565,7 @@ Measured on this branch, `Rub3Access` declares seven immutables inherited from `
 
 Zeroing an immutable range destroys the constructor argument it held, which is the point: the fingerprint answers "is this the code I expect", not "was this deployed with the terms I expect". Read the terms separately from the contract's own getters (`supplyCap()`, `period()`, `predecessor()`, and the rest), which is where they are authoritative anyway.
 
-Nothing in this repository performs that comparison today. This section, and the ranges in the manifest, exist so that the follow-on work implementing it has an unambiguous contract to implement against.
+The wrapper performs exactly this comparison before it buys: `crates/rub3-wrapper/src/attest.rs` pins these fingerprints and ranges in the binary and refuses to purchase on a miss. The manual form of the same three steps is under "Auditing the invariants before buying" below; [../implementation.md](../implementation.md) §2.6 records what is built.
 
 ### The reproducibility contract
 
@@ -645,7 +645,35 @@ The manifest keys contracts by name, so a name declared in two different files u
 
 An agent can verify the ownership guarantees against the deployed bytecode rather than trusting the source. `test/Rub3Invariants.t.sol` runs exactly this audit; the full property-by-property breakdown, including which properties are convention rather than bytecode, is in [../architecture.md](../architecture.md#ownership-invariants-all-license-contracts).
 
-The check: fetch the runtime code and confirm the revocation selectors are absent.
+There are two checks here and they are not equals. **The fingerprint comparison is the one that decides anything**; the selector scan below it is a diagnostic that makes a refusal legible. Run them in that order.
+
+### The check that decides: compare the masked code hash
+
+Fetch the runtime code, zero the immutable ranges published for the contract, hash, and compare against the canonical fingerprint - the three steps spelled out under "Read this first" above. A match says the deployed code is the template built from this repository, byte for byte in every position that can execute. It is indifferent to how the contract is named, how large it grows, and what a modified copy chose to call its extra function.
+
+```bash
+cast code <CONTRACT_ADDRESS> --rpc-url $RPC > /tmp/code.hex
+python3 - Rub3Access /tmp/code.hex <<'EOF'
+import hashlib, json, sys
+name, path = sys.argv[1], sys.argv[2]
+code = bytearray.fromhex(open(path).read().strip().removeprefix("0x"))
+record = json.load(open("canonical-bytecode.json"))["contracts"][name]
+for r in record["immutable_ranges"]:
+    code[r["start"] : r["start"] + r["length"]] = bytes(r["length"])
+match = hashlib.sha256(code).hexdigest() == record["deployed_bytecode_sha256"]
+print("MATCH" if match else "MISMATCH")
+EOF
+```
+
+The wrapper does this itself before it spends anything: `crates/rub3-wrapper/src/attest.rs` pins the same fingerprints and ranges in the binary, `headless::purchase` refuses on a miss with exit code 23, and a unit test fails if the pinned table and this manifest drift apart. See [../implementation.md](../implementation.md) §2.6.
+
+What a match does **not** say is worth as much as what it does. Zeroing the immutable ranges destroys the constructor arguments they held, so a match is silent about `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` and the fee terms; read those from the contract's own getters and check them against your own policy. It says nothing about how a canonical contract's owner will use the powers the invariants deliberately preserve (`setPrice`, `setSuccessor`, `revokeWrapperHash`, `withdraw`). And it rests entirely on the RPC endpoint answering `eth_getCode` honestly: the claim it supports is "an honest view of chain state implies canonical code", and no stronger one. A mismatch is likewise not an accusation - a contract deployed from a later release of these templates than the comparator knows about looks exactly the same way.
+
+The check cannot be defeated by swapping code at the address after it is read. `evm_version = "cancun"`, and under EIP-6780 `SELFDESTRUCT` only deletes an account created in the same transaction, so there is no window between the read and the purchase and no metamorphic-contract attack. Pre-Cancun this would not have held.
+
+### The diagnostic: scan for known revocation selectors
+
+Fetch the runtime code and confirm the revocation selectors are absent. This is nearly free and it is worth running, but read the paragraph after it before drawing any conclusion from silence.
 
 ```bash
 CODE=$(cast code <CONTRACT_ADDRESS> --rpc-url $RPC)
@@ -668,9 +696,11 @@ for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
 done
 ```
 
-Silence means exactly one thing: none of those 30 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical fingerprint of the template built from this repo, after zeroing the immutable ranges published for it. Those fingerprints and ranges are now pinned - see "Reproducible builds and canonical fingerprints" above - but nothing in this repository performs the comparison yet.
+Silence means exactly one thing: none of those 30 known revocation selectors appears in the deployed runtime bytecode. **It is not evidence that no revocation surface exists**, and it should never be reported as though it were. The list is a blacklist of *names*, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, or something as dull as `reconcileLedger(uint256,address)` - and pass this scan in silence. The scan also weakens with every legitimate function the contracts gain, because one more plausible-looking owner function is far less conspicuous among fifteen than among six.
 
-Sanity-check the method itself against a selector that *is* there - `cast sig "activate(uint256)"` should be found.
+Its real job is the failure message. When the fingerprint comparison rejects a contract, this scan is what turns "unrecognised code" into "the contract exposes `seize(uint256)`" - a finding a human can act on. That is the whole of its value, and the wrapper keeps it for exactly that reason and labels it a diagnostic in the code.
+
+Sanity-check the method itself against a selector that *is* there - `cast sig "activate(uint256)"` should be found. The same list is written out in five places, so if you change it, sweep them all: the `string[N]` array in `test/Rub3Invariants.t.sol`, the loop above, the bytecode table in [../architecture.md](../architecture.md), `attest::FORBIDDEN_SIGNATURES` in the wrapper, and the counts stated in [../implementation.md](../implementation.md) §2.4.
 
 ## Planned contract evolution
 

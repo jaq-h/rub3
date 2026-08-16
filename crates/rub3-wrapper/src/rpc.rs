@@ -546,6 +546,24 @@ pub fn chain_id(rpc_url: &str) -> Result<u64, RpcError> {
     })
 }
 
+/// Returns the runtime code deployed at `contract`.
+///
+/// One `eth_getCode`. The pre-purchase attestation in [`crate::attest`] runs
+/// entirely on the bytes this returns, so a whole verification costs a single
+/// round trip. An address holding no contract returns an empty vector rather
+/// than an error: "nothing is deployed here" is an answer, and the caller is
+/// the one that decides what it means.
+pub fn get_code(rpc_url: &str, contract: Address) -> Result<Vec<u8>, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let code = provider
+            .get_code_at(contract)
+            .await
+            .map_err(|e| RpcError::Transport(e.to_string()))?;
+        Ok(code.to_vec())
+    })
+}
+
 /// Returns the current block number on the target chain.
 pub fn get_block_number(rpc_url: &str) -> Result<u64, RpcError> {
     block_on(async move {
@@ -981,6 +999,15 @@ mod tests {
     #[test]
     fn chain_id_invalid_url_returns_transport_error() {
         let err = chain_id("not-a-url").unwrap_err();
+        assert!(matches!(err, RpcError::Transport(_)));
+    }
+
+    /// A code read that cannot even reach a node is a transport failure, not an
+    /// empty answer. The distinction is what lets the pre-purchase gate fail
+    /// closed on the first and refuse the address on the second.
+    #[test]
+    fn get_code_invalid_url_returns_transport_error() {
+        let err = get_code("not-a-url", Address::ZERO).unwrap_err();
         assert!(matches!(err, RpcError::Transport(_)));
     }
 

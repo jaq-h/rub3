@@ -42,7 +42,8 @@ rub3/
 │       │   ├── agent_env.rs          # Names of the `RUB3_AGENT_*` credential vars: read by `signer`, stripped by `supervisor`
 │       │   ├── signer.rs             # `Signer` trait + `LocalSigner` - the only holder of raw key material (feature `headless`)
 │       │   ├── tx.rs                 # EIP-1559 build / sign / broadcast for headless (feature `headless`)
-│       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner, chainId) via alloy
+│       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner, chainId, getCode) via alloy
+│       │   ├── attest.rs             # Pre-purchase contract attestation: masked code hash vs the pinned canonical table (feature `onchain-read`, tier 2+)
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC message handling (feature `webview`)
 │       │   ├── supervisor.rs         # Child process lifecycle, SIGTERM forwarding, `RUB3_AGENT_*` stripped from the child
 │       │   ├── session.rs            # Session schema, message hash, verify_local, is_expired
@@ -202,9 +203,10 @@ RUB3_LICENSE_DIR=/tmp/rub3-test cargo run -p rub3-wrapper -- --binary /path/to/y
 ## Headless activation (agents)
 
 `--headless` runs the whole activation pipeline with no window and no human:
-enumerate the signer's tokens, purchase one if it holds none, check the
-cooldown, send `activate()`, sign the session message locally, verify it, and
-persist it - then launch the wrapped binary.
+enumerate the signer's tokens, purchase one if it holds none (verifying the
+contract's code first - see [Contract code check](#contract-code-check)), check
+the cooldown, send `activate()`, sign the session message locally, verify it,
+and persist it - then launch the wrapped binary.
 
 ```bash
 RUB3_AGENT_KEY=0x<64 hex chars>   rub3-wrapper --headless --binary /path/to/your/app
@@ -253,6 +255,48 @@ stripped from the wrapped binary's environment. There is no default: until it is
 set the stablecoin rail is unavailable rather than unlimited, and the wrapper
 falls back to ETH and prints why. A malformed value is a hard error.
 
+### Contract code check
+
+Before it buys, the wrapper asks whether the contract is the code it thinks it
+is. It reads the deployed runtime code once, zeroes the immutable byte ranges,
+hashes the result, and compares that against a table of canonical fingerprints
+compiled into the binary. A match costs no extra network round trip and is the
+common case; a miss refuses the purchase with exit code 23, before anything is
+signed and with no transaction sent.
+
+Masking the immutables is what makes the comparison work at all: they hold the
+constructor's arguments, so two legitimate deploys of identical code that chose
+a different `supplyCap` return different bytes. Every masked range is a `PUSH32`
+immediate and no control flow can reach one as an instruction, so a match is a
+complete statement about the contract's **executable code**.
+
+It is not a complete statement about anything else, and the wrapper does not
+claim to be one:
+
+- It says nothing about the masked values themselves. Canonical code pointed at
+  a hostile ERC-6551 implementation matches. Read `identityModel()`,
+  `tbaImplementation()`, `supplyCap()`, `cooldownBlocks()`, `predecessor()`,
+  `feeBps()` and `treasury()` and check them against your own policy.
+- It says nothing about how a contract owner will use the powers the invariants
+  deliberately keep (`setPrice`, `setSuccessor`, `revokeWrapperHash`,
+  `withdraw`).
+- It rests on the RPC endpoint answering honestly. The claim it supports is "an
+  honest view of chain state implies canonical code", and no stronger one.
+- A miss is not an accusation. A contract deployed from a newer release of the
+  templates than this build was packed with looks the same way.
+
+**It gates purchases, never launches.** A launch is a program you have already
+paid for; refusing to start it because a check could not complete would be a
+revocation surface, which this project has ruled out. The two are different code
+paths with different defaults, and nothing on the launch path consults the
+check.
+
+Fingerprints and immutable ranges are published in
+`contracts/canonical-bytecode.json`, a blocking CI job keeps them honest against
+the contracts, and a unit test keeps the wrapper's pinned table honest against
+them. `contracts/contracts.md` -> "Auditing the invariants before buying" has
+the manual form of the same comparison.
+
 ### Exit codes
 
 Stable and machine-readable, so an orchestrator branches on the code instead of
@@ -281,6 +325,7 @@ activation failure.
 | 20 | `--token-id` names a token this signer does not hold | Fix the id, or drop the flag to purchase |
 | 21 | Purchase broadcast but not confirmed - timed out, or the receipt query kept failing | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
 | 22 | The listed price is above the configured spend ceiling. The ceiling is weighed before anything is signed, so the rail was not exercised and this is no evidence it is otherwise usable | Terminal - raise `RUB3_AGENT_MAX_TOKEN_AMOUNT` if the price is acceptable, or do not buy |
+| 23 | The contract's deployed code is not canonical rub3 code. Checked before anything is signed, so no transaction was sent and nothing was spent | Terminal - the same address holds the same code. Verify the address, or use a build packed with the release that contract came from |
 
 Failures with structured parameters also print one parseable line, carrying only
 parameters the wrapper actually measured:
@@ -318,6 +363,7 @@ the authority on what each covers, what it cost, and what comes next.
 - **`Rub3Factory` + protocol fee (§2.3)** - immutable fee terms stamped into every canonical deploy and recorded in `isDeployed`; direct deploys stay fee-free and unrecorded. The registry and marketplace the row is for are not built, and the factory and the registry launch together: nothing reaches mainnet or is declared ready before then
 - **Ownership invariants (§2.4)** - append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor`, the contract-side `honorsContract` trust rule, per-token renewal snapshots, and a no-revocation bytecode audit over four deployed contracts
 - **Reproducible builds** - canonical bytecode fingerprints for five contracts, gated in CI
+- **Pre-purchase contract attestation (§2.6)** - before an agent spends, the wrapper compares the contract's masked code hash against fingerprints pinned in the binary and refuses on a miss (exit 23), catching a modified copy that a selector-name scan passes in silence. It gates purchases only, never launches
 - **Deploy scripts** - `forge script` deploys either licence contract to any EVM chain from env vars, directly or through a factory; `DeployFactory.s.sol` deploys the factory itself
 
 **Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.

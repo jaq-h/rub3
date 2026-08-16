@@ -151,8 +151,17 @@ jobs:
   # with its constructor's values, so a comparator MUST first zero every range
   # published as `immutable_ranges` in contracts/canonical-bytecode.json before
   # hashing; without that step the comparison fails on every real deploy. This
-  # job publishes and pins those ranges. It implements no comparison, and neither
-  # does the wrapper yet - see contracts/contracts.md -> "Read this first".
+  # job publishes and pins those ranges; it implements no comparison itself - see
+  # contracts/contracts.md -> "Read this first".
+  #
+  # The wrapper does perform that comparison before it buys (implementation.md
+  # §2.6), against a copy of these fingerprints pinned in
+  # crates/rub3-wrapper/src/attest.rs. Nothing extra is needed here to keep that
+  # copy honest: attest's `pinned_table_mirrors_the_canonical_manifest` reads
+  # this manifest at compile time and fails when the two disagree, and it runs
+  # in every rust matrix job from tier-2 up. A contract change therefore turns
+  # this job red until the manifest is regenerated, and those jobs red until the
+  # table gains the new row - the drift chain runs contracts to binary.
   #
   # contracts/foundry.toml sets bytecode_hash = "none" to make that possible:
   # under solc's default ("ipfs") a comment line or a source path would move
