@@ -786,14 +786,19 @@ pub fn encode_purchase_with_authorization_calldata(
 /// from "bad signature" - both revert. Scanning the token's runtime bytecode
 /// for the overload's selector cannot do it either: USDC sits behind a proxy,
 /// so its own code carries none of its selectors, and the scan would report a
-/// false negative on the very token this rail targets. Executing the exact call
-/// the wrapper is about to send is the one check that answers the question for
+/// false negative on the very token this rail targets. Executing the call the
+/// wrapper is about to send is the one check that answers the question for
 /// whatever is really deployed at that address.
 ///
-/// The calldata is identical to
-/// [`encode_purchase_with_authorization_calldata`] and the sender is the
-/// account that would broadcast it, so success here means the same call would
-/// succeed against the same state. A contract-level failure is a settled answer
+/// The calldata is built by
+/// [`encode_purchase_with_authorization_calldata`], the same encoder that
+/// builds the broadcast one, and the sender is the account that would broadcast
+/// it, so success here means the same call would succeed against the same
+/// state. The authorization passed here carries a shorter `validBefore` than
+/// the one that will be broadcast, and nothing this establishes turns on that
+/// field: the token compares it against `block.timestamp`, both copies are in
+/// date when they execute, and each signature is checked by the same code
+/// path. A contract-level failure is a settled answer
 /// about the token; a transport failure is not, and is propagated.
 pub fn preflight_purchase_with_authorization(
     rpc_url: &str,

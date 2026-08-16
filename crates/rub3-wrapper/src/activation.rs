@@ -1284,12 +1284,23 @@ mod headless {
     /// window, which leaves the rest of the margin for clock error. The chain's
     /// side of the comparison helps rather than hurts: an `eth_call` executes
     /// against the latest block, whose timestamp trails wall-clock time, so
-    /// lag only widens the margin. The one failure this can produce that a
-    /// 900-second window cannot is a machine whose clock is more than half a
-    /// minute *behind* the chain's; the pre-flight then reverts as expired and
-    /// the run buys in ETH, which is the direction every other rail check
-    /// already fails in, with the chain's own "authorization is expired" in the
-    /// printed reason.
+    /// lag only widens the margin.
+    ///
+    /// **Local-clock skew is the residual limit, and it cuts both ways.**
+    /// `validBefore` is [`AuthorizationTerms::signed_at`] plus this constant,
+    /// and `signed_at` is a pure local clock read, so the chain never agrees
+    /// with it exactly. A clock more than half a minute *behind* the chain's
+    /// costs availability: the pre-flight reverts as expired and the run buys
+    /// in ETH, which is the direction every other rail check already fails in,
+    /// and it announces itself with the chain's own "authorization is expired"
+    /// in the printed reason. A clock *ahead* of the chain's by S seconds costs
+    /// security instead, and says nothing: the disclosed copy is live on-chain
+    /// for 30 + S seconds, the pre-flight succeeds, the run looks entirely
+    /// ordinary, and no operator sees the widened window. On an NTP-less
+    /// container or a drifted VM, S is minutes. Deriving `validBefore` from the
+    /// chain's own clock would remove this direction outright and is the
+    /// natural refinement, but it puts a chain read and a new transport-failure
+    /// path in front of the purchase; it is not built here.
     pub(super) const PREFLIGHT_AUTHORIZATION_TTL_SECS: u64 = 30;
 
     /// The two windows solve opposite problems, so the relationship between
@@ -1586,8 +1597,9 @@ mod headless {
         // implementing only the split `(v, r, s)` form is conforming, passes
         // the licence contract's constructor probe, and still reverts here. The
         // contract cannot detect that at deploy time, so the wrapper executes
-        // the exact transaction it is about to send and reads the answer before
-        // any gas is spent. It executes the whole purchase, so the revert it
+        // the transaction it is about to send, differing only in `validBefore`,
+        // and reads the answer before any gas is spent. Nothing this proves
+        // turns on that field. It executes the whole purchase, so the revert it
         // reports may be about the licence contract or the buyer rather than
         // the overload: lead with what the chain said.
         //
@@ -1662,8 +1674,10 @@ mod headless {
     ///
     /// The broadcast copy is signed **after** the pre-flight, by
     /// [`PendingAuthorization::broadcastable`], and only when the pre-flight
-    /// passed. Nothing worth
-    /// stealing is created on the path that ends in an ETH purchase.
+    /// passed, so no *long-lived* authorization is ever created on the path
+    /// that ends in an ETH purchase. The short-lived copy is created there, and
+    /// it is a fully valid payment instrument until it expires; bounding that
+    /// window is what the split is for, not eliminating the instrument.
     ///
     /// A failure reading the nonce stays a hard error, including a
     /// contract-level one: `purchaseAuthorizationNonce` lives on the licence
