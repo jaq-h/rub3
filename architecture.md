@@ -211,38 +211,9 @@ Adds on-chain activation with a cooldown and session revocation counter. At acti
 - **Verification**: Signature + expiry + `ownerOf()` + `activeSessionId()` view call. If session_id doesn't match on-chain value, the session has been superseded.
 - **Sharing risk**: Holder can generate 1 session per cooldown window. Creating a session for a pirate kills the holder's own session. The holder must choose: keep access or give it away. Cannot scale to multiple pirates.
 
-### Tier 4: `hardened` *(deferred - see implementation.md §Deferred)*
+### Tier 4: `hardened` *(deferred)*
 
-Adds a device-bound ephemeral keypair. At activation, the wrapper generates a fresh secp256k1 keypair (the "device key"). The public key is registered on-chain alongside the session. At every launch, the wrapper signs the current block hash with its device key and verifies the signature matches the on-chain registered public key.
-
-- **Hash inputs**: `SHA-256(app_id || token_id || wallet || nonce || expires_at || activation_block_hash || session_id || device_pubkey)`
-- **On-chain state**:
-  ```solidity
-  mapping(uint256 => bytes32) public registeredDevice;
-
-  function activate(uint256 tokenId, bytes32 devicePubKey) external returns (uint256 sessionId) {
-      require(ownerOf(tokenId) == msg.sender, "not owner");
-      uint256 last = lastActivationBlock[tokenId];
-      if (last != 0) require(block.number - last >= cooldownBlocks, "cooldown");
-      lastActivationBlock[tokenId] = block.number;
-      activeSessionId[tokenId] = ++_sessionCounter;
-      registeredDevice[tokenId] = devicePubKey;
-      return activeSessionId[tokenId];
-  }
-  ```
-- **Launch verification**:
-  1. Read `registeredDevice(tokenId)` from chain (view call, free)
-  2. Wrapper signs current block hash with local device private key
-  3. Verify signature matches on-chain registered pubkey
-  4. No match → session invalid → re-activate
-- **Device key storage** (developer configurable):
-  | `device_key_storage` | Extractable? | Platform |
-  |---|---|---|
-  | `file` | Yes, with file access | All |
-  | `keychain` | Yes, with OS password | All (via `keyring` crate) |
-  | `enclave` | No - hardware-backed, non-extractable | macOS Secure Enclave, Windows TPM |
-- **Sharing risk**: Session file is useless without the device private key. Device key cannot produce valid signatures on another machine (different hardware). Even with the `file` storage option, the attacker needs both the session file AND the device key file. With `enclave`, extraction is not possible - the key never enters process memory.
-- **No session caching / no TTL**: Every launch requires the device key challenge against the on-chain pubkey. The session is verified live, not cached. There is no `expires_at` to exploit.
+Would bind a session to the machine that created it with an on-chain registered device key, so a copied session file cannot be replayed elsewhere. Not built; see "Deferred designs" below.
 
 ### Tier comparison matrix
 
@@ -369,28 +340,20 @@ Session files are keyed on both app_id and token_id: `~/.rub3/sessions/<app_id>/
 
 ## Transaction Confirmation
 
-Tiers 3-4 require at least one on-chain tx (purchase and/or activate) during the activation flow. In **interactive mode** the wrapper never holds keys and never broadcasts txs itself - it encodes calldata, surfaces it to the user, and waits for the tx to confirm. In **headless mode** (built, implementation.md §2.1) the operator supplies a signer explicitly - env key, keystore, or KMS-backed `Signer` impl - and the wrapper signs and broadcasts directly; there is no confirmation UI because there is no user round-trip. For interactive builds, how the "wait" happens is an orthogonal concern with three implementations, rendered side-by-side as tabs on the purchase and cooldown screens:
+Tiers 3-4 require at least one on-chain tx (purchase and/or activate) during the activation flow. In **interactive mode** the wrapper never holds keys and never broadcasts txs itself - it encodes calldata, surfaces it to the user, and waits for the tx to confirm. In **headless mode** (built, implementation.md §2.1) the operator supplies a signer explicitly - env key, keystore, or KMS-backed `Signer` impl - and the wrapper signs and broadcasts directly; there is no confirmation UI because there is no user round-trip.
 
-| Mode | Reliance | Tolerant of offline activation | JS bundle |
-|---|---|---|---|
-| **Headless** *(built - agent default)* | operator-supplied signer + chain RPC | n/a - no user round-trip | none |
-| **WalletConnect** | Reown relay + chain RPC | no | ~255 KB vendored |
-| **Auto-detect** | Chain RPC (filter `eth_getLogs` / read `lastActivationBlock`) | no | none |
-| **Manual** | User copies a tx hash back into the wrapper | yes (paste later) | none |
+For interactive builds, how the "wait" happens is an orthogonal concern. **Today there is exactly one implementation: Manual.** Both the purchase and the cooldown screens ask the user to copy a tx hash back into the wrapper, and nothing else is offered.
 
-The modes share one downstream path: whichever tab produces a tx hash hands off to the same receipt poller that validates `status == true`, asserts `receipt.to == contract`, and recovers the minted tokenId (purchase) or the `activeSessionId` (activate). The rest of the session pipeline does not care which tab the hash came from.
+| Mode | Status | Reliance | Tolerant of offline activation | JS bundle |
+|---|---|---|---|---|
+| **Manual** | **the only interactive path today** | User copies a tx hash back into the wrapper | yes (paste later) | none |
+| **Auto-detect** | planned, implementation.md §1.10a | Chain RPC (filter `eth_getLogs` / read `lastActivationBlock`) | no | none |
+| **WalletConnect** | planned, implementation.md §1.10b | Reown relay + chain RPC | no | ~255 KB vendored |
+| **Headless** | built, implementation.md §2.1 | operator-supplied signer + chain RPC | n/a - no user round-trip | none |
 
-**Why all three.**
-- **WalletConnect** is the lowest-friction path - the user sees the standard dApp pairing QR in their wallet, approves, and the wrapper receives the tx hash directly. Cost is a vendored JS bundle and a developer-supplied Reown project id per deployment (branding + abuse boundary; not a shared rub3 credential).
-- **Auto-detect** is the fall-back when the developer does not want to adopt WalletConnect. The wrapper watches the chain directly for the expected event (ERC-721 `Transfer` mint or a bumped `lastActivationBlock`) and silently continues when the event appears.
-- **Manual** is the floor - always available, no dependencies, and the one path that still works if the user's machine is offline when they open the wrapper but they want to send the tx from a hardware wallet elsewhere and paste the hash later.
+Manual is the floor and stays available whatever else lands: no dependencies, and the one path that still works when the user's machine is offline as they open the wrapper but they want to send the tx from a hardware wallet elsewhere and paste the hash later.
 
-Which tabs are offered is determined at build + deploy time:
-- WalletConnect tab: requires the `wallet-connect` Cargo feature (opt-in, adds the vendored JS bundle) **and** a non-placeholder `wc_project_id` in the packed wrapper.
-- Auto-detect tab: requires `onchain-write` (always present in tiers 3-4).
-- Manual tab: always on.
-
-The wrapper picks the most capable available tab as the default and lets the user tab over to the others at will. Today both purchase and cooldown screens expose only the Manual path; Auto-detect and WalletConnect are tracked in implementation.md §1.10.
+The design commitment behind the two planned modes is that they are **additive tabs on the same screens, not replacements**. Whichever tab produces a tx hash hands off to the same receipt poller, which validates `status == true`, asserts `receipt.to == contract`, and recovers the minted tokenId (purchase) or the `activeSessionId` (activate). The rest of the session pipeline does not care which tab the hash came from, so adding a mode cannot change what a confirmed activation means. Availability would be decided at build and deploy time: Auto-detect requires `onchain-write` (always present in tiers 3-4); WalletConnect requires the `wallet-connect` Cargo feature and a non-placeholder `wc_project_id` in the packed wrapper, since the Reown project id is developer-supplied per deployment rather than a shared rub3 credential. Both are demoted to Phase 5 (implementation.md §5.1).
 
 ---
 
@@ -644,18 +607,8 @@ rub3-wrapper
 │   ├── Request ECDSA signature over session message
 │   └── Store session, close webview
 │
-├── Device Key Manager (tier 4)
-│   ├── Generate ephemeral secp256k1 keypair at activation
-│   ├── Store private key: file / OS keychain / Secure Enclave (configurable)
-│   ├── Sign block hash challenges at each launch
-│   └── Key never leaves storage - signing happens in-place
-│
-├── Binary Decryption (tiers 3-4, when encrypt_binary = true)
-│   ├── Derive KEK from on-chain state (+ device key at tier 4)
-│   ├── Unwrap AEK, verify hash against on-chain encryptedBinaryKeyHash
-│   ├── Decrypt embedded binary with AES-256-GCM
-│   ├── Execute from memory (memfd_create / tmpdir / CreateFileMapping)
-│   └── Shred plaintext after child maps it
+├── Device Key Manager (tier 4)         - deferred, see "Deferred designs"
+├── Binary Decryption (tiers 3-4)       - deferred, see "Deferred designs"
 │
 ├── ENS Verification
 │   ├── Resolve developer ENS at session creation
@@ -730,77 +683,21 @@ crates/rub3-wrapper/
 
 ---
 
-### 3. rub3 SDK (Rust Crate)
+### 3. rub3 SDK (Rust Crate) *(not started - implementation.md §3.5)*
 
-```rust
-rub3::heartbeat();              // panics if wrapper is not alive
-let info = rub3::session();     // returns SessionInfo
-
-pub struct SessionInfo {
-    pub app_id:    String,
-    pub token_id:  u64,
-    pub user_id:   String,   // wallet (access) or TBA (account) - stable identity key
-    pub wallet:    String,   // current signing wallet, may differ from user_id in account model
-    pub identity:  IdentityModel,
-    pub expires_at: DateTime<Utc>,
-}
-
-pub enum IdentityModel { Access, Account }
-```
-
-The `user_id` field is what application code should use for all persistent data keying. It is always stable for the account model and stable-per-holder for the access model.
+A thin in-process crate the wrapped app links: `rub3::heartbeat()` and `rub3::session()`, talking to the wrapper over the IPC socket. The one design constraint worth stating here is that application code keys persistent data on `SessionInfo::user_id` (the TBA under the account model, the wallet under the access model), never on the current signing wallet, so a transfer or a wallet rotation does not orphan the user's data. The proposed surface is in implementation.md §3.5.
 
 ---
 
-### 4. rub3 CLI
+### 4. rub3 CLI *(not started - implementation.md §2.5)*
 
-```
-rub3 pack \
-  --binary ./target/release/myapp \
-  --app-id com.example.myapp \
-  --contract 0x1234...abcd \
-  --chain base \
-  --tier cooldown \
-  --session-ttl 7 \
-  --cooldown-blocks 1800 \
-  --output ./dist/myapp
-
-rub3 deploy --type access --identity account --price 0.05 --chain base \
-  --cooldown-blocks 1800       # tiers 3-4: blocks between activations
-
-rub3 deploy --type subscription --identity access --price 0.01 --period 30 --chain base
-
-rub3 register --name myapp --contract 0x1234...abcd
-```
-
-`--identity` at deploy time sets the `identityModel` flag in the contract. `--tier` at pack time sets the verification behavior baked into the wrapper binary. `--cooldown-blocks` at deploy time sets the on-chain cooldown period (tiers 3-4).
+`pack`, `deploy`, `fetch`, `register`. The split that matters architecturally: `--tier` is a *pack*-time choice, baked into the wrapper binary, while `--identity` and `--cooldown-blocks` are *deploy*-time choices written into the contract. The two cannot be reconciled afterwards, which is why a repacked wrapper must still match a deployed contract's tier expectations. The proposed command surface is in implementation.md §2.5.
 
 ---
 
-### 5. Tauri Plugin
+### 5. Tauri Plugin *(not started - implementation.md §5.3)*
 
-```rust
-fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_rub3::init())
-        .run(tauri::generate_context!())
-        .expect("error running app");
-}
-```
-
-Frontend JS API:
-```js
-const session = await invoke('plugin:rub3|session');
-// {
-//   token_id:   42,
-//   user_id:    "0xTBA..." | "0xwallet...",
-//   wallet:     "0xwallet...",
-//   identity:   "account" | "access",
-//   expires_at: "2026-04-17T09:00:00Z"
-// }
-```
-
-Token selection and renewal flow render in the Tauri app's own webview.
+`tauri-plugin-rub3` would expose the same `SessionInfo` to a Tauri frontend over `invoke`, and render token selection and renewal in the app's own webview rather than the wrapper's. Proposed surface in implementation.md §5.3.
 
 ---
 
@@ -864,109 +761,9 @@ Planned alongside it: `contentURI` (IPFS/Arweave) recorded on the contract, maki
 
 Trust chain: **ENS → contract → content URI → binary hash → running wrapper**
 
-### Binary encryption (tiers 3-4, optional) *(deferred - see implementation.md §Deferred)*
+### Binary encryption (tiers 3-4, optional) *(deferred)*
 
-Without encryption, the app binary is embedded in the wrapper as plaintext bytes - extractable with `binwalk`, a hex editor, or by reading the wrapper source to find the offset. Binary encryption makes the distributed file useless without a valid on-chain session.
-
-#### How it works
-
-**At pack time (`rub3 pack --encrypt`)**:
-
-1. Generate a random 32-byte **app encryption key** (AEK)
-2. Encrypt the app binary with AES-256-GCM using the AEK
-3. Derive a **key encryption key** (KEK) from on-chain values: `KEK = SHA-256(contract_address || chain_id || salt)`
-4. Encrypt the AEK with the KEK, producing **wrapped-AEK**
-5. Embed in the wrapper: `[encrypted binary] [wrapped-AEK] [salt] [nonce] [auth-tag]`
-6. Store `SHA-256(AEK)` on-chain as `encryptedBinaryKeyHash` for verification
-
-```toml
-[license]
-tier = "cooldown"
-encrypt_binary = true    # default false; requires tier ≥ 3
-```
-
-**At launch (after session verified)**:
-
-```
-Wrapper starts
-    │
-    Verify session (tier 3: cooldown check, tier 4: device challenge)
-    │
-    Read contract_address + chain_id from embedded config
-    │
-    Reconstruct KEK = SHA-256(contract_address || chain_id || salt)
-    │
-    Unwrap AEK using KEK
-    │
-    Verify SHA-256(AEK) matches on-chain encryptedBinaryKeyHash
-    │
-    Decrypt app binary into memory (never written to disk)
-    │
-    Execute from memory:
-      Linux:   memfd_create() → write → fexecve()
-      macOS:   write to tmpdir with restrictive permissions → exec → unlink
-      Windows: CreateFileMapping(INVALID_HANDLE_VALUE) → MapViewOfFile → execute
-    │
-    Shred plaintext from memory after child process maps it
-```
-
-#### Tier 4 enhancement: device-key-derived decryption
-
-At tier 4, the KEK derivation includes the device key, making decryption impossible without the registered device:
-
-```
-KEK = SHA-256(contract_address || chain_id || salt || device_privkey_fingerprint)
-```
-
-The `device_privkey_fingerprint` is derived from the device private key (a hash of the public key). Since the device key lives in Secure Enclave / TPM / keychain, the KEK can only be reconstructed on the device that activated.
-
-At pack time, the AEK is wrapped with a **generic KEK** (without device fingerprint). At first activation, the wrapper re-wraps the AEK with the device-specific KEK and overwrites the wrapped-AEK on disk. Subsequent launches use the device-specific KEK.
-
-#### Contract interface
-
-```solidity
-bytes32 public encryptedBinaryKeyHash;  // SHA-256(AEK), set at deploy
-
-function setEncryptedBinaryKeyHash(bytes32 hash) external onlyOwner {
-    encryptedBinaryKeyHash = hash;
-}
-```
-
-The AEK itself is never stored on-chain - only its hash, used to verify the decrypted key is correct before attempting to decrypt the binary (prevents silent corruption).
-
-#### What this prevents
-
-| Attack | Without encryption | With encryption |
-|---|---|---|
-| Extract binary from distributed file | `binwalk` / hex editor | Encrypted blob, useless without KEK |
-| Extract binary from memory at runtime | Memory dump | Still works - fundamental limit of running code on untrusted hardware |
-| Distribute cracked binary | Extract once, share everywhere | Must have valid session to decrypt; each extraction requires on-chain interaction |
-| Reverse-engineer the wrapper to find the key | Key is in the binary | KEK is derived from on-chain state + device key; not stored in the wrapper |
-
-#### Execution from memory
-
-The decrypted binary is never written to permanent storage. Platform-specific approaches:
-
-| Platform | Method | Notes |
-|---|---|---|
-| Linux | `memfd_create()` + `fexecve()` | Anonymous in-memory file descriptor; invisible to filesystem |
-| macOS | Write to `$TMPDIR` with `0700` permissions, exec, unlink before child starts | macOS doesn't support `fexecve`; the temp file exists briefly |
-| Windows | `CreateFileMapping(INVALID_HANDLE_VALUE)` + section mapping | In-memory execution via PE loader |
-
-After the child process has mapped the binary, the wrapper zeroes and deallocates its copy of the plaintext. The child's own memory mapping remains (necessary for execution) but is protected by normal OS process isolation.
-
-#### CLI
-
-```
-rub3 pack \
-  --binary ./target/release/myapp \
-  --app-id com.example.myapp \
-  --contract 0x1234...abcd \
-  --chain base \
-  --tier cooldown \
-  --encrypt \
-  --output ./dist/myapp
-```
+Would ship the embedded app binary as ciphertext that only a valid on-chain session can unwrap. Not built; see "Deferred designs" below.
 
 ---
 
@@ -1016,7 +813,7 @@ Launch app                      Open webview
                                             │
                                     Cache session
                                             │
-                                    [encrypt_binary?] → Decrypt binary into memory
+                                    [encrypt_binary?] → Decrypt (deferred)
                                             │
                                        Launch app
 ```
@@ -1050,54 +847,14 @@ Launch app                      Open webview
                                                          │
                                                    Cache session
                                                          │
-                                                   [encrypt_binary?]
-                                                   Derive KEK from on-chain state
-                                                   Unwrap AEK, verify hash
-                                                   Decrypt binary into memory
+                                                   [encrypt_binary?] Decrypt (deferred)
                                                          │
                                                     Launch app
 ```
 
 ### Tier 4: hardened (device-bound)
 
-```
-    ... (same as tier 3 through cooldown check) ...
-                                            │
-                                    Cooldown ready
-                                            │
-                                    Generate device keypair
-                                    (Secure Enclave / keychain / file)
-                                            │
-                                    Wallet sends activateDevice(tokenId, devicePubKey) tx
-                                            │
-                                    Wait for tx confirmation
-                                            │
-                                    Wallet signs session message
-                                    (includes block_hash + session_id + device_pubkey)
-                                            │
-                                    Cache session → Launch app
-
-On every subsequent launch:
-    Read cached session
-        │
-    Read registeredDevice(tokenId) from chain
-        │
-    Sign current block hash with local device key
-        │
-    Verify signature matches on-chain pubkey
-        │
-    ┌────┴────┐
-  Match     No match
-    │           │
-    │       Re-activate
-    │
-    [encrypt_binary?]
-    Derive KEK from on-chain state + device key fingerprint
-    Unwrap AEK, verify hash
-    Decrypt binary into memory
-        │
-  Launch app
-```
+Deferred; no launch flow is implemented. See "Deferred designs".
 
 ### Runtime (all tiers)
 
@@ -1157,32 +914,21 @@ Signature covers: `SHA-256(app_id || token_id || wallet || nonce || expires_at [
 
 ### Tier 4 (hardened, device-bound)
 
-```json
-{
-  "app_id":                 "com.example.myapp",
-  "token_id":               42,
-  "identity":               "account",
-  "user_id":                "0xTBA...deterministic",
-  "tba":                    "0xTBA...deterministic",
-  "wallet":                 "0xabc...123",
-  "nonce":                  "a3f8...c921",
-  "issued_at":              "2026-04-10T09:00:00Z",
-  "signature":              "0x...",
-  "chain":                  "base",
-  "contract":               "0x1234...abcd",
-  "activation_tx":          "0x...",
-  "activation_block":       12345678,
-  "activation_block_hash":  "0x...",
-  "session_id":             1,
-  "device_pubkey":          "0x<33-byte compressed secp256k1>"
-}
-```
-
-No `expires_at` - tier 4 sessions do not expire by time. They are valid as long as the device key matches the on-chain `registeredDevice` and the `session_id` matches `activeSessionId`.
-
-Signature covers: `SHA-256(app_id || token_id || wallet || nonce || activation_block_hash || session_id || device_pubkey)`.
+Deferred; no session format is fixed. See "Deferred designs".
 
 Session files stored at `~/.rub3/sessions/<app_id>/<token_id>.json` - one per token, not one per app.
+
+---
+
+## Deferred designs
+
+Two designs below tier 3 are specified only as intent. Both are cut from the active roadmap; the rationale is in `implementation.md` → "Deferred".
+
+**Tier 4 (`hardened`)** would bind a session to one machine. At activation the wrapper would generate an ephemeral secp256k1 device key, register its public key on-chain alongside the session, and sign the current block hash at every launch, so a copied session file is useless without the device key and no TTL is needed. It is deferred because device binding treats fleet cloning as an attack while agent fleets clone VMs as a legitimate pattern; seats (implementation.md §3.4) are the right concurrency primitive.
+
+**Binary encryption** would ship the embedded app binary as AES-256-GCM ciphertext, unwrapped into memory at launch from a key the licence contract releases only to a valid holder. It is deferred because extraction resistance was never a goal, as `ideation.md` → "What This Is Not" states.
+
+The `src/device.rs` and `src/decrypt.rs` scaffolds stay in the tree behind the `device-key` and `binary-encryption` Cargo features, so neither is compiled by any tier bundle on its own.
 
 ---
 
