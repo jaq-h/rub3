@@ -349,8 +349,9 @@ Forgetting `FACTORY` is not an error and does not fail: you get a working, fee-f
 **Which factory is canonical is answered by [`contracts/deployments.json`](deployments.json)**, committed beside `canonical-bytecode.json` and keyed by chain id, one entry per chain carrying the factory address, the block it was deployed in, and its generation in the `previousFactory` chain. That file is the only place the answer is published, so a tool that needs it reads it rather than asking a human, keyed by the chain it is asking about:
 
 ```bash
+# from contracts/
 CHAIN_ID=8453 # 84532 for Base Sepolia
-jq -er --arg id "$CHAIN_ID" ".chains[\$id].factory // error(\"no canonical factory is published for chain \(\$id)\")" contracts/deployments.json
+jq -er --arg id "$CHAIN_ID" ".chains[\$id].factory // error(\"no canonical factory is published for chain \(\$id)\")" deployments.json
 ```
 
 Its own `fields` object documents every key, and `scripts/check-deployments.sh` (run by CI) rejects a malformed or half-filled entry.
@@ -376,7 +377,7 @@ forge script script/DeployFactory.s.sol \
 #    Targeting a live chain, take it from the manifest instead:
 #
 #      CHAIN_ID=8453 # 84532 for Base Sepolia
-#      CANONICAL_FACTORY=$(jq -er --arg id "$CHAIN_ID" ".chains[\$id].factory // error(\"no canonical factory is published for chain \(\$id)\")" deployments.json)
+#      FACTORY_INPUT=$(jq -er --arg id "$CHAIN_ID" ".chains[\$id].factory // error(\"no canonical factory is published for chain \(\$id)\")" deployments.json)
 #
 #    The grep below is not decoration. forge reads a FACTORY it cannot parse as
 #    an address exactly as it reads an unset one, as "no factory", so a stray
@@ -384,16 +385,16 @@ forge script script/DeployFactory.s.sol \
 #    without failing. Anything that is not 40 hex digits stops here instead, and
 #    so does the all-zero address, which forge reads as "no factory" too. To
 #    deploy directly on purpose, drop the FACTORY line entirely.
-CANONICAL_FACTORY=0xYourLocalFactoryFromStep1
+FACTORY_INPUT=0xYourLocalFactoryFromStep1
 
-FACTORY_ADDR=$(printf '%s' "$CANONICAL_FACTORY" | grep -Ex '0x[0-9a-fA-F]{40}' | grep -Ev '^0x0{40}$')
+FACTORY_ADDR=$(printf '%s' "$FACTORY_INPUT" | grep -Ex '0x[0-9a-fA-F]{40}' | grep -Ev '^0x0{40}$')
 
 CONTRACT_TYPE=access \
 TOKEN_NAME="My App License" \
 TOKEN_SYMBOL=MAL \
 IDENTITY_MODEL=0 \
 PRICE=50000000000000000 \
-FACTORY=${FACTORY_ADDR:?CANONICAL_FACTORY is not a usable factory address: paste the one step 1 printed, read it from deployments.json for a live chain, or drop this FACTORY line for a deliberate direct deploy} \
+FACTORY=${FACTORY_ADDR:?FACTORY_INPUT is not a usable factory address: paste the one step 1 printed, read it from deployments.json for a live chain, or drop this FACTORY line for a deliberate direct deploy} \
 forge script script/Deploy.s.sol \
   --rpc-url http://127.0.0.1:8545 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
