@@ -1276,8 +1276,12 @@ mod headless {
     /// separately, over the same nonce (see [`authorize_purchase`]).
     ///
     /// Thirty seconds, because what this has to survive is one JSON-RPC round
-    /// trip on an already-open connection - milliseconds, even against a slow
-    /// public endpoint - plus whatever the local clock is out by. The chain's
+    /// trip on a *cold* connection - `rpc::build_provider` builds a fresh HTTP
+    /// provider per call and each call gets its own runtime, so the pre-flight
+    /// pays DNS, TCP and TLS setup rather than reusing anything - plus whatever
+    /// the local clock is out by. Cold against a remote HTTPS endpoint is tens
+    /// to hundreds of milliseconds, still two orders of magnitude under the
+    /// window, which leaves the rest of the margin for clock error. The chain's
     /// side of the comparison helps rather than hurts: an `eth_call` executes
     /// against the latest block, whose timestamp trails wall-clock time, so
     /// lag only widens the margin. The one failure this can produce that a
