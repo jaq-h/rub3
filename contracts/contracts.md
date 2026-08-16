@@ -160,7 +160,7 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | `COOLDOWN_BLOCKS` | no | Blocks between activations per token (default `1800` ≈ 1 hr on Base; floor `15` ≈ 30 s is enforced on-chain) |
 | `OWNER` | no | Contract owner address; defaults to broadcaster |
 | `PERIOD` | subscription only | Subscription length in seconds |
-| `FACTORY` | no | `Rub3Factory` to deploy through. Set it to the **published canonical address** to stamp the protocol fee and get an `isDeployed` row. It also constrains `PREDECESSOR`, which has to be canonical on this path. Unset or `0x0` (**the default**) deploys directly: fee-free and **unrecorded**, free to name any predecessor, and nothing fails to tell you so. The canonical mainnet address is not yet published. See [The protocol fee](#the-protocol-fee) and [A factory deploy may only succeed a canonical predecessor](#a-factory-deploy-may-only-succeed-a-canonical-predecessor) |
+| `FACTORY` | no | `Rub3Factory` to deploy through. Set it to the **published canonical address** to stamp the protocol fee and get an `isDeployed` row. It also constrains `PREDECESSOR`, which has to be canonical on this path. Unset or `0x0` (**the default**) deploys directly: fee-free and **unrecorded**, free to name any predecessor, and nothing fails to tell you so. The canonical address for a chain is published in [`deployments.json`](deployments.json), and is unpopulated on every chain until launch. See [The protocol fee](#the-protocol-fee) and [A factory deploy may only succeed a canonical predecessor](#a-factory-deploy-may-only-succeed-a-canonical-predecessor) |
 
 `script/DeployFactory.s.sol` deploys the factory itself and takes three variables of its own:
 
@@ -344,7 +344,11 @@ Which path you get is decided by one environment variable, `FACTORY`:
 | the published canonical address | registered | 200-300 bps, immutable | recorded on the canonical factory |
 | some other factory address | that factory's | that factory's, to *its* treasury | recorded only on that factory |
 
-Forgetting `FACTORY` is not an error and does not fail: you get a working, fee-free, unrecorded contract and one line of `console.log` saying so. The canonical mainnet factory address is **not yet published** - publishing it is a separate open decision - so `<CANONICAL_FACTORY_ADDRESS_TBD>` below is a placeholder, not an address to copy. There is no canonical mainnet factory to name yet because the contracts are not deployed to mainnet or declared ready for use until the registry is ready; the factory and the registry launch together.
+Forgetting `FACTORY` is not an error and does not fail: you get a working, fee-free, unrecorded contract and one line of `console.log` saying so.
+
+**Which factory is canonical is answered by [`contracts/deployments.json`](deployments.json)**, committed beside `canonical-bytecode.json` and keyed by chain id, one entry per chain carrying the factory address, the block it was deployed in, and its generation in the `previousFactory` chain. That file is the only place the answer is published, so a tool that needs it reads it rather than asking a human: `jq -r '.chains["8453"].factory' contracts/deployments.json`. Its own `fields` object documents every key, and `scripts/check-deployments.sh` (run by CI) rejects a malformed or half-filled entry.
+
+**Every entry in it is unpopulated today.** Nothing is deployed to a public network: the contracts are not deployed to mainnet or declared ready for use until the registry is ready, and the factory and the registry launch together. Unpopulated is written as `null` in every field, never as a placeholder address, so there is nothing in the file a script could mistake for a deploy - a `null` factory means "this chain has no canonical factory", and the correct response is to stop, not to substitute another address. `$CANONICAL_FACTORY` in the example below is a shell variable you fill in yourself, not an address to copy.
 
 ```bash
 cd contracts
@@ -360,14 +364,19 @@ forge script script/DeployFactory.s.sol \
   --broadcast
 
 # 2. Any number of licence contracts through it. The fee is not an input here:
-#    the factory reads it off itself. FACTORY is the published canonical
-#    address, or a local factory when testing.
+#    the factory reads it off itself. FACTORY is the canonical address for the
+#    target chain, published in deployments.json. The read below is how you get
+#    it; it fails today, because every entry is null until launch, so against
+#    anvil use the address step 1 printed instead. Omitting FACTORY entirely is
+#    a direct, fee-free, unrecorded deploy.
+CANONICAL_FACTORY=$(jq -er '.chains["8453"].factory' deployments.json)
+
 CONTRACT_TYPE=access \
 TOKEN_NAME="My App License" \
 TOKEN_SYMBOL=MAL \
 IDENTITY_MODEL=0 \
 PRICE=50000000000000000 \
-FACTORY=<CANONICAL_FACTORY_ADDRESS_TBD> \
+FACTORY=$CANONICAL_FACTORY \
 forge script script/Deploy.s.sol \
   --rpc-url http://127.0.0.1:8545 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
@@ -465,7 +474,7 @@ Stated plainly, because it is a decided trade-off rather than a gap:
 cast call <CANONICAL_FACTORY> "isDeployed(address)(bool)" <LICENCE> --rpc-url $RPC
 ```
 
-The canonical mainnet factory address is **not yet published**; where it is published is an open decision. Until then there is no address to check against, and "deployed through the factory" has no verifiable referent outside a deployment you performed yourself.
+**Where `<CANONICAL_FACTORY>` comes from is [`contracts/deployments.json`](deployments.json)**, keyed by chain id - the one committed place that answers "which factory is canonical here", so the check above has a referent a verifier can reach without trusting whoever handed them an address. Every entry in it is `null` today, because nothing is deployed to a public network yet, and until one is populated "deployed through the factory" still has no verifiable referent outside a deployment you performed yourself. A `null` entry means there is no canonical factory on that chain; it never means "use any factory you were given".
 
 ### Why the factory deploys through two helper contracts
 

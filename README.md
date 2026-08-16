@@ -79,12 +79,14 @@ rub3/
 │   ├── remappings.txt                # Import remappings pinned in-tree (a reproducibility input)
 │   ├── foundry.lock                  # Pinned dependency revisions, mirrors the submodule gitlinks
 │   ├── canonical-bytecode.json       # Expected sha256 of each contract's deployedBytecode + immutable ranges
+│   ├── deployments.json              # The canonical Rub3Factory per chain id (address, deploy block, generation); unpopulated until launch
 │   ├── .env.example
 │   └── contracts.md                  # Setup guide (Anvil, Base Sepolia) + reproducible builds
 ├── licenses/
 │   └── com.rub3.example.json         # Example license proof with valid signature
 ├── scripts/
 │   ├── canonical-bytecode-hashes.sh  # check/update/print the canonical fingerprints
+│   ├── check-deployments.sh          # Schema gate for contracts/deployments.json (CI runs it)
 │   ├── seed-license.sh               # Generate a signed license proof for local testing
 │   └── test-e2e.sh                   # Convenience script - runs cargo test
 ├── architecture.md                   # System design, session model, security tiers

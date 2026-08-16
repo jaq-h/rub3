@@ -122,6 +122,12 @@ jobs:
   # relative to that directory, so at the repo root it fails to resolve
   # forge-std/Test.sol. OpenZeppelin and forge-std are git submodules, hence
   # submodules: recursive.
+  #
+  # The deployments schema check runs first and needs neither forge nor the
+  # submodules, so a malformed contracts/deployments.json is reported in seconds
+  # rather than after a full contract build. It lives in this job because the
+  # file it guards is the contracts' canonical-factory record; see the script's
+  # header for why its rules are strict.
   # ---------------------------------------------------------------------------
   contracts:
     name: contracts (forge test)
@@ -130,6 +136,9 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
+
+      - name: Check contracts/deployments.json
+        run: scripts/check-deployments.sh
 
       - uses: foundry-rs/foundry-toolchain@v1.9.1
 
