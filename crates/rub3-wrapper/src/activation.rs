@@ -643,10 +643,14 @@ mod headless {
         ///
         /// The caller's obligation is ordering: this is weighed after
         /// `price()` is read and **before** the transaction is sent, so a
-        /// refusal costs no gas. Nothing about the purchase is signed, and the
-        /// listed price is never met and then refused - unlike the stablecoin
-        /// rail, where the thing that must not exist is a signed authorization,
-        /// here it is a broadcast transaction.
+        /// refusal costs no gas and no transaction for this purchase is ever
+        /// broadcast, rather than the listed price being met and then refused.
+        /// That is the whole of what this check guarantees: unlike the
+        /// stablecoin rail, where the thing that must not exist is a signed
+        /// authorization, here it is a broadcast transaction. A run that
+        /// reached this rail by falling back off an advertised stablecoin rail
+        /// may already have signed an authorization before arriving, which is
+        /// that rail's concern and not something this refusal speaks to.
         pub fn check_eth_wei(&self, listed: U256) -> Result<SpendVerdict, HeadlessError> {
             if listed > self.max_eth_wei {
                 return Err(HeadlessError::PriceAbovePolicy {
@@ -898,11 +902,18 @@ mod headless {
                              is otherwise usable"
                         ),
                         // The ETH rail is refused before the transaction is
-                        // sent, so the useful fact is the one about gas.
+                        // sent, so the useful fact is the one about gas. It is
+                        // deliberately not widened into "nothing was sent": a
+                        // run that reached ETH by falling back off an
+                        // advertised stablecoin rail may already have signed
+                        // one authorization on the way.
                         None => write!(
                             f,
-                            " Nothing was sent: the price is weighed before the transaction \
-                             is broadcast, so this cost no gas"
+                            " No transaction was broadcast for this purchase and no gas was \
+                             spent, because the price is weighed before the transaction is \
+                             built. That is not a claim that nothing was signed: if this run \
+                             passed over an advertised stablecoin rail, it may already have \
+                             signed and disclosed an EIP-3009 authorization"
                         ),
                     }
                 }
@@ -1985,7 +1996,8 @@ mod tests {
         );
         assert!(
             rendered.contains("no gas"),
-            "the ETH refusal must say nothing was sent: {rendered}"
+            "the ETH refusal must say no transaction was broadcast and no gas spent: \
+             {rendered}"
         );
     }
 
