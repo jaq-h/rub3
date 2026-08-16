@@ -892,18 +892,17 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         if (received < amount) revert InsufficientPayment(received, amount);
 
         // The fee is taken on what measurably arrived. On the ETH rail
-        // `msg.value` is required to equal the listed price, so both rails
-        // charge the fee on the same thing - the price the buyer agreed to -
-        // rather than on two quantities that happen to agree.
+        // `msg.value` is required to equal the listed price, so on neither
+        // rail can a buyer push the fee base above the price they read.
         _accrueFee(token, received);
     }
 
     /// @dev Split a payment that has just arrived: `feeBps` of it to
     ///      {treasury}, everything else to the developer.
     ///
-    ///      **The fee is charged on the amount received.** No rail can deliver
-    ///      more than the listed price - {_payEth} requires `msg.value` to
-    ///      equal it exactly, and the authorization's `value` is the listed
+    ///      **The fee is charged on the amount received.** No buyer can choose
+    ///      to send more than the listed price - {_payEth} requires `msg.value`
+    ///      to equal it exactly, and the authorization's `value` is the listed
     ///      price read at execution - so the developer's old evasion route is
     ///      closed where the payment is taken rather than here: listing at 0
     ///      and collecting the real price as "overpayment" no longer reaches

@@ -654,9 +654,20 @@ contract Rub3TokenPurchaseTest is Test {
         assertEq(address(nft).balance, 0);
         assertEq(outsider.balance, 100 ether);
 
-        // Re-reading the price is all it takes to succeed.
+        // Re-reading the price is all it takes to succeed, and the agent is
+        // the one who pays it. The read has to happen before the prank: the
+        // `{value: ...}` expression is evaluated first, so an inline `price()`
+        // would consume the one-shot prank and leave this test paying from the
+        // test contract instead of from `outsider`.
+        uint256 fresh = nft.price();
+        assertEq(fresh, PRICE * 10);
+
         vm.prank(outsider);
-        assertEq(nft.ownerOf(nft.purchase{value: nft.price()}(outsider)), outsider);
+        uint256 tokenId = nft.purchase{value: fresh}(outsider);
+
+        assertEq(nft.ownerOf(tokenId),  outsider);
+        assertEq(outsider.balance,      100 ether - fresh, "the agent paid it");
+        assertEq(address(nft).balance,  fresh);
     }
 
     /// The independent check on top of the token's own accounting: the mint
