@@ -17,11 +17,13 @@
 #     deploy scripts already read as "no factory"
 #   * both chains the project targets stay present, so deleting the entry the
 #     file exists to answer cannot land silently
-#   * a name is one of the [rpc_endpoints] keys in contracts/foundry.toml, the
-#     contract the manifest declares for that field, so a name a consumer
-#     cannot hand to forge --rpc-url cannot land: the first version of this
-#     file shipped the [etherscan] chain value instead, which looks identical
-#     and is not an rpc alias
+#   * each of those chains carries the exact [rpc_endpoints] key from
+#     contracts/foundry.toml that belongs to it, which is the contract the
+#     manifest declares for that field. Pinned per chain id rather than checked
+#     for membership in the alias set, because a swapped pair is a valid set and
+#     would aim a mainnet deploy at Sepolia. The first version of this file
+#     shipped the [etherscan] chain value instead, which looks identical to the
+#     rpc alias and is not one.
 #
 # Usage, from anywhere in the repo:
 #   scripts/check-deployments.sh
@@ -57,10 +59,16 @@ rpc_aliases="$(awk '
 }
 aliases_json="$(printf '%s\n' "$rpc_aliases" | jq -R . | jq -s .)"
 
+# The chains this file must answer for, each pinned to the [rpc_endpoints] alias
+# that belongs to it. The single source of both the "which chains" and the
+# "which name" rules below; the aliases themselves are checked against
+# foundry.toml, so renaming one there fails here until this map moves with it.
+expected_chains='{"8453": "base", "84532": "base_sepolia"}'
+
 # jq exits non-zero on the first violated rule and prints which chain broke it.
 # Kept as one program rather than a loop of shell tests so the whole schema is
 # readable in one place.
-errors="$(jq -r --argjson aliases "$aliases_json" '
+errors="$(jq -r --argjson aliases "$aliases_json" --argjson expected "$expected_chains" '
   def fail($msg): "\($msg)";
 
   [
@@ -70,8 +78,15 @@ errors="$(jq -r --argjson aliases "$aliases_json" '
     (if (.chains | type) != "object"
       then fail("chains must be an object")
       else (
-        (if (.chains | has("8453") and has("84532") | not)
-          then fail("chains must include both 8453 (Base mainnet) and 84532 (Base Sepolia)") else empty end),
+        (($expected | keys[]) as $id |
+          (if (.chains | has($id)) | not
+            then fail("chains must include \($id) (\($expected[$id])), a chain this file must answer for")
+            else empty end)),
+
+        (($expected | to_entries[]) as $p |
+          (if ($aliases | index($p.value)) == null
+            then fail("chain \($p.key): the pinned name \"\($p.value)\" is no longer an [rpc_endpoints] key in contracts/foundry.toml (\($aliases | join(", ")))")
+            else empty end)),
 
         (.chains | to_entries[] |
           . as $e |
@@ -87,6 +102,8 @@ errors="$(jq -r --argjson aliases "$aliases_json" '
                   then fail("chain \($id): keys must be exactly name, factory, deploy_block, generation") else empty end),
                 (if ($c.name | type) != "string" or ($c.name | length) == 0
                   then fail("chain \($id): name must be a non-empty string")
+                  elif ($expected | has($id)) and ($c.name != $expected[$id])
+                    then fail("chain \($id): name must be \"\($expected[$id])\", the [rpc_endpoints] key in contracts/foundry.toml for this chain, not \"\($c.name)\"")
                   elif ($aliases | index($c.name)) == null
                     then fail("chain \($id): name \"\($c.name)\" is not an [rpc_endpoints] key in contracts/foundry.toml (\($aliases | join(", ")))")
                   else empty end),

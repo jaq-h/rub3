@@ -346,9 +346,9 @@ Which path you get is decided by one environment variable, `FACTORY`:
 
 Forgetting `FACTORY` is not an error and does not fail: you get a working, fee-free, unrecorded contract and one line of `console.log` saying so.
 
-**Which factory is canonical is answered by [`contracts/deployments.json`](deployments.json)**, committed beside `canonical-bytecode.json` and keyed by chain id, one entry per chain carrying the factory address, the block it was deployed in, and its generation in the `previousFactory` chain. That file is the only place the answer is published, so a tool that needs it reads it rather than asking a human: `jq -r '.chains["8453"].factory' contracts/deployments.json`. Its own `fields` object documents every key, and `scripts/check-deployments.sh` (run by CI) rejects a malformed or half-filled entry.
+**Which factory is canonical is answered by [`contracts/deployments.json`](deployments.json)**, committed beside `canonical-bytecode.json` and keyed by chain id, one entry per chain carrying the factory address, the block it was deployed in, and its generation in the `previousFactory` chain. That file is the only place the answer is published, so a tool that needs it reads it rather than asking a human: `jq -er '.chains["8453"].factory' contracts/deployments.json`. Its own `fields` object documents every key, and `scripts/check-deployments.sh` (run by CI) rejects a malformed or half-filled entry.
 
-**Every entry in it is unpopulated today.** Nothing is deployed to a public network: the contracts are not deployed to mainnet or declared ready for use until the registry is ready, and the factory and the registry launch together. Unpopulated is written as `null` in every field, never as a placeholder address, so there is nothing in the file a script could mistake for a deploy - a `null` factory means "this chain has no canonical factory", and the correct response is to stop, not to substitute another address. The example below reads `$CANONICAL_FACTORY` out of the file with `jq -er`, which fails loudly today precisely because every entry is null; against anvil, substitute the local factory address step 1 printed. There is no address in the file to copy.
+**Every entry in it is unpopulated today.** Nothing is deployed to a public network: the contracts are not deployed to mainnet or declared ready for use until the registry is ready, and the factory and the registry launch together. Unpopulated is written as `null` in every field, never as a placeholder address, so there is nothing in the file a script could mistake for a deploy - a `null` factory means "this chain has no canonical factory", and the correct response is to stop, not to substitute another address. The example below reads `$CANONICAL_FACTORY` out of the file with `jq -er` and refuses to deploy when that read comes back empty, which is what happens today for every chain; against anvil, set `CANONICAL_FACTORY` to the local factory address step 1 printed. There is no address in the file to copy, and an unpopulated entry must never be allowed to degrade into a direct, unrecorded deploy: that is the outcome this file exists to prevent.
 
 ```bash
 cd contracts
@@ -366,17 +366,20 @@ forge script script/DeployFactory.s.sol \
 # 2. Any number of licence contracts through it. The fee is not an input here:
 #    the factory reads it off itself. FACTORY is the canonical address for the
 #    target chain, published in deployments.json. The read below is how you get
-#    it; it fails today, because every entry is null until launch, so against
-#    anvil use the address step 1 printed instead. Omitting FACTORY entirely is
-#    a direct, fee-free, unrecorded deploy.
-CANONICAL_FACTORY=$(jq -er '.chains["8453"].factory' deployments.json)
+#    it. It yields nothing today, because every entry is null until launch, and
+#    the deploy then aborts on the ${...:?} guard rather than quietly running
+#    with no factory: an empty FACTORY is a direct, fee-free, unrecorded deploy,
+#    which is a fine thing to want on purpose and a terrible thing to get by
+#    accident. Against anvil, set CANONICAL_FACTORY to the address step 1
+#    printed. To deploy directly on purpose, drop the FACTORY line entirely.
+CANONICAL_FACTORY=$(jq -er '.chains["8453"].factory' deployments.json) || CANONICAL_FACTORY=
 
 CONTRACT_TYPE=access \
 TOKEN_NAME="My App License" \
 TOKEN_SYMBOL=MAL \
 IDENTITY_MODEL=0 \
 PRICE=50000000000000000 \
-FACTORY=$CANONICAL_FACTORY \
+FACTORY=${CANONICAL_FACTORY:?no canonical factory published for chain 8453; use the local address from step 1, or drop this line for a direct fee-free deploy} \
 forge script script/Deploy.s.sol \
   --rpc-url http://127.0.0.1:8545 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
