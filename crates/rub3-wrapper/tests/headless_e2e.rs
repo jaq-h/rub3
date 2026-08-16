@@ -415,10 +415,14 @@ const FEE_BPS: u128 = 250;
 const TREASURY_ADDR: &str = "0x00000000000000000000000000000000000EA5E7";
 
 /// Deploys a `Rub3Factory` at [`FEE_BPS`] paying [`TREASURY_ADDR`].
+///
+/// The third constructor argument is `previousFactory`, zero here because this
+/// is a first-generation factory: its own deployments are then the only
+/// canonical predecessors it accepts.
 fn deploy_factory() -> String {
     forge_create(
         "src/Rub3Factory.sol:Rub3Factory",
-        &[&FEE_BPS.to_string(), TREASURY_ADDR],
+        &[&FEE_BPS.to_string(), TREASURY_ADDR, ZERO_ADDR],
     )
 }
 

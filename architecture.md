@@ -489,12 +489,20 @@ contract Rub3Factory {
     uint16  public constant  MAX_FEE_BPS = 300;
     uint16  public immutable feeBps;    // chosen per factory deploy, frozen at construction
     address public immutable treasury;  // rub3 fee recipient
-    mapping(address => bool) public isDeployed;  // registry + marketplace trust only these
+    address public immutable previousFactory;      // the factory this one supersedes; 0x0 on the first
+    mapping(address => bool) public isDeployed;    // registry + marketplace trust only these
 
+    // 0x0, this factory's own row, or a row on a factory reachable through
+    // previousFactory within MAX_PREDECESSOR_FACTORY_HOPS (8) hops.
+    function isCanonicalPredecessor(address) external view returns (bool);
+
+    // Both revert PredecessorNotCanonical(address) unless params.predecessor is.
     function deployAccess(Rub3LicenseParams calldata) external returns (address);
     function deploySubscription(Rub3LicenseParams calldata, uint256 period) external returns (address);
 }
 ```
+
+**A factory deploy may only succeed a canonical predecessor.** `claimFromPredecessor` charges nothing, because migration must never be taxed, so an unconstrained `predecessor` would let a whole fee-free sale be laundered onto a registry-listed contract: sell on a direct deploy, then deploy the successor through the factory naming it as predecessor, and every holder claims onto a fee-bearing `isDeployed` contract with the treasury never paid. The factory therefore accepts `address(0)`, its own deployments, or those of a factory reachable through the immutable `previousFactory` chain - which is what keeps an older factory's contracts migratable when rub3 changes its take by deploying a new factory. Direct deploys and the permissionless deployer helpers are untouched: they grant no `isDeployed` row, so there is nothing there to launder onto. The cost is that a pre-factory contract cannot migrate its holders onto a canonical contract *through the factory*; it migrates onto a directly deployed successor instead, keeping every ownership guarantee and forgoing only the row. See `contracts/contracts.md` → "A factory deploy may only succeed a canonical predecessor".
 
 The fee split executes on-chain inside `purchase()` / `renew()`, on **both** payment rails: `feeBps` of what arrived to `treasury`, the remainder to the developer's `withdraw()` balance. **Immutable per contract** - `feeBps` and `treasury` are `immutable` on the factory *and* on every contract it deploys, so a developer's economics can never change after deploy; rub3 changes its take only by deploying a new factory, which affects contracts deployed by that factory and nothing that already exists. Direct (non-factory) deployment of the open-source contracts is always possible - it is fee-free and unrecorded by design, not a gap. The factory path stamps the fee and grants an `isDeployed` row; today that row is a durable canonical record plus eligibility for the registry (implementation.md §3.2) and marketplace (§4.3) when they ship. Neither is built yet, and the contracts are not deployed to mainnet or declared ready for use until the registry is ready: the factory and the registry launch together.
 
@@ -559,7 +567,7 @@ Covers contract bugs, paid major versions, and chain migration. Three hard guara
 
 The distinction matters because an agent can verify the first list before buying and can only trust the second.
 
-**Bytecode** - check these against the deployed runtime code. The 29 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, and exactly the set the copy-pasteable loop in `contracts/contracts.md` scans for. (The rows also name `renewPrice(tokenId)`, `renewPriceToken(tokenId)`, `renewPriceAmount(tokenId)`, `wrapperHashList()`, `feeBps()` and `treasury()`, which are functions that *do* exist and are read as part of the check.)
+**Bytecode** - check these against the deployed runtime code. The 30 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, and exactly the set the copy-pasteable loop in `contracts/contracts.md` scans for. (The rows also name `renewPrice(tokenId)`, `renewPriceToken(tokenId)`, `renewPriceAmount(tokenId)`, `wrapperHashList()`, `feeBps()` and `treasury()`, which are functions that *do* exist and are read as part of the check.)
 
 | Property | How an agent checks it |
 |---|---|
@@ -567,7 +575,7 @@ The distinction matters because an agent can verify the first list before buying
 | No proxy, no upgrade hook | `upgradeTo(address)`, `upgradeToAndCall(address,bytes)`, `initialize()` absent; contract code hashes stable across blocks |
 | Hash set is append-only | `setWrapperHash(bytes32)`, `removeWrapperHash(bytes32)`, `unrevokeWrapperHash(bytes32)` absent; `wrapperHashList()` only ever grows |
 | Renewal terms frozen per token | `renewPrice(tokenId)`, `renewPriceToken(tokenId)` and `renewPriceAmount(tokenId)` do not move after mint; `setRenewPrice(uint256,uint256)`, `setRenewPriceToken(uint256,address)`, `setRenewPriceAmount(uint256,uint256)`, `setExpiresAt(uint256,uint256)` and any other renewal setter are absent from the runtime bytecode; `period` is `immutable`, with no `setPeriod(uint256)`. Free tiers are legitimate, so a `renewPrice` of `0` is conforming |
-| Deploy-time parameters frozen | `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` are `immutable` - no `setPredecessor(address)` selector |
+| Deploy-time parameters frozen | `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` are `immutable` - no `setPredecessor(address)` selector. On `Rub3Factory`, `previousFactory` is `immutable` in the same way, with no `setPreviousFactory(address)`: it decides which predecessors a canonical deploy may name, so repointing it would grant a laundered contract standing after the fact |
 | The protocol fee is frozen per contract | `feeBps` and `treasury` are `immutable` on the licence contract and on the `Rub3Factory` that stamped them; `setFeeBps(uint16)` and `setTreasury(address)` are absent from the runtime bytecode. Read `feeBps()` / `treasury()` before buying and they are what that contract will charge for as long as it exists |
 | Migration cannot be forced | `claimFromPredecessor` is the only mint path outside `purchase` / `purchaseWithAuthorization`, and it checks `ownerOf(...) == msg.sender` on the predecessor |
 

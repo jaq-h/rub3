@@ -106,46 +106,54 @@
     },
     "Rub3Factory": {
       "source": "src/Rub3Factory.sol",
-      "deployed_bytecode_sha256": "7de193c48e22ca54f55bbfc1e4dfec1136752ac8b5a5f5d6cb50e81775e16dbb",
+      "deployed_bytecode_sha256": "0b03cc18efb8dd487b52d57bc28b7a3e18bb7575f6575c20810c8517d77f4076",
       "immutable_ranges": [
         {
-          "start": 186,
+          "start": 249,
           "length": 32
         },
         {
-          "start": 275,
+          "start": 338,
           "length": 32
         },
         {
-          "start": 369,
+          "start": 433,
           "length": 32
         },
         {
-          "start": 408,
+          "start": 472,
           "length": 32
         },
         {
-          "start": 646,
+          "start": 643,
           "length": 32
         },
         {
-          "start": 821,
+          "start": 802,
           "length": 32
         },
         {
-          "start": 1123,
+          "start": 998,
           "length": 32
         },
         {
-          "start": 1162,
+          "start": 1239,
           "length": 32
         },
         {
-          "start": 1413,
+          "start": 1720,
           "length": 32
         },
         {
-          "start": 1452,
+          "start": 1759,
+          "length": 32
+        },
+        {
+          "start": 2010,
+          "length": 32
+        },
+        {
+          "start": 2049,
           "length": 32
         }
       ]

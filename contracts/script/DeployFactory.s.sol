@@ -20,12 +20,23 @@ import {Rub3Factory}     from "../src/Rub3Factory.sol";
 ///              not a setting to fall back on.
 ///   TREASURY - fee recipient. Must be non-zero.
 ///
+/// Optional env var:
+///   PREVIOUS_FACTORY - the Rub3Factory this one supersedes. Unset (or 0x0) for
+///                      the *first* factory only. Set it on every later one:
+///                      contracts recorded by the old factory are acceptable
+///                      predecessors on the new one only through this pointer,
+///                      and it is immutable, so a factory deployed without it
+///                      can never be given one. See contracts.md ->
+///                      "A factory deploy may only succeed a canonical
+///                      predecessor".
+///
 /// Usage - dry run (no broadcast):
 ///   FEE_BPS=250 TREASURY=0x... forge script script/DeployFactory.s.sol \
 ///     --rpc-url $BASE_SEPOLIA_RPC_URL
 ///
-/// Usage - broadcast + verify:
-///   FEE_BPS=250 TREASURY=0x... forge script script/DeployFactory.s.sol \
+/// Usage - broadcast + verify, superseding an existing factory:
+///   FEE_BPS=250 TREASURY=0x... PREVIOUS_FACTORY=0x... \
+///   forge script script/DeployFactory.s.sol \
 ///     --rpc-url $BASE_SEPOLIA_RPC_URL \
 ///     --private-key $DEPLOYER_KEY \
 ///     --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY
@@ -34,11 +45,12 @@ import {Rub3Factory}     from "../src/Rub3Factory.sol";
 /// license contract through it.
 contract DeployFactory is Script {
     function run() external {
-        uint16  feeBps   = uint16(vm.envUint("FEE_BPS"));
-        address treasury = vm.envAddress("TREASURY");
+        uint16  feeBps          = uint16(vm.envUint("FEE_BPS"));
+        address treasury        = vm.envAddress("TREASURY");
+        address previousFactory = vm.envOr("PREVIOUS_FACTORY", address(0));
 
         vm.startBroadcast();
-        Rub3Factory factory = new Rub3Factory(feeBps, treasury);
+        Rub3Factory factory = new Rub3Factory(feeBps, treasury, previousFactory);
         vm.stopBroadcast();
 
         console.log("");
@@ -47,6 +59,11 @@ contract DeployFactory is Script {
         console.log("  chain:                %d", block.chainid);
         console.log("  feeBps:               %d  (of every payment, immutable)", factory.feeBps());
         console.log("  treasury:             %s", factory.treasury());
+        console.log("  previousFactory:      %s%s",
+            factory.previousFactory(),
+            factory.previousFactory() == address(0)
+                ? "  (first factory: its deploys are the only canonical predecessors)"
+                : "");
         console.log("  accessDeployer:       %s", factory.accessDeployer());
         console.log("  subscriptionDeployer: %s", factory.subscriptionDeployer());
         console.log("");
