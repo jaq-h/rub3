@@ -420,10 +420,10 @@ cast call <FACTORY> "isDeployed(address)(bool)" <LICENCE> --rpc-url $RPC
 **Pre-mainnet launch requirement, to be performed before the mainnet factory deploy and not after:** on Base Sepolia, deploy a factory whose `TREASURY` is the Safe, deploy a licence through it, complete one purchase on each rail, then call `withdrawFees()` and `withdrawTokenFees(<USDC>)` and confirm the Safe's ETH and USDC balances actually moved. Both sweeps are permissionless, so any key can drive them:
 
 ```bash
-cast send <LICENCE> "withdrawFees()"                    --rpc-url $RPC --private-key $ANY_KEY
-cast send <LICENCE> "withdrawTokenFees(address)" <USDC> --rpc-url $RPC --private-key $ANY_KEY
-cast balance <SAFE>                                     --rpc-url $RPC
-cast call <USDC> "balanceOf(address)(uint256)" <SAFE>   --rpc-url $RPC
+cast send <LICENCE> "withdrawFees()"                    --rpc-url $BASE_SEPOLIA_RPC_URL --private-key $ANY_KEY
+cast send <LICENCE> "withdrawTokenFees(address)" <USDC> --rpc-url $BASE_SEPOLIA_RPC_URL --private-key $ANY_KEY
+cast balance <SAFE>                                     --rpc-url $BASE_SEPOLIA_RPC_URL
+cast call <USDC> "balanceOf(address)(uint256)" <SAFE>   --rpc-url $BASE_SEPOLIA_RPC_URL
 ```
 
 **And a second pre-mainnet step, this one against Base mainnet itself and immediately before the factory deploy:** confirm that the address about to be passed as `TREASURY` has code, and that the Safe behind it reads back the owner set and threshold intended.
