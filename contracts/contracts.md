@@ -426,7 +426,17 @@ cast balance <SAFE>                                     --rpc-url $RPC
 cast call <USDC> "balanceOf(address)(uint256)" <SAFE>   --rpc-url $RPC
 ```
 
-A Safe that cannot receive on either rail is a mainnet factory that can never collect on that rail, with no way back. Proving both on testnet is the whole mitigation.
+**And a second pre-mainnet step, this one against Base mainnet itself and immediately before the factory deploy:** confirm that the address about to be passed as `TREASURY` has code, and that the Safe behind it reads back the owner set and threshold intended.
+
+```bash
+cast code $TREASURY                           --rpc-url $BASE_MAINNET_RPC_URL   # must be non-empty
+cast call $TREASURY "getOwners()(address[])"  --rpc-url $BASE_MAINNET_RPC_URL
+cast call $TREASURY "getThreshold()(uint256)" --rpc-url $BASE_MAINNET_RPC_URL
+```
+
+That is a separate step because the testnet proof cannot cover it: the Sepolia Safe is a different deployment at a different address, so passing the proof above establishes that a Safe receives on both rails and nothing about the value actually typed into the mainnet deploy. `Rub3Factory`'s constructor rejects only `address(0)` and deliberately performs no code check - an EOA treasury stays valid - so a mistyped address, or a counterfactual Safe address not yet deployed on mainnet, is accepted silently and permanently. Accrue-don't-push then means nothing surfaces the mistake until the first sweep, which is the late discovery this section exists to prevent.
+
+A Safe that cannot receive on either rail is a mainnet factory that can never collect on that rail, with no way back. Proving the mechanism on testnet and checking the mainnet address itself before the deploy is the whole mitigation.
 
 ### How the split works
 
