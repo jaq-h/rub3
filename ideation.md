@@ -65,7 +65,7 @@ The intent: open-source the rails; own the factory, registry, and marketplace; t
 
 - **Protocol fee** - 2–3% on `purchase()` and `renew()`, split on-chain by factory-deployed contracts. Immutable per contract: a developer's fee can never be raised after deploy. rub3 changes fees by shipping a new factory version, affecting only future deploys.
 - **Metered billing** - the wrapper gates every launch, which makes it the only viable choke point for charging per-use on locally executed software. x402 meters API calls because the server is a choke point; nothing has ever been able to meter local execution. `Rub3Metered` turns the wrapper into a payment terminal: per-launch or per-session micropayments in USDC - same take rate, much higher-frequency flow.
-- **Marketplace fee** - 1–2% on secondary license trades, plus an ERC-2981 royalty split with the developer.
+- **Marketplace fee** - 1–2% on secondary license trades, plus an ERC-2981-style royalty split with the developer, honoured venue-side on a sale the marketplace settles rather than levied by the token itself: the licence contracts carry no royalty hook, and why is in [implementation.md](implementation.md) §2.3 → "Deliberately not done".
 - **Hosted conveniences** - dashboards, purchase webhooks, binary pinning, release attestations. Optional SaaS for humans, entirely off the enforcement path.
 - **Never charged:** the wrapper, SDK, CLI, contract templates, self-serve deploys. **No token, ever.** Fees settle in stablecoins.
 
