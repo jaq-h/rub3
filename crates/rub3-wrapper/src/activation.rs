@@ -1258,6 +1258,16 @@ mod headless {
     /// instrument for a licence the buyer is about to pay for again in another
     /// currency. This window is what makes that instrument worthless.
     ///
+    /// **The length of this window is the entire defence on that path, which
+    /// is why it is this small.** The ETH fallback pays through the payable
+    /// `purchase(address)`, which never touches `purchaseAuthorizationNonce`,
+    /// so it cannot burn the disclosed copy's single-use EIP-3009 nonce the way
+    /// a stablecoin submission would. For the lifetime of this window, and for
+    /// nothing beyond it, the disclosed copy stays spendable *alongside* the
+    /// ETH payment the wrapper is making - the buyer can still be charged in
+    /// both currencies by an endpoint fast enough to race. Seconds bound that
+    /// race; the shared nonce does not (see [`authorize_purchase`]).
+    ///
     /// **The two numbers solve opposite problems and cannot be reconciled into
     /// one.** [`AUTHORIZATION_TTL_SECS`] is sized so a broadcast transaction
     /// can be mined; this one is sized so a leaked signature cannot be. A
@@ -1630,11 +1640,21 @@ mod headless {
     /// `validBefore`, so they are two signatures over one payment rather than
     /// two payments: the salt is shared, `purchaseAuthorizationNonce` is a pure
     /// function of it, and EIP-3009 nonces are single-use. Whichever of the two
-    /// reaches the chain first burns the nonce and voids the other. That is the
-    /// property worth having on a path where a copy is handed to a stranger:
-    /// the worst an endpoint can do with the disclosed one, inside its window,
-    /// is buy the buyer the licence they were buying anyway, and the wrapper's
-    /// own submission then reverts instead of paying twice.
+    /// reaches the chain first burns the nonce and voids the other.
+    ///
+    /// **That defence covers the submission path only, and not the fallback
+    /// path this arrangement exists for.** When the pre-flight passes, the
+    /// wrapper's own submission is `purchaseWithAuthorization` over the same
+    /// nonce, so the worst an endpoint can do with the disclosed copy inside
+    /// its window is buy the buyer the licence they were buying anyway, and the
+    /// wrapper's submission then reverts instead of paying twice. When the
+    /// pre-flight *fails*, the wrapper pays through the ETH branch of
+    /// [`purchase`] instead: the payable `purchase(address)` never reads or
+    /// writes `purchaseAuthorizationNonce`, so nothing on that path burns the
+    /// disclosed copy's nonce and the sharing buys no protection whatsoever.
+    /// There, [`PREFLIGHT_AUTHORIZATION_TTL_SECS`] is the only thing standing
+    /// between a leaked authorization and a second payment in a second
+    /// currency, which is why it is measured in seconds.
     ///
     /// The broadcast copy is signed **after** the pre-flight, by
     /// [`PendingAuthorization::broadcastable`], and only when the pre-flight

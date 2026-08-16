@@ -2612,6 +2612,34 @@ fn submit_raw(contract: &str, calldata: &str) -> Result<(), String> {
     }
 }
 
+/// Simulates raw calldata against `contract` with `eth_call`, moving nothing.
+///
+/// The positive control for a replay test: it proves the captured blob is a
+/// live payment instrument at the moment it is captured, without spending it.
+fn call_raw(contract: &str, calldata: &str) -> Result<(), String> {
+    let url = rpc_url();
+    let data = format!("0x{}", calldata.trim_start_matches("0x"));
+    let output = Command::new("cast")
+        .args(["call", contract, &data, "--rpc-url", &url])
+        .output()
+        .expect("failed to run cast call");
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+/// True when a `cast` failure is the token refusing an expired authorization.
+///
+/// The mock reverts with the custom error `AuthorizationExpired()`; running
+/// from raw calldata, `cast` may print the decoded name or only the bare
+/// selector, so both spellings count.
+fn names_the_expiry(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("authorizationexpired") || lower.contains("0f05f5bf")
+}
+
 /// Unix seconds now, the clock `validBefore` is measured against.
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -2696,14 +2724,24 @@ fn headless_disclosed_authorization_expires_before_the_endpoint_can_spend_it_e2e
         "a disclosed authorization must expire in seconds, not minutes: {lifetime}s",
     );
 
+    // Before the window closes the instrument is genuinely live: simulated,
+    // not sent, so it moves nothing and the balance assertions below still
+    // mean what they say. This is what makes the failure after the warp
+    // attributable to expiry rather than to a blob this test mis-extracted.
+    call_raw(&contract, &disclosed).unwrap_or_else(|e| {
+        panic!("the disclosed authorization must be spendable before it expires, but: {e}")
+    });
+
     // And it is worthless once it has. Nothing here is faked: the calldata is
     // the bytes that left the machine, replayed verbatim by a third party, on
     // the same chain, against a token that would have honoured it.
     warp(lifetime + 1);
     let replay = submit_raw(&contract, &disclosed);
+    let refusal = replay.expect_err("an expired authorization must not be spendable");
     assert!(
-        replay.is_err(),
-        "an expired authorization must not be spendable, but the replay succeeded",
+        names_the_expiry(&refusal),
+        "the replay must fail because the authorization expired, not for some other \
+         reason: {refusal}",
     );
 
     assert_eq!(
