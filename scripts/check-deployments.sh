@@ -65,9 +65,11 @@ aliases_json="$(printf '%s\n' "$rpc_aliases" | jq -R . | jq -s .)"
 # foundry.toml, so renaming one there fails here until this map moves with it.
 expected_chains='{"8453": "base", "84532": "base_sepolia"}'
 
-# jq exits non-zero on the first violated rule and prints which chain broke it.
-# Kept as one program rather than a loop of shell tests so the whole schema is
-# readable in one place.
+# The program below emits one line per violated rule and exits 0 either way, so
+# the shell test on this captured output is what actually fails the gate. Do not
+# drop the capture and lean on jq's exit status: that turns the whole check into
+# a no-op that still prints "ok". Kept as one program rather than a loop of
+# shell tests so the whole schema is readable in one place.
 errors="$(jq -r --argjson aliases "$aliases_json" --argjson expected "$expected_chains" '
   def fail($msg): "\($msg)";
 
