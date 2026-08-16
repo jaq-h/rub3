@@ -77,53 +77,29 @@ jobs:
         run: cargo test -p rub3-wrapper --no-default-features --features ${{ matrix.features }}
 
   # ---------------------------------------------------------------------------
-  # Formatting and lint. Clippy is now a REAL GATE; fmt is still advisory.
+  # Formatting and lint. BOTH checks are REAL GATES: a rustfmt drift or a clippy
+  # warning turns this job red.
   #
-  # Measured on this branch at the commit that made clippy clean:
+  # Scope. Both commands run over the whole workspace. `rub3-wrapper` is
+  # currently its only member, so the workspace form is about staying correct
+  # when a second crate lands rather than about covering more code today.
   #
-  #   cargo clippy -p rub3-wrapper                exit 0, no warnings, under the
-  #     --all-targets -- -D warnings              default bundle and under
-  #                                               tier-0/1/2/3/4,
-  #                                               tier-3,binary-encryption,
-  #                                               tier-2,webview and
-  #                                               tier-3,headless.
-  #                                               The 6 warnings main carried are
-  #                                               fixed at the root: the
-  #                                               conditionally-dead IpcState TTL
-  #                                               field, map_or -> is_some_and,
-  #                                               deref_addrof and the function
-  #                                               item cast in supervisor's
-  #                                               signal trampoline, the shared
-  #                                               tests/helpers module that each
-  #                                               test binary only partly uses,
-  #                                               and the ten-field session
-  #                                               preimage builder (allowed with
-  #                                               a stated reason - one parameter
-  #                                               per hashed field is the point).
+  # `-D warnings` is load-bearing: plain `cargo clippy` exits 0 even when it
+  # emits warnings, so a permissive clippy job would sit green forever and prove
+  # nothing.
   #
-  #   cargo fmt --all -- --check                  exit 1, 13 diff hunks in a
-  #                                               single file:
-  #                                               tests/session_onchain_e2e.rs
-  #                                               (hand-aligned argument lists
-  #                                               rustfmt wants to explode one
-  #                                               per line). Every other file in
-  #                                               the workspace is rustfmt-clean.
+  # Clippy here builds the default bundle (tier-2) plus `--all-targets`. Whole
+  # modules are `#[cfg]`-gated out per tier bundle (see CLAUDE.md), so a clean
+  # run here does not prove the other bundles are clean; the local tier matrix
+  # remains the contributor's job. It was verified clean across tier-0 through
+  # tier-4, tier-3,binary-encryption, tier-2,webview and tier-3,headless at the
+  # commit that made fmt blocking.
   #
-  # That last file is the one a repo-wide rustfmt cleanup, queued separately, has
-  # to own: its constructor-argument list keeps being rewritten by whichever
-  # contract section is in flight (§2.2's `SaleTerms`, then §2.3's `IdentityTerms`
-  # / `FeeTerms`), which is exactly the region rustfmt would reflow, so formatting
-  # it from a feature branch buys a conflict and nothing else. The fmt step stays
-  # `continue-on-error` until that cleanup lands. At that point drop the
-  # `continue-on-error` below and fmt becomes a real gate too.
-  #
-  # The fmt failure is scoped to the STEP, not the job, so clippy regressions now
-  # turn this check red. clippy runs with `-D warnings` on purpose: plain
-  # `cargo clippy` exits 0 even when it emits warnings, so a permissive clippy
-  # job would sit green forever and prove nothing.
+  # The repo has no `rustfmt.toml`: formatting is stock rustfmt defaults on
+  # purpose, so `cargo fmt --all` is always the whole fix for a red fmt step.
   # ---------------------------------------------------------------------------
   lint:
-    name: lint (clippy blocking, fmt advisory)
+    name: lint (fmt + clippy, blocking)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7.0.1
@@ -132,16 +108,14 @@ jobs:
         with:
           key: lint
 
-      # Advisory: one pre-existing file is deliberately left unformatted, see
-      # above. The log still shows the drift.
-      - name: cargo fmt --check (advisory)
-        continue-on-error: true
+      - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      # always() so the advisory fmt step never short-circuits the real gate.
+      # always() so a formatting drift still gets the clippy result reported in
+      # the same run, instead of hiding it behind a one-line fmt diff.
       - name: cargo clippy
         if: always()
-        run: cargo clippy -p rub3-wrapper --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Solidity. `forge test` MUST run from contracts/ -- remappings.txt uses paths
