@@ -160,12 +160,12 @@ const RELEASE: &str =
 /// registry launch together (`implementation.md` §1.5, §2.3). That condition
 /// has a machine-checked form: `contracts/deployments.json`, whose every
 /// `factory` is still `null`. When one stops being null, the rule above is live
-/// for that chain and this table only ever grows. Before the first
-/// deploy a superseded fingerprint protects no holder, while it widens the set
-/// of code the wrapper will spend money on, which is the opposite of what this
-/// table is for; so the pre-exact-payment rows of the §2.3 contracts were
-/// dropped rather than carried. That was a one-off taken while the condition
-/// above was still false, not licence to prune the table again.
+/// for that chain and this table only ever grows. Before the first deploy a
+/// superseded fingerprint protects no holder, while it widens the set of code
+/// the wrapper will spend money on, which is the opposite of what this table
+/// is for; so the pre-exact-payment rows of the §2.3 contracts were dropped
+/// rather than carried. That was a one-off taken while the condition above was
+/// still false, not licence to prune the table again.
 ///
 /// Rows are grouped by contract, newest release first, so a contract's history
 /// reads top to bottom.
