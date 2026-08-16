@@ -371,7 +371,7 @@ Tiers 3-4 require at least one on-chain tx (purchase and/or activate) during the
 
 | Mode | Reliance | Tolerant of offline activation | JS bundle |
 |---|---|---|---|
-| **Headless** *(planned — agent default)* | operator-supplied signer + chain RPC | n/a — no user round-trip | none |
+| **Headless** *(built - agent default)* | operator-supplied signer + chain RPC | n/a - no user round-trip | none |
 | **WalletConnect** | Reown relay + chain RPC | no | ~255 KB vendored |
 | **Auto-detect** | Chain RPC (filter `eth_getLogs` / read `lastActivationBlock`) | no | none |
 | **Manual** | User copies a tx hash back into the wrapper | yes (paste later) | none |
@@ -669,8 +669,8 @@ crates/rub3-wrapper/
 │   ├── main.rs          — CLI entry point, app constants (APP_ID, CONTRACT, CHAIN_ID, RPC_URL, TIER)
 │   ├── lib.rs           — public module re-exports
 │   ├── license.rs       — tier 0 legacy proof schema + shared crypto helpers
-│   ├── session.rs       — session schema, message construction, signature verification (planned)
-│   ├── session_store.rs — session persistence ~/.rub3/sessions/ (planned)
+│   ├── session.rs       — session schema, message construction, signature verification
+│   ├── session_store.rs — session persistence ~/.rub3/sessions/
 │   ├── device.rs        — device keypair generation, storage, challenge-response (planned, tier 4)
 │   ├── decrypt.rs       — binary decryption, KEK derivation, in-memory exec (planned, tiers 3-4)
 │   ├── store.rs         — tier 0 proof persistence (~/.rub3/licenses/ or $RUB3_LICENSE_DIR)

@@ -48,7 +48,7 @@ Goal: A working wrapper that gates a Rust binary behind wallet ownership, using 
 - Ownership check wired into webview `Connect` handler: 0 tokens → error, 1 → auto-proceed to activate, N → token-select screen
 - ENS resolution remains a stub (`EnsNotSupported`) — deferred to §1.6 where it is the primary deliverable
 
-### 1.5 — Smart contracts `[scaffolded]`
+### 1.5 — Smart contracts `[complete]`
 
 Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZeppelin v5.1.0 and forge-std installed as submodules under `contracts/lib/`.
 
@@ -749,7 +749,7 @@ Goal: the payment flows only rub3 can host.
 - Bundled into the protocol fee rather than separately priced — its function is making the fee-carrying path also the lowest-friction path.
 - Self-hosting the facilitator remains possible (it's a thin relay); the hosted one is a convenience, not a chokehold.
 
-### 4.3 — License marketplace `[trigger-gated]`
+### 4.3 — License marketplace `[not started]` *(trigger-gated: do not build speculatively)*
 
 - **Do not build speculatively.** Trigger: organic `Transfer` volume on factory contracts (all on-chain — query for the moment resale behavior emerges).
 - Purpose-built venue for license resale: queryable by agents, filtered to registry-verified contracts, priced in USDC. 1–2% marketplace fee + ERC-2981 royalty split with the developer.
@@ -763,17 +763,17 @@ Goal: the payment flows only rub3 can host.
 
 The interactive path stays fully supported — manual tx-hash paste is the floor today and remains reachable forever. Polish lands after the agent path.
 
-### 5.1 — Frictionless tx confirmation *(spec in §1.10 / §1.10a / §1.10b)*
+### 5.1 — Frictionless tx confirmation `[not started]` *(spec in §1.10 / §1.10a / §1.10b)*
 - Auto-detect and WalletConnect tabs on the purchase/cooldown screens, manual paste as the always-available floor. The detailed specs in §1.10a/§1.10b apply unchanged.
 
-### 5.2 — Activation UI refactor to Preact *(was old §2.5)*
+### 5.2 — Activation UI refactor to Preact `[not started]` *(was old §2.5)*
 - Single reducer over `(phase, ctx)`; vendored `preact.mjs` + `htm.mjs` under `assets/vendor/`; `include_dir!` custom-protocol handler; no Node/bundler. No behavioral changes.
 
-### 5.3 — Tauri integration *(was old Phase 3)*
+### 5.3 — Tauri integration `[not started]` *(was old Phase 3)*
 - `tauri-plugin-rub3`: auto-heartbeat, session renewal in the app's own webview, `invoke('plugin:rub3|session')` JS API, `rub3://session-renewed` event.
 - `create-rub3-app` starter template preconfigured against Base Sepolia.
 
-### 5.4 — Polish *(was old Phase 4, minus deferred items)*
+### 5.4 — Polish `[not started]` *(was old Phase 4, minus deferred items)*
 - Background session renewal with OS notification before expiry
 - Windows support: named pipes for heartbeat IPC, MSVC target, WebView2 testing
 - Subscription renewal UI (view expiry, renew from tray/menu)
