@@ -1020,6 +1020,42 @@ mod tests {
         })
     }
 
+    /// The text of `fn name` in `source`, from its signature line to the
+    /// closing brace sitting at the signature's own indentation.
+    ///
+    /// `None` when no such function is declared, which a caller must treat as a
+    /// failure rather than as nothing to check.
+    fn function_body(source: &str, name: &str) -> Option<String> {
+        let signature = format!("fn {name}(");
+        let (start, indent) = source.lines().enumerate().find_map(|(i, line)| {
+            let trimmed = line.trim_start();
+            let declaration = trimmed
+                .strip_prefix("pub(crate) ")
+                .or_else(|| trimmed.strip_prefix("pub "))
+                .unwrap_or(trimmed);
+            declaration
+                .starts_with(&signature)
+                .then(|| (i, line.len() - trimmed.len()))
+        })?;
+
+        let closing = format!("{}}}", " ".repeat(indent));
+        let end = source
+            .lines()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, line)| *line == closing)
+            .map(|(i, _)| i)?;
+
+        Some(
+            source
+                .lines()
+                .take(end + 1)
+                .skip(start)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
     /// Nothing in the crate reaches this module except a purchase path.
     ///
     /// This is the subtlest property in the module and the one a later change
@@ -1031,10 +1067,24 @@ mod tests {
     /// what has to be guarded is the absence of a caller outside the paths that
     /// spend money.
     ///
-    /// Two assertions, because a closed set alone is not enough: the set of
-    /// referencing modules is a subset of the purchase-path allowlist, *and*
-    /// `activation.rs` holds exactly one gate call site, so the gate cannot be
-    /// quietly dropped or duplicated while the subset stays satisfied.
+    /// Three assertions, because no one of them is enough on its own:
+    ///
+    /// 1. the set of referencing modules is a **subset** of the purchase-path
+    ///    allowlist;
+    /// 2. `activation.rs` holds **exactly one** gate call site, since a subset
+    ///    is also satisfied by calling the gate nowhere at all;
+    /// 3. the named human launch entry points inside `webview.rs` reference the
+    ///    module **not at all**, which is the half the allowlist cannot speak
+    ///    for: it is file-granular, and `webview.rs` holds both the path that
+    ///    spends money and the paths that serve a token already held.
+    ///
+    /// **What it does not cover.** The module set is guarded per file and the
+    /// launch entry points per name, so a *new* launch function added to
+    /// `webview.rs` is unguarded until somebody names it in
+    /// `WEBVIEW_LAUNCH_ENTRY_POINTS`, and the same file granularity means an
+    /// attest reference elsewhere in `activation.rs` - `ensure_headless` is the
+    /// launch path and lives there - is not caught either. This is a guard
+    /// against the change made in good faith, not a proof.
     ///
     /// **It guards source structure, not runtime wiring.** It reads the crate's
     /// own `src/` at test time, so it says exactly the same thing under
@@ -1110,6 +1160,42 @@ mod tests {
              allowlist is satisfied by calling it nowhere at all, so this is what keeps the gate \
              from being dropped or duplicated."
         );
+
+        // The human launch entry points inside `webview.rs`. `PURCHASE_PATHS`
+        // is file-granular and cannot tell `show_purchase`, which spends money,
+        // from these, which serve a token the user already holds. Naming them
+        // is what stops the allowlist from covering a launch path by accident.
+        const WEBVIEW_LAUNCH_ENTRY_POINTS: &[&str] =
+            &["show_activate", "show_cooldown", "finalize_session"];
+
+        let webview = modules
+            .iter()
+            .find(|(name, _)| name == "webview.rs")
+            .map(|(_, body)| strip_line_comments(body))
+            .expect(
+                "webview.rs is not in the crate's src/. If the front door moved, point this \
+                 guard at its new home deliberately rather than letting it lapse.",
+            );
+
+        for entry_point in WEBVIEW_LAUNCH_ENTRY_POINTS {
+            let body = function_body(&webview, entry_point).unwrap_or_else(|| {
+                panic!(
+                    "webview.rs declares no `fn {entry_point}`, so this guard has stopped \
+                     guarding it without saying so. A guard that quietly covers nothing is worse \
+                     than no guard, because it still reads as coverage. Update \
+                     WEBVIEW_LAUNCH_ENTRY_POINTS against the current webview.rs deliberately - \
+                     do not drop the name."
+                )
+            });
+            assert!(
+                !mentions_ident(&body, "attest"),
+                "webview.rs::{entry_point} references the attest module. It serves a token the \
+                 user already holds, so a check there can refuse to start an already-paid-for \
+                 licence, which is the de-facto revocation surface this project has ruled out. \
+                 Fail closed on purchase, fail open on launch: attestation belongs in \
+                 show_purchase, the one path in this file that spends money."
+            );
+        }
     }
 
     /// Every pinned licence contract really is buyable, and every other role
