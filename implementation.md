@@ -12,7 +12,7 @@
 > - **Seats, not devices.** Fleet concurrency is licensed as K on-chain seats per token (§3.4). Tier-4 device binding and binary encryption move to Deferred.
 > - **Human UX polish is demoted, not dropped.** WalletConnect tabs (§1.10), the Preact refactor, and the Tauri plugin move to Phase 5.
 >
-> Phase 1 sections are preserved unchanged below as the build record of what exists today.
+> Phase 1 sections below are the build record of what exists today. They are corrected in place when a later phase supersedes a fact, with the pointer to the section that superseded it; §2.4 carries the removal record for everything the ownership invariants took out.
 
 ## Phase 1: Proof of Concept
 
@@ -55,7 +55,7 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 **Abstract base — `Rub3License.sol`**
 - Inherits `ERC721`, `ERC721Enumerable`, `Ownable` (OZ v5)
 - Immutable: `identityModel` (0 = access, 1 = account; rejects values > 1), `supplyCap` (0 = uncapped), `cooldownBlocks` (floor `MIN_COOLDOWN_BLOCKS = 15` ≈ 30s on Base)
-- Mutable + owner-gated: `price` (`setPrice`), `wrapperHash` (`setWrapperHash`) — hash is rotatable so developers can rebuild the wrapper without redeploying
+- Mutable + owner-gated: `price` (`setPrice`). **Superseded by §2.4:** the single rotatable `wrapperHash` is gone, and `setWrapperHash(bytes32)` is now one of the forbidden selectors asserted absent from the runtime bytecode of all four audited targets. Wrapper hashes live in an append-only set with on-chain revocation reasons instead, so rebuilding the wrapper adds a hash rather than replacing one. See §2.4 for the removal record
 - `nextTokenId` counter + internal `_mintNext` helper for sequential ids from 0
 - `_resolveRecipient(address)` helper: `address(0)` → `msg.sender` (per architecture.md §1)
 - `withdraw(address payable)` owner-only sweep
@@ -73,17 +73,17 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 - `isValid(uint256 tokenId) view` — `expiresAt[tokenId] > block.timestamp`
 - `Purchased` + `Renewed` events
 
-**Tests:** 30 forge tests (`forge test`) covering metadata, sequential mint, zero-recipient default, over/underpay, supply cap, enumeration via `tokenOfOwnerByIndex`, owner-gated setters, withdraw, subscription expiry, mid-period renewal, post-expiry renewal, nonexistent-token revert, plus activation: first-call success, session-id increments across tokens, cooldown-window revert, post-cooldown success, non-owner revert, nonexistent-token revert, `cooldownReady` in all three states, constructor floor check (`cooldownBlocks < 15`), and transfer-then-activate (new owner authorized, old owner rejected).
+**Tests:** 30 forge tests at this point (`forge test`), covering metadata, sequential mint, zero-recipient default, over/underpay, supply cap, enumeration via `tokenOfOwnerByIndex`, owner-gated setters, withdraw, subscription expiry, mid-period renewal, post-expiry renewal, nonexistent-token revert, plus activation: first-call success, session-id increments across tokens, cooldown-window revert, post-cooldown success, non-owner revert, nonexistent-token revert, `cooldownReady` in all three states, constructor floor check (`cooldownBlocks < 15`), and transfer-then-activate (new owner authorized, old owner rejected). The suite has since grown to 174 tests across five files; `testing.md` holds the current inventory.
 
 **`script/Deploy.s.sol`** — forge script that deploys either contract from env vars:
-- `CONTRACT_TYPE`, `TOKEN_NAME`, `TOKEN_SYMBOL`, `IDENTITY_MODEL`, `WRAPPER_HASH`, `PRICE` required; `SUPPLY_CAP`, `OWNER`, `COOLDOWN_BLOCKS` (default 1800 ≈ 1hr on Base), `PERIOD` optional
+- `CONTRACT_TYPE`, `TOKEN_NAME`, `TOKEN_SYMBOL`, `IDENTITY_MODEL`, `WRAPPER_HASH`, `PRICE` required; `SUPPLY_CAP`, `OWNER`, `COOLDOWN_BLOCKS` (default 1800 ≈ 1hr on Base), `PERIOD` optional. Superseded: `WRAPPER_HASH` is now optional and is the single-hash shorthand for `WRAPPER_HASHES` (§2.4), and later phases added `PRICE_TOKEN` / `PRICE_AMOUNT` (§2.2), `PREDECESSOR` (§2.4) and `FACTORY` (§2.3). `contracts/contracts.md` -> "Deploying" is the current reference
 - Dry run (no `--broadcast`): simulates deployment, prints summary with all params
 - Live: add `--broadcast --verify --etherscan-api-key $BASESCAN_API_KEY`
 - Local: run against `anvil` with `--rpc-url http://localhost:8545` and a pre-funded Anvil key — no `.env` needed
 
 **Not yet done:**
 - Tier 4: `activateDevice(tokenId, devicePubKey)` + `registeredDevice` mapping — deferred to tier-4 work
-- Base Sepolia deployment
+- Base Sepolia deployment. Nothing is deployed to any public network yet, and a mainnet deploy waits on the registry: the factory and the registry launch together (§2.3, §3.2)
 
 ### 1.6 — Identity model + TBA derivation `[complete]`
 
