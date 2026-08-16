@@ -1,5 +1,7 @@
 # Contract setup
 
+This file owns contract operations: the commands, environment variables, addresses, and runbooks for building, deploying, paying, migrating, and auditing rub3's contracts, including the mechanics of the protocol fee. Why the contracts are shaped this way is argued in [architecture.md](../architecture.md); what is built and what is planned is in [implementation.md](../implementation.md); the Solidity test inventory is in [testing.md](../testing.md).
+
 ## Prerequisites
 
 Install Foundry:

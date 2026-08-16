@@ -4,6 +4,8 @@ Wallet-native software licensing for the machine economy. NFT-gated access for l
 
 rub3 lets machines (and humans) buy, verify, run, and resell software without asking anyone's permission. The NFT is the access credential - owned by a wallet, verifiable on-chain, transferrable, composable - which also makes it a liquid asset: buy a license for a workload, resell it when the job ends. The wrapper is the runtime that enforces this on the machine where the software runs.
 
+This file owns orientation: enough to understand rub3, build it, test it, run it, and know where to go next. Everything else has a single owner. [ideation.md](ideation.md) owns vision, positioning, and the business model; [architecture.md](architecture.md) owns design rationale; [implementation.md](implementation.md) owns the roadmap and what is actually built; [contracts/contracts.md](contracts/contracts.md) owns contract operations, from deployment to the protocol fee mechanics; [testing.md](testing.md) owns the test inventory.
+
 
 ## How it works
 

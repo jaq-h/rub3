@@ -1,5 +1,7 @@
 # rub3 - Architecture
 
+This file owns design rationale: why the system is shaped the way it is. Security tiers, the session model, identity models, launch flows, and the ownership invariants are argued here, and this is what to read before changing behaviour. It does not own status, which lives in [implementation.md](implementation.md); contract operations and fee mechanics, which live in [contracts/contracts.md](contracts/contracts.md); the test inventory, which lives in [testing.md](testing.md); positioning, which lives in [ideation.md](ideation.md); or build and run instructions, which live in [README.md](README.md).
+
 ## North Star
 
 rub3 exists to let machines buy, verify, and resell software without asking anyone's permission. The unit of adoption is one closed loop an agent can complete end to end:

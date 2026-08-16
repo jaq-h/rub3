@@ -1,5 +1,7 @@
 # rub3 - Implementation Plan
 
+This file owns the roadmap and the build record: what exists, what is next, and what was decided or rejected along the way. Its `[complete]` / `[partial]` / `[not started]` tags are the authority on what is built. Design rationale lives in [architecture.md](architecture.md), contract operations and fee mechanics in [contracts/contracts.md](contracts/contracts.md), the per-suite test inventory in [testing.md](testing.md), positioning in [ideation.md](ideation.md), and orientation in [README.md](README.md).
+
 > **Plan revision - July 2026 (agent-first reorientation).**
 > Everything below Phase 1 has been resequenced around a single thesis: agents will do an increasing share of software development, deployment, and purchasing, and they need to buy, verify, run, and resell locally executed software - low cost, high speed, secure payments - with no human in the loop.
 >

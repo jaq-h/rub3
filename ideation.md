@@ -2,6 +2,8 @@
 
 Wallet-native software licensing for the machine economy. NFT-gated access for locally executed software - CLI tools, MCP servers, desktop apps - without a browser, a backend, or anyone's permission.
 
+This file owns positioning: the vision, the business model, and what rub3 is and is not. It makes the case; it does not specify the system. Design rationale is in [architecture.md](architecture.md), the roadmap and current status in [implementation.md](implementation.md), contract operations in [contracts/contracts.md](contracts/contracts.md), and orientation in [README.md](README.md).
+
 ## The Paradigm
 
 rub3 lets machines buy, verify, run, and resell software without asking anyone's permission.

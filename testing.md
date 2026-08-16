@@ -1,5 +1,7 @@
 # Testing Guide
 
+This file owns the test inventory: what each suite covers, how to run it, and how to set up manual testing. Per-test descriptions and suite counts belong here rather than in [implementation.md](implementation.md), which records status and cites the headline numbers. Contract-side operational recipes are in [contracts/contracts.md](contracts/contracts.md), the tier feature bundles the suites compile under are described in [README.md](README.md) and [AGENTS.md](AGENTS.md), and design rationale is in [architecture.md](architecture.md).
+
 ## Prerequisites
 
 - Rust toolchain (rustc 1.91+): `rustup update stable`
