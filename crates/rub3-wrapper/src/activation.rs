@@ -348,12 +348,15 @@ child is the child's status and not an activation failure.
       may already be spent, so do NOT retry blindly: stderr carries
       `tx_hash=0x...`; resolve that transaction first, then re-run once it
       has mined or been dropped
-  22  the listed price is above the configured spend ceiling - stderr
-      carries `rail=... listed=... maximum=... token=0x...`. It reports
-      only that the price was refused: the ceiling is weighed before
-      anything is signed, so the rail was not exercised and this is no
-      evidence it is otherwise usable. Not retryable: raise
-      RUB3_AGENT_MAX_TOKEN_AMOUNT or do not buy
+  22  the listed price is above the configured spend ceiling for the rail
+      it was listed on - stderr carries `rail=... listed=... maximum=...`,
+      plus `token=0x...` on the stablecoin rail, which has one. It reports
+      only that the price was refused: on the stablecoin rail the ceiling
+      is weighed before anything is signed, so the rail was not exercised
+      and this is no evidence it is otherwise usable; on the ETH rail it
+      is weighed before the transaction is sent, so no gas was spent. Not
+      retryable: either raise the ceiling the message names,
+      RUB3_AGENT_MAX_TOKEN_AMOUNT or RUB3_AGENT_MAX_ETH_WEI, or do not buy
   23  this build will not buy a licence from the contract at that
       address. Checked before anything is signed, so no transaction was
       sent and nothing was spent. Not retryable: the same address holds
@@ -392,14 +395,26 @@ Spend policy:
                                         before anything is signed: an
                                         authorization is spendable by anyone who
                                         sees it, so one must never exist for an
-                                        amount policy refuses";
+                                        amount policy refuses
+  RUB3_AGENT_MAX_ETH_WEI                the most this agent may pay for one
+                                        licence on the ETH rail, an integer in
+                                        wei (0.05 ETH is 50000000000000000).
+                                        Unlike the stablecoin ceiling, this one
+                                        has a default, 0.1 ETH: wei is a fixed
+                                        unit, so one number means the same thing
+                                        on every contract. The ETH rail is
+                                        therefore never unbounded, and unset
+                                        means the default rather than unlimited.
+                                        Weighed after the price is read and
+                                        before the transaction is sent, so a
+                                        refusal costs no gas";
 
 // ── Headless activation ───────────────────────────────────────────────────────
 
 #[cfg(feature = "headless")]
 pub use self::headless::{
     ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome, PaymentRail, SpendPolicy,
-    SpendVerdict, ENV_MAX_TOKEN_AMOUNT,
+    SpendVerdict, DEFAULT_MAX_ETH_WEI, ENV_MAX_ETH_WEI, ENV_MAX_TOKEN_AMOUNT,
 };
 
 #[cfg(feature = "headless")]
@@ -433,14 +448,58 @@ mod headless {
     /// already met rather than introducing a new class of setup.
     pub const ENV_MAX_TOKEN_AMOUNT: &str = "RUB3_AGENT_MAX_TOKEN_AMOUNT";
 
+    /// The environment variable holding the ETH spend ceiling, in wei.
+    ///
+    /// The unit is named in the variable rather than left to a convention,
+    /// because the two plausible readings differ by 10^18. A value written in
+    /// ether (`0.05`) does not parse, so it is a hard configuration error
+    /// rather than a purchase 18 orders of magnitude away from the intent.
+    pub const ENV_MAX_ETH_WEI: &str = "RUB3_AGENT_MAX_ETH_WEI";
+
+    /// The ETH ceiling an operator who configured none still gets: 0.1 ETH.
+    ///
+    /// **Why this rail ships a default when the stablecoin rail cannot.** The
+    /// stablecoin ceiling is denominated in whichever token a contract lists,
+    /// and decimals differ between tokens (USDC 6, DAI 18), so no fixed number
+    /// means the same thing twice and any default is wrongly scaled for some
+    /// token. That argument is specific to a unit this crate cannot know, and
+    /// **it does not transfer to ETH**: wei is a fixed unit on every contract
+    /// on every chain this wrapper targets, so one number here is exactly as
+    /// well defined as the operator's own would be.
+    ///
+    /// So the stablecoin rail's "unset means unavailable" is deliberately not
+    /// copied. Applied to ETH it would leave a wrapper that cannot buy
+    /// anything until configured, changing what every existing operator's
+    /// build does; and the fallback from ETH is nothing at all. A default is
+    /// available here precisely because the unit is knowable, and it closes
+    /// the case the stablecoin rule cannot reach: an operator who configures
+    /// nothing gets a bounded rail rather than an unbounded one.
+    ///
+    /// **What the number is, and is not.** It is not a claim about what a
+    /// licence is worth - ETH's value in any currency moves, and no constant
+    /// compiled into a binary tracks it. It is the blast radius of one
+    /// unattended purchase: high enough that ordinary licence prices (the
+    /// fixtures and worked examples in this repository sit near 0.001-0.01
+    /// ETH) clear it untouched, low enough that a mispriced, hostile, or
+    /// fat-fingered listing cannot drain a funded agent's wallet in one
+    /// transaction. An operator who means to pay more says so in one variable
+    /// and gets an exact, named error until they do - which is the outcome a
+    /// silent unlimited denies them.
+    pub const DEFAULT_MAX_ETH_WEI: U256 = U256::from_limbs([100_000_000_000_000_000, 0, 0, 0]);
+
     /// The operator's ceiling on what one headless run may pay, per rail.
     ///
     /// One type holds every "never spend more than this" rule and one function
-    /// checks against it, so the queued ETH ceiling (`rub3-max-price-policy`,
-    /// for the gap between reading `price()` and sending `value: price`)
-    /// becomes another field here and another [`SpendPolicy::check_token_amount`]
-    /// sibling, rather than a second mechanism grown beside this one.
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    /// per rail checks against it, so a rail's ceiling is another field here
+    /// and another [`SpendPolicy::check_token_amount`] sibling rather than a
+    /// second mechanism grown beside this one.
+    ///
+    /// The two fields differ in one way only, and it is a fact about their
+    /// units rather than a difference of posture: the ETH ceiling always has a
+    /// value, because wei is knowable and [`DEFAULT_MAX_ETH_WEI`] therefore
+    /// exists, while the stablecoin ceiling cannot have one. Neither rail is
+    /// ever unbounded.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct SpendPolicy {
         /// The most a single EIP-3009 authorization may carry, in the payment
         /// token's own smallest unit.
@@ -451,8 +510,32 @@ mod headless {
         /// token the contract lists, and decimals differ between them (USDC 6,
         /// DAI 18), so any fixed default is wrongly scaled for some token. An
         /// unset ceiling therefore falls back to ETH, which never spends a
-        /// currency the operator did not size.
+        /// currency the operator did not size - and which is itself bounded by
+        /// `max_eth_wei` below, so the fallback is not an escape from policy.
         pub max_token_amount: Option<U256>,
+
+        /// The most one `purchase()` may carry as its value, in wei.
+        ///
+        /// Not an `Option`: there is always a ceiling on this rail, either the
+        /// operator's or [`DEFAULT_MAX_ETH_WEI`]. "Unset" is not a state the
+        /// ETH rail can be in, which is the whole point - see that constant
+        /// for why a default is well defined here and not on the other rail.
+        pub max_eth_wei: U256,
+    }
+
+    impl Default for SpendPolicy {
+        /// The policy a run with nothing configured operates under: no
+        /// stablecoin rail, and ETH bounded by [`DEFAULT_MAX_ETH_WEI`].
+        ///
+        /// Written out rather than derived, because a derived `U256::ZERO`
+        /// would silently mean "refuse every ETH purchase" - a plausible
+        /// reading of an empty policy, and the wrong one.
+        fn default() -> Self {
+            Self {
+                max_token_amount: None,
+                max_eth_wei: DEFAULT_MAX_ETH_WEI,
+            }
+        }
     }
 
     /// What the policy says about one proposed spend.
@@ -463,14 +546,19 @@ mod headless {
         /// No ceiling is configured for this rail, so the rail cannot be used.
         /// Carries the variable an operator sets to enable it, so the printed
         /// fallback reason can name it.
+        ///
+        /// Reachable only from [`SpendPolicy::check_token_amount`]: the ETH
+        /// rail always has a ceiling, so it has no unconfigured state to
+        /// report.
         NoCeiling { var: &'static str },
     }
 
     impl SpendPolicy {
         /// Reads the policy from the process environment.
         pub fn from_env() -> Result<Self, HeadlessError> {
-            let raw = std::env::var(ENV_MAX_TOKEN_AMOUNT).ok();
-            Self::from_raw(raw.as_deref())
+            let max_token_amount = std::env::var(ENV_MAX_TOKEN_AMOUNT).ok();
+            let max_eth_wei = std::env::var(ENV_MAX_ETH_WEI).ok();
+            Self::from_raw(max_token_amount.as_deref(), max_eth_wei.as_deref())
         }
 
         /// The parsing rules, separated from the environment so they can be
@@ -479,33 +567,37 @@ mod headless {
         /// A value that is present but unreadable is a hard error rather than
         /// a fallback: silently treating a typo as zero would refuse every
         /// purchase, and silently treating it as unlimited would authorize an
-        /// amount nobody chose. Both are worse than stopping.
-        pub fn from_raw(max_token_amount: Option<&str>) -> Result<Self, HeadlessError> {
-            let Some(raw) = max_token_amount else {
-                return Ok(Self {
-                    max_token_amount: None,
-                });
+        /// amount nobody chose. Both are worse than stopping. That holds for
+        /// either rail, so a malformed stablecoin ceiling stops a run that was
+        /// only ever going to pay in ETH: the operator wrote a number that
+        /// means nothing, and every reading of it is wrong.
+        pub fn from_raw(
+            max_token_amount: Option<&str>,
+            max_eth_wei: Option<&str>,
+        ) -> Result<Self, HeadlessError> {
+            let max_token_amount = match max_token_amount {
+                Some(raw) => Some(parse_ceiling(
+                    ENV_MAX_TOKEN_AMOUNT,
+                    raw,
+                    "unset it to buy in ETH",
+                    "the payment token's smallest unit",
+                )?),
+                None => None,
             };
 
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return Err(HeadlessError::Config {
-                    var: ENV_MAX_TOKEN_AMOUNT,
-                    detail: "is set but empty; unset it to buy in ETH, or set an amount"
-                        .to_string(),
-                });
-            }
-
-            let parsed = trimmed.parse::<U256>().map_err(|e| HeadlessError::Config {
-                var: ENV_MAX_TOKEN_AMOUNT,
-                detail: format!(
-                    "is not a whole non-negative amount in the payment token's smallest \
-                     unit: {trimmed:?} ({e})"
-                ),
-            })?;
+            let max_eth_wei = match max_eth_wei {
+                Some(raw) => parse_ceiling(
+                    ENV_MAX_ETH_WEI,
+                    raw,
+                    "unset it to use the built-in default of 0.1 ETH",
+                    "wei",
+                )?,
+                None => DEFAULT_MAX_ETH_WEI,
+            };
 
             Ok(Self {
-                max_token_amount: Some(parsed),
+                max_token_amount,
+                max_eth_wei,
             })
         }
 
@@ -532,11 +624,75 @@ mod headless {
                     listed: listed.to_string(),
                     maximum: maximum.to_string(),
                     token: Some(crate::identity::format_addr(token)),
+                    var: ENV_MAX_TOKEN_AMOUNT,
                 });
             }
 
             Ok(SpendVerdict::Allowed)
         }
+
+        /// The single place an ETH price is weighed against the policy. The
+        /// sibling of [`SpendPolicy::check_token_amount`], same verdict, same
+        /// refusal, same exit code.
+        ///
+        /// Two outcomes rather than three: this rail cannot report
+        /// [`SpendVerdict::NoCeiling`], because it always has one. There is
+        /// also nothing to fall back *to* - ETH is the last rail - so a listing
+        /// above the ceiling is a refusal here for the same reason it is there,
+        /// and additionally because no alternative exists.
+        ///
+        /// The caller's obligation is ordering: this is weighed after
+        /// `price()` is read and **before** the transaction is sent, so a
+        /// refusal costs no gas and no transaction for this purchase is ever
+        /// broadcast, rather than the listed price being met and then refused.
+        /// That is the whole of what this check guarantees: unlike the
+        /// stablecoin rail, where the thing that must not exist is a signed
+        /// authorization, here it is a broadcast transaction. A run that
+        /// reached this rail by falling back off an advertised stablecoin rail
+        /// may already have signed an authorization before arriving, which is
+        /// that rail's concern and not something this refusal speaks to.
+        pub fn check_eth_wei(&self, listed: U256) -> Result<SpendVerdict, HeadlessError> {
+            if listed > self.max_eth_wei {
+                return Err(HeadlessError::PriceAbovePolicy {
+                    rail: "eth",
+                    listed: listed.to_string(),
+                    maximum: self.max_eth_wei.to_string(),
+                    // ETH is the currency, not a contract: there is no token
+                    // address to name, and an orchestrator reads the absent
+                    // key as "this rail has no payment token".
+                    token: None,
+                    var: ENV_MAX_ETH_WEI,
+                });
+            }
+
+            Ok(SpendVerdict::Allowed)
+        }
+    }
+
+    /// Parses one ceiling, shared by both rails so a malformed value fails the
+    /// same way whichever variable held it.
+    ///
+    /// `unset_advice` and `unit` differ per rail, and both belong in the
+    /// message: an operator reading it has to know what unsetting the variable
+    /// would do, and in what unit the number they meant to write is expressed.
+    fn parse_ceiling(
+        var: &'static str,
+        raw: &str,
+        unset_advice: &str,
+        unit: &str,
+    ) -> Result<U256, HeadlessError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(HeadlessError::Config {
+                var,
+                detail: format!("is set but empty; {unset_advice}, or set an amount in {unit}"),
+            });
+        }
+
+        trimmed.parse::<U256>().map_err(|e| HeadlessError::Config {
+            var,
+            detail: format!("is not a whole non-negative amount in {unit}: {trimmed:?} ({e})"),
+        })
     }
 
     /// Which currency a purchase was settled in, and how much of it.
@@ -629,13 +785,19 @@ mod headless {
         /// that could broadcast it. So this outcome is not evidence that the
         /// rail is otherwise healthy, and the message says so.
         PriceAbovePolicy {
-            /// Which rail was refused, so an ETH ceiling reports through the
-            /// same variant when it lands.
+            /// Which rail was refused: both of them report through this one
+            /// variant, because "this costs more than my policy allows" is one
+            /// outcome whatever the currency.
             rail: &'static str,
             listed: String,
             maximum: String,
-            /// The payment token, when the rail has one.
+            /// The payment token, when the rail has one. `None` on the ETH
+            /// rail, whose currency is not a contract.
             token: Option<String>,
+            /// The variable that raises *this* rail's ceiling. Carried rather
+            /// than derived from `rail`, so the message cannot name the wrong
+            /// one after a rail is added.
+            var: &'static str,
         },
         /// The contract at the configured address is not canonical rub3 code,
         /// so this run refused to buy from it. Nothing was signed and nothing
@@ -717,19 +879,43 @@ mod headless {
                          retrying blindly"
                     )
                 }
-                HeadlessError::PriceAbovePolicy { rail, listed, maximum, token } => {
+                HeadlessError::PriceAbovePolicy { rail, listed, maximum, token, var } => {
                     write!(f, "price above policy: the {rail} rail lists {listed}")?;
                     if let Some(token) = token {
                         write!(f, " of {token}")?;
                     }
                     write!(
                         f,
-                        ", above the configured maximum of {maximum}. Raise \
-                         {ENV_MAX_TOKEN_AMOUNT} if this price is acceptable. This says only \
-                         that the price was refused: the rail was not exercised, because the \
-                         purchase pre-flight is deliberately not run for an amount policy \
-                         refuses, so it is no evidence the rail is otherwise usable"
-                    )
+                        ", above the configured maximum of {maximum}. Raise {var} if this \
+                         price is acceptable."
+                    )?;
+                    match token {
+                        // The stablecoin rail is refused before its
+                        // authorization is signed, which means before its
+                        // pre-flight runs, so the refusal is no evidence the
+                        // rail would have worked.
+                        Some(_) => write!(
+                            f,
+                            " This says only that the price was refused: the rail was not \
+                             exercised, because the purchase pre-flight is deliberately not \
+                             run for an amount policy refuses, so it is no evidence the rail \
+                             is otherwise usable"
+                        ),
+                        // The ETH rail is refused before the transaction is
+                        // sent, so the useful fact is the one about gas. It is
+                        // deliberately not widened into "nothing was sent": a
+                        // run that reached ETH by falling back off an
+                        // advertised stablecoin rail may already have signed
+                        // one authorization on the way.
+                        None => write!(
+                            f,
+                            " No transaction was broadcast for this purchase and no gas was \
+                             spent, because the price is weighed before the transaction is \
+                             built. That is not a claim that nothing was signed: if this run \
+                             passed over an advertised stablecoin rail, it may already have \
+                             signed and disclosed an EIP-3009 authorization"
+                        ),
+                    }
                 }
                 HeadlessError::NotCanonicalContract { contract, refusal } => write!(
                     f,
@@ -825,6 +1011,7 @@ mod headless {
                     listed,
                     maximum,
                     token,
+                    ..
                 } => Some(match token {
                     Some(token) => {
                         format!("rail={rail} listed={listed} maximum={maximum} token={token}")
@@ -1126,6 +1313,21 @@ mod headless {
             None => {
                 let price = rpc::eth_price(&ctx.rpc_url, contract)
                     .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+
+                // Between reading the price and sending the value, and nothing
+                // may be moved after it: a listing above the ceiling has to be
+                // refused locally, before `tx::send`, so it costs no gas. The
+                // contract requires exact payment, so a price that moves after
+                // this read reverts on-chain rather than overpaying - this
+                // ceiling is not about that, it bounds what the agent will
+                // agree to pay at all.
+                //
+                // `Allowed` is the only verdict this rail can produce: its
+                // ceiling always has a value, so there is no unconfigured case
+                // to branch on and no other rail to fall back to. A breach
+                // arrives as the `?`.
+                SpendPolicy::from_env()?.check_eth_wei(price)?;
+
                 (
                     TxPlan {
                         to: contract,
@@ -1506,6 +1708,7 @@ mod tests {
                     listed: "10000000000".into(),
                     maximum: "5000000".into(),
                     token: Some("0x0000000000000000000000000000000000000abc".into()),
+                    var: ENV_MAX_TOKEN_AMOUNT,
                 },
                 22,
             ),
@@ -1567,7 +1770,7 @@ mod tests {
     /// operator can tell them what to set.
     #[test]
     fn an_unset_ceiling_leaves_the_stablecoin_rail_unavailable() {
-        let policy = SpendPolicy::from_raw(None).expect("an unset ceiling is not an error");
+        let policy = SpendPolicy::from_raw(None, None).expect("an unset ceiling is not an error");
         assert_eq!(policy.max_token_amount, None);
         assert_eq!(
             policy
@@ -1583,7 +1786,7 @@ mod tests {
     /// within policy, and one wei of the token above it is not.
     #[test]
     fn a_listing_at_the_ceiling_is_allowed_and_one_above_it_is_refused() {
-        let policy = SpendPolicy::from_raw(Some("5000000")).expect("a plain integer parses");
+        let policy = SpendPolicy::from_raw(Some("5000000"), None).expect("a plain integer parses");
         assert_eq!(
             policy
                 .check_token_amount(Address::ZERO, alloy::primitives::U256::from(5_000_000u64))
@@ -1605,7 +1808,7 @@ mod tests {
         let token: Address = "0x0000000000000000000000000000000000000abc"
             .parse()
             .expect("test address");
-        let err = SpendPolicy::from_raw(Some("1000000"))
+        let err = SpendPolicy::from_raw(Some("1000000"), None)
             .expect("a plain integer parses")
             .check_token_amount(token, alloy::primitives::U256::from(9_000_000u64))
             .expect_err("above the ceiling must refuse");
@@ -1633,7 +1836,7 @@ mod tests {
     #[test]
     fn a_malformed_ceiling_is_a_hard_configuration_error() {
         for raw in ["abc", "-1", "5.0", "1e6", " ", "5000000usdc"] {
-            let err = SpendPolicy::from_raw(Some(raw))
+            let err = SpendPolicy::from_raw(Some(raw), None)
                 .err()
                 .unwrap_or_else(|| panic!("{raw:?} must not parse"));
             assert!(
@@ -1651,7 +1854,7 @@ mod tests {
     /// must not be confused with the variable being unset.
     #[test]
     fn a_zero_ceiling_refuses_every_non_zero_price() {
-        let policy = SpendPolicy::from_raw(Some("0")).expect("zero is a valid ceiling");
+        let policy = SpendPolicy::from_raw(Some("0"), None).expect("zero is a valid ceiling");
         assert_eq!(
             policy.max_token_amount,
             Some(alloy::primitives::U256::ZERO),
@@ -1673,22 +1876,201 @@ mod tests {
     }
 
     /// And the environment is really the source: `from_env` reads the same
-    /// variable the help text names.
+    /// two variables the help text names.
     #[test]
-    fn the_ceiling_is_read_from_the_documented_variable() {
+    fn the_ceilings_are_read_from_the_documented_variables() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let previous = std::env::var(ENV_MAX_TOKEN_AMOUNT).ok();
+        let previous_token = std::env::var(ENV_MAX_TOKEN_AMOUNT).ok();
+        let previous_eth = std::env::var(ENV_MAX_ETH_WEI).ok();
         std::env::set_var(ENV_MAX_TOKEN_AMOUNT, "42");
+        std::env::set_var(ENV_MAX_ETH_WEI, "43");
         let read = SpendPolicy::from_env();
-        match previous {
+        match previous_token {
             Some(value) => std::env::set_var(ENV_MAX_TOKEN_AMOUNT, value),
             None => std::env::remove_var(ENV_MAX_TOKEN_AMOUNT),
         }
+        match previous_eth {
+            Some(value) => std::env::set_var(ENV_MAX_ETH_WEI, value),
+            None => std::env::remove_var(ENV_MAX_ETH_WEI),
+        }
+
+        let policy = read.expect("plain integers parse");
+        assert_eq!(
+            policy.max_token_amount,
+            Some(alloy::primitives::U256::from(42u64)),
+        );
+        assert_eq!(policy.max_eth_wei, alloy::primitives::U256::from(43u64));
+    }
+
+    /// The ETH rail is bounded with nothing configured. This is the property
+    /// the whole default exists for: an operator who sets no variable at all
+    /// gets a ceiling, not an unlimited rail.
+    #[test]
+    fn the_eth_rail_is_bounded_with_nothing_configured() {
+        let policy = SpendPolicy::from_raw(None, None).expect("an unset ceiling is not an error");
 
         assert_eq!(
-            read.expect("a plain integer parses").max_token_amount,
-            Some(alloy::primitives::U256::from(42u64)),
+            policy.max_eth_wei, DEFAULT_MAX_ETH_WEI,
+            "an unset ETH ceiling must mean the default, never unlimited",
+        );
+        assert_eq!(
+            policy,
+            SpendPolicy::default(),
+            "the default policy and a policy read from an empty environment must agree",
+        );
+        // Neither degenerate reading of "unconfigured" is what happens: not
+        // zero (which would refuse every purchase and break every existing
+        // build) and not unlimited (which is the exposure this closes).
+        assert!(policy.max_eth_wei > alloy::primitives::U256::ZERO);
+        assert!(policy.max_eth_wei < alloy::primitives::U256::MAX);
+
+        assert_eq!(
+            policy
+                .check_eth_wei(DEFAULT_MAX_ETH_WEI + alloy::primitives::U256::from(1u64))
+                .expect_err("above the default must refuse")
+                .exit_code(),
+            EXIT_PRICE_ABOVE_POLICY,
+        );
+
+        // 0.01 ETH, the price the repository's own fixtures list: the default
+        // has to leave an ordinary licence purchase untouched, or it would be
+        // a breaking change dressed as a safety net.
+        assert_eq!(
+            policy
+                .check_eth_wei(alloy::primitives::U256::from(10_000_000_000_000_000u64))
+                .expect("an ordinary licence price is within the default"),
+            SpendVerdict::Allowed,
+        );
+    }
+
+    /// The ETH ceiling is inclusive at the boundary, exactly like the
+    /// stablecoin one: at the ceiling is within policy, one wei above is not.
+    #[test]
+    fn an_eth_listing_at_the_ceiling_is_allowed_and_one_wei_above_it_is_refused() {
+        let policy =
+            SpendPolicy::from_raw(None, Some("50000000000000000")).expect("a plain integer parses");
+        let ceiling = alloy::primitives::U256::from(50_000_000_000_000_000u64);
+
+        assert_eq!(
+            policy
+                .check_eth_wei(ceiling - alloy::primitives::U256::from(1u64))
+                .expect("under the ceiling is within policy"),
+            SpendVerdict::Allowed,
+        );
+        assert_eq!(
+            policy
+                .check_eth_wei(ceiling)
+                .expect("equal to the ceiling is within policy"),
+            SpendVerdict::Allowed,
+        );
+
+        let err = policy
+            .check_eth_wei(ceiling + alloy::primitives::U256::from(1u64))
+            .expect_err("above the ceiling must refuse");
+        assert_eq!(err.exit_code(), EXIT_PRICE_ABOVE_POLICY);
+    }
+
+    /// The ETH refusal reports through the same variant and the same detail
+    /// shape as the stablecoin one, minus the `token=` key: ETH's currency is
+    /// not a contract, and an orchestrator reads the absent key rather than a
+    /// placeholder address.
+    #[test]
+    fn a_refused_eth_price_reports_the_amounts_and_names_its_own_variable() {
+        let err = SpendPolicy::from_raw(None, Some("1000"))
+            .expect("a plain integer parses")
+            .check_eth_wei(alloy::primitives::U256::from(9_000u64))
+            .expect_err("above the ceiling must refuse");
+
+        let detail = err
+            .machine_detail()
+            .expect("a policy refusal must carry a detail line");
+        assert_eq!(detail, "rail=eth listed=9000 maximum=1000");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains(ENV_MAX_ETH_WEI), "{rendered}");
+        assert!(
+            !rendered.contains(ENV_MAX_TOKEN_AMOUNT),
+            "the ETH refusal must not tell an operator to raise the other rail's \
+             ceiling: {rendered}"
+        );
+        assert!(
+            rendered.contains("no gas"),
+            "the ETH refusal must say no transaction was broadcast and no gas spent: \
+             {rendered}"
+        );
+    }
+
+    /// A malformed ETH ceiling is the same hard stop as a malformed stablecoin
+    /// one, and the message names the variable that holds it. `0.05` is the
+    /// case that matters: written in ether it is 10^18 times the intent, so it
+    /// must never be read as anything.
+    #[test]
+    fn a_malformed_eth_ceiling_is_a_hard_configuration_error() {
+        for raw in ["abc", "-1", "0.05", "1e18", " ", "50000000000000000wei"] {
+            let err = SpendPolicy::from_raw(None, Some(raw))
+                .err()
+                .unwrap_or_else(|| panic!("{raw:?} must not parse"));
+            assert!(
+                matches!(err, HeadlessError::Config { .. }),
+                "{raw:?} produced {err:?}"
+            );
+            assert!(
+                err.to_string().contains(ENV_MAX_ETH_WEI),
+                "the message must name the variable: {err}"
+            );
+            assert!(
+                err.to_string().contains("wei"),
+                "the message must name the unit the value was expected in: {err}"
+            );
+        }
+    }
+
+    /// Zero is a real ETH ceiling - "never buy in ETH" - and has to be
+    /// reachable, since the default means an unset variable can no longer
+    /// express it.
+    #[test]
+    fn a_zero_eth_ceiling_refuses_every_non_zero_price() {
+        let policy = SpendPolicy::from_raw(None, Some("0")).expect("zero is a valid ceiling");
+        assert_eq!(policy.max_eth_wei, alloy::primitives::U256::ZERO);
+        assert_eq!(
+            policy
+                .check_eth_wei(alloy::primitives::U256::ZERO)
+                .expect("a free listing is within a zero ceiling"),
+            SpendVerdict::Allowed,
+        );
+        assert_eq!(
+            policy
+                .check_eth_wei(alloy::primitives::U256::from(1u64))
+                .expect_err("any price is above a zero ceiling")
+                .exit_code(),
+            EXIT_PRICE_ABOVE_POLICY,
+        );
+    }
+
+    /// The two ceilings are independent: neither rail's variable moves the
+    /// other's, so adding the ETH one cannot have changed what the stablecoin
+    /// rail does.
+    #[test]
+    fn the_two_ceilings_do_not_reach_into_each_other() {
+        let eth_only = SpendPolicy::from_raw(None, Some("1")).expect("a plain integer parses");
+        assert_eq!(
+            eth_only.max_token_amount, None,
+            "setting the ETH ceiling must not configure the stablecoin rail",
+        );
+        assert_eq!(
+            eth_only
+                .check_token_amount(Address::ZERO, alloy::primitives::U256::from(1u64))
+                .expect("an unset stablecoin ceiling refuses nothing outright"),
+            SpendVerdict::NoCeiling {
+                var: ENV_MAX_TOKEN_AMOUNT
+            },
+        );
+
+        let token_only = SpendPolicy::from_raw(Some("1"), None).expect("a plain integer parses");
+        assert_eq!(
+            token_only.max_eth_wei, DEFAULT_MAX_ETH_WEI,
+            "setting the stablecoin ceiling must not move the ETH one",
         );
     }
 

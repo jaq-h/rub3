@@ -221,9 +221,9 @@ rub3-wrapper --headless --token-id 3 --binary /path/to/your/app
 
 **`rub3-wrapper --help` owns the exit-code and signer-source contract.** The
 binary prints both tables below, with the reasoning that matters at the call
-site: why the spend ceiling starts unavailable rather than unlimited, and why
-code 21 is deliberately not code 14. The tables are reproduced here for
-discoverability.
+site: why the stablecoin spend ceiling starts unavailable rather than unlimited
+while the ETH one has a default, and why code 21 is deliberately not code 14.
+The tables are reproduced here for discoverability.
 
 Two properties to know before reading them. Every `RUB3_AGENT_*` credential
 variable is removed from the wrapped binary's environment before launch -
@@ -251,11 +251,26 @@ Highest precedence first.
 | Variable | Meaning |
 |---|---|
 | `RUB3_AGENT_MAX_TOKEN_AMOUNT` | The most this agent may authorize on a contract's stablecoin rail, an integer in that payment token's own smallest unit (USDC has 6 decimals, so 5 USDC is `5000000`) |
+| `RUB3_AGENT_MAX_ETH_WEI` | The most this agent may pay for one licence on the ETH rail, an integer in **wei** (0.05 ETH is `50000000000000000`). Defaults to 0.1 ETH |
 
-Policy, not a credential, so unlike the signer sources above it is **not**
-stripped from the wrapped binary's environment. There is no default: until it is
-set the stablecoin rail is unavailable rather than unlimited, and the wrapper
-falls back to ETH and prints why. A malformed value is a hard error.
+Policy, not credentials, so unlike the signer sources above they are **not**
+stripped from the wrapped binary's environment. A malformed value in either is a
+hard error rather than a guess.
+
+The two behave differently when unset, and the difference is about units, not
+about caution. The stablecoin ceiling has **no default**: it is denominated in
+whichever token a contract lists, and decimals differ between tokens, so no
+single number means the same thing twice. Until it is set that rail is
+unavailable rather than unlimited, and the wrapper falls back to ETH and prints
+why. The ETH ceiling **has** a default, because wei is a fixed unit and one
+number therefore means the same thing on every contract. So neither rail is ever
+unbounded: an operator who configures nothing buys in ETH up to 0.1 ETH, and a
+listing above that is refused locally, before the transaction is sent, costing
+no gas.
+
+0.1 ETH is not a claim about what a licence is worth. It is the blast radius of
+one unattended purchase - well above ordinary licence prices, well below what a
+funded agent holds. Raise it in one variable when a real price sits above it.
 
 ### Contract code check
 
@@ -328,7 +343,7 @@ activation failure.
 | 19 | Chain id mismatch between endpoint and build | Fix `RPC_URL` |
 | 20 | `--token-id` names a token this signer does not hold | Fix the id, or drop the flag to purchase |
 | 21 | Purchase broadcast but not confirmed - timed out, or the receipt query kept failing | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
-| 22 | The listed price is above the configured spend ceiling. The ceiling is weighed before anything is signed, so the rail was not exercised and this is no evidence it is otherwise usable | Terminal - raise `RUB3_AGENT_MAX_TOKEN_AMOUNT` if the price is acceptable, or do not buy |
+| 22 | The listed price is above the configured spend ceiling for the rail it was listed on. On the stablecoin rail the ceiling is weighed before anything is signed, so the rail was not exercised and this is no evidence it is otherwise usable; on the ETH rail it is weighed before the transaction is sent, so no gas was spent | Terminal - raise the variable the message names (`RUB3_AGENT_MAX_TOKEN_AMOUNT` or `RUB3_AGENT_MAX_ETH_WEI`) if the price is acceptable, or do not buy |
 | 23 | This build will not buy a licence from the contract at that address, either because the code is canonical rub3 code at an address that sells none (the factory or a deployer helper) or because it matched no fingerprint this build pins. Checked before anything is signed, so no transaction was sent and nothing was spent | Terminal - the same address holds the same code. The detail line below says which case it is: verify the address, or use a build packed with the release that contract came from |
 
 Failures with structured parameters also print one parseable line, carrying only
@@ -381,6 +396,7 @@ the authority on what each covers, what it cost, and what comes next.
 - **Ownership invariants (§2.4)** - append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor`, the contract-side `honorsContract` trust rule, per-token renewal snapshots, and a no-revocation bytecode audit over four deployed contracts
 - **Reproducible builds** - canonical bytecode fingerprints for five contracts, gated in CI
 - **Pre-purchase contract attestation (§2.6)** - before an agent spends, the wrapper compares the contract's masked code hash against fingerprints pinned in the binary and refuses on a miss (exit 23), catching a modified copy that a selector-name scan passes in silence. It gates purchases only, never launches
+- **Spend ceilings (§2.2, §2.7)** - one operator policy bounds both rails before anything is spent: `RUB3_AGENT_MAX_TOKEN_AMOUNT` gates the stablecoin rail before an authorization is signed, `RUB3_AGENT_MAX_ETH_WEI` gates the ETH rail before the transaction is sent, and the ETH one defaults to 0.1 ETH so neither rail is ever unbounded (exit 22)
 - **Deploy scripts** - `forge script` deploys either licence contract to any EVM chain from env vars, directly or through a factory; `DeployFactory.s.sol` deploys the factory itself
 
 **Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
