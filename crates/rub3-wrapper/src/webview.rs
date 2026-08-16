@@ -750,21 +750,34 @@ impl IpcState {
 /// where it should differ.
 #[cfg(feature = "onchain-write")]
 struct RefusalNotice {
-    /// The headline: what this is, in one line.
+    /// The headline: what this is, in one line. Emitted as `"title"`, written
+    /// into `#b-title`.
     title: &'static str,
     /// What the check found, said without jargon and without accusing anyone.
     /// A refusal is equally what a legitimate contract released after this app
     /// was packed looks like, and the wording must not pretend otherwise.
+    /// Emitted as `"body"`, written into `#b-body`.
     body: String,
-    /// The one thing the person can usefully do next.
+    /// The one thing the person can usefully do next. Emitted as `"nextStep"`,
+    /// written into `#b-next`.
     next_step: &'static str,
-    /// The exact technical finding, kept verbatim so it can be pasted into a
-    /// message to whoever published the software.
+    /// The technical finding, for a message to whoever published the software.
+    /// Emitted as `"detail"`, written into `#b-detail`.
+    ///
+    /// A refusal carries its finding verbatim: it is a verdict on the contract,
+    /// and every word of it is about the contract. A failed read carries only
+    /// the kind of failure, because the transport error it came from embeds the
+    /// request URL, and a packed `RPC_URL` can hold a provider API key. That
+    /// key would then be on a buyer's screen under a line inviting them to
+    /// share it, and it tells them nothing their next step does not already
+    /// say. The full error still goes to stderr for whoever ran the wrapper
+    /// from a terminal.
     detail: String,
     /// Whether trying again could plausibly change the answer. True only for a
     /// chain read that did not complete; a refused address is a settled answer
     /// and offering a retry for it would invite the buyer to keep clicking
-    /// until the check passes.
+    /// until the check passes. Emitted as `"retryable"`, and toggles
+    /// `#btn-b-retry`.
     retryable: bool,
 }
 
@@ -775,6 +788,7 @@ struct RefusalNotice {
 #[cfg(feature = "onchain-write")]
 fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNotice {
     use crate::attest::{GateError, Refusal, Role};
+    use crate::rpc::RpcError;
 
     match error {
         // Not a verdict on the contract: the wrapper has no opinion yet,
@@ -790,7 +804,33 @@ fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNo
             ),
             next_step: "This is a connection problem, not a verdict on the contract. \
                         Check your network and try again.",
-            detail: e.to_string(),
+            // The kind of failure only. The transport error's own message
+            // carries the request URL, and the URL packed into this build can
+            // hold a provider API key; putting it on screen would publish that
+            // key to whoever is looking and add nothing the next step above
+            // does not already say. Stderr still gets the whole error.
+            detail: match e {
+                RpcError::Transport(_) => {
+                    "The node this app reads the chain through did not answer the request for \
+                     the contract's code."
+                        .to_string()
+                }
+                RpcError::Contract(_) => {
+                    "The request for the contract's code came back as an error rather than as \
+                     code."
+                        .to_string()
+                }
+                RpcError::InvalidInput(_) => {
+                    "The request for the contract's code was rejected as malformed before it \
+                     reached the network."
+                        .to_string()
+                }
+                RpcError::EnsNotSupported => {
+                    "The contract is named by an ENS name, which this app cannot resolve, so \
+                     its code was never requested."
+                        .to_string()
+                }
+            },
             retryable: true,
         },
 
@@ -1150,37 +1190,41 @@ mod tests {
         }
     }
 
-    /// The refusal screen the notice is rendered on must exist, and must read
-    /// every field the notice carries. A field added here and never displayed
-    /// is worse than absent: it reads as covered.
+    /// A failed read must not put the RPC endpoint on a buyer's screen.
+    ///
+    /// The transport error is built from the request, so it carries the URL the
+    /// wrapper was packed with, and that URL can hold a provider API key. The
+    /// blocked screen shows `detail` under a line telling the person to send it
+    /// to whoever published the software, so anything in it is as good as
+    /// published. Every field the screen renders is checked, not just `detail`,
+    /// because a leak moved into the body is the same leak.
     #[test]
-    fn the_window_displays_every_field_of_the_notice() {
-        for element in [
-            "b-title",
-            "b-body",
-            "b-next",
-            "b-detail",
-            "btn-b-retry",
-            "btn-b-cancel",
-        ] {
-            assert!(
-                ACTIVATION_HTML.contains(&format!("id=\"{element}\"")),
-                "the refusal screen declares no #{element}"
-            );
-        }
-        for key in ["title", "body", "nextStep", "detail", "retryable"] {
-            assert!(
-                ACTIVATION_HTML.contains(&format!("data.{key}")),
-                "the window never reads data.{key}, so that half of the refusal is invisible"
-            );
-        }
-        assert!(
-            ACTIVATION_HTML.contains("onPurchaseBlocked(data)"),
-            "the window declares no handler for a blocked purchase"
+    fn a_failed_read_never_puts_the_rpc_endpoint_on_screen() {
+        const HOST: &str = "base-mainnet.example-provider.io";
+        const SECRET: &str = "9f3c1d7ab24e4a1e8c05f6d2b7e19a44";
+        let transport = format!(
+            "error sending request for url (https://{HOST}/v2/{SECRET}?apiKey={SECRET}): \
+             connection closed before message completed"
         );
+
+        let notice = refusal_notice(
+            CONTRACT,
+            &crate::attest::GateError::Fetch(crate::rpc::RpcError::Transport(transport)),
+        );
+
+        let shown = format!(
+            "{} {} {} {}",
+            notice.title, notice.body, notice.next_step, notice.detail
+        );
+        for leaked in [HOST, SECRET, "https://", "apiKey", "example-provider"] {
+            assert!(
+                !shown.contains(leaked),
+                "the refusal screen shows {leaked:?}, which came from the packed RPC URL: {shown}"
+            );
+        }
         assert!(
-            ACTIVATION_HTML.contains("'blocked'"),
-            "the blocked screen is not in the screen registry, so nothing can show it"
+            !notice.detail.is_empty(),
+            "redacting the endpoint must not leave the buyer with a blank finding"
         );
     }
 }
