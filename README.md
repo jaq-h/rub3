@@ -260,9 +260,11 @@ falls back to ETH and prints why. A malformed value is a hard error.
 Before it buys, the wrapper asks whether the contract is the code it thinks it
 is. It reads the deployed runtime code once, zeroes the immutable byte ranges,
 hashes the result, and compares that against a table of canonical fingerprints
-compiled into the binary. A match costs no extra network round trip and is the
-common case; a miss refuses the purchase with exit code 23, before anything is
-signed and with no transaction sent.
+compiled into the binary. A match needs no further network round trip and is
+the common case; it prints one stderr line naming what matched
+(`rub3: 0x... verified as canonical Rub3Access (...)`) and the purchase goes
+ahead. A miss refuses the purchase with exit code 23, before anything is signed
+and with no transaction sent.
 
 Masking the immutables is what makes the comparison work at all: they hold the
 constructor's arguments, so two legitimate deploys of identical code that chose

@@ -311,24 +311,7 @@ without `activate()` + cooldown + purchase), so `--features headless` and
 - `activation::EXIT_CODE_HELP` is rendered into `--help`, so the contract is discoverable from the binary and not only from the docs. Exit codes are defined unconditionally in `activation.rs` (not inside the gated module) precisely so code 18 exists in non-headless builds
 - Failures print one human line plus, when structured, one `rub3-detail: key=value` line - `blocks_remaining=N` for cooldown, `required_wei`/`available_wei` for funds, `supply_cap`/`minted` for sold out
 
-| Code | Meaning |
-|---|---|
-| 0 | success - session valid, wrapped binary launched |
-| 1 | unclassified failure |
-| 2 | command-line usage error (clap; reserved, nothing of ours collides) |
-| 10 | no usable signer |
-| 11 | insufficient funds for purchase + gas |
-| 12 | no token held and supply sold out |
-| 13 | cooldown active - `blocks_remaining=N` on stderr |
-| 14 | `activate()` reverted, or did not confirm in time - retryable; a re-run re-reads ownership rather than purchasing again |
-| 15 | session verification failed |
-| 16 | chain RPC / transport failure |
-| 17 | session could not be persisted |
-| 18 | headless mode not compiled into this build |
-| 19 | chain id mismatch between the RPC endpoint and this build |
-| 20 | `--token-id` names a token this signer does not hold |
-| 21 | purchase broadcast but not confirmed (timeout or receipt-poll transport failure) - terminal, `tx_hash=0x...` on stderr |
-| 22 | the listed price is above the configured spend ceiling - terminal, `rail=... listed=... maximum=... token=0x...` on stderr (§2.2) |
+The full code table - every code, its meaning, and what an orchestrator should do with it - is maintained in one place, `README.md` → "Exit codes", which mirrors `activation::EXIT_CODE_HELP`. §2.1 defined 0, 1, 2 and 10-21; later phases added 22 (§2.2) and 23 (§2.6).
 
 **Tests** - lib tests 62 under the default bundle (up from 58), 72 under tier-3 (up from 62), 117 under `tier-3,headless`; wrapper e2e 7, all new. New unit coverage: `signer.rs` 20, `activation.rs` 18, `tx.rs` 7, `rpc.rs` 7 receipt-poll tests, `supervisor.rs` 3. `tests/headless_e2e.rs` is new (anvil-gated, `#[ignore]`, zero webview involvement - the test binary links neither `wry` nor `tao`), on port 8549 so it runs alongside `session_onchain_e2e.rs`, self-serialising through a file-level mutex so no `--test-threads=1` is required. Per-test inventory: `testing.md` → "Unit tests (in `src/`)" and "Headless (agent) E2E (`tests/headless_e2e.rs`)".
 
