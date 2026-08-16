@@ -17,6 +17,11 @@
 #     deploy scripts already read as "no factory"
 #   * both chains the project targets stay present, so deleting the entry the
 #     file exists to answer cannot land silently
+#   * a name is one of the [rpc_endpoints] keys in contracts/foundry.toml, the
+#     contract the manifest declares for that field, so a name a consumer
+#     cannot hand to forge --rpc-url cannot land: the first version of this
+#     file shipped the [etherscan] chain value instead, which looks identical
+#     and is not an rpc alias
 #
 # Usage, from anywhere in the repo:
 #   scripts/check-deployments.sh
@@ -33,10 +38,29 @@ jq -e . "$manifest" >/dev/null 2>&1 || {
   exit 1
 }
 
+# The rpc aliases foundry itself resolves, read out of the one section that
+# defines them. Deliberately a key scrape rather than a TOML parser: the only
+# thing needed here is the set of keys in [rpc_endpoints].
+rpc_aliases="$(awk '
+  /^\[rpc_endpoints\]/ { in_section = 1; next }
+  /^\[/                 { in_section = 0 }
+  in_section && /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=/ {
+    sub(/[[:space:]]*=.*/, "")
+    gsub(/[[:space:]]/, "")
+    print
+  }
+' "$repo_root/contracts/foundry.toml")"
+
+[ -n "$rpc_aliases" ] || {
+  echo "error: no [rpc_endpoints] keys found in contracts/foundry.toml" >&2
+  exit 1
+}
+aliases_json="$(printf '%s\n' "$rpc_aliases" | jq -R . | jq -s .)"
+
 # jq exits non-zero on the first violated rule and prints which chain broke it.
 # Kept as one program rather than a loop of shell tests so the whole schema is
 # readable in one place.
-errors="$(jq -r '
+errors="$(jq -r --argjson aliases "$aliases_json" '
   def fail($msg): "\($msg)";
 
   [
@@ -62,7 +86,10 @@ errors="$(jq -r '
                 (if ($c | keys) != ["deploy_block", "factory", "generation", "name"]
                   then fail("chain \($id): keys must be exactly name, factory, deploy_block, generation") else empty end),
                 (if ($c.name | type) != "string" or ($c.name | length) == 0
-                  then fail("chain \($id): name must be a non-empty string") else empty end),
+                  then fail("chain \($id): name must be a non-empty string")
+                  elif ($aliases | index($c.name)) == null
+                    then fail("chain \($id): name \"\($c.name)\" is not an [rpc_endpoints] key in contracts/foundry.toml (\($aliases | join(", ")))")
+                  else empty end),
 
                 (if $c.factory != null and (($c.factory | type) != "string" or ($c.factory | test("^0x[0-9a-fA-F]{40}$") | not))
                   then fail("chain \($id): factory must be null or 0x-prefixed 40-hex") else empty end),
