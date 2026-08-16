@@ -57,6 +57,12 @@ jobs:
           # without this entry nothing blocking compiles src/webview.rs.
           - bundle: tier-2 + webview
             features: tier-2,webview
+          # The human purchase path. `show_purchase` and its pre-purchase code
+          # attestation are gated on `onchain-write`, which tier-2 does not
+          # enable, so tier-2,webview compiles the window but not the one screen
+          # in it that spends money. This is the only entry that builds it.
+          - bundle: tier-3 + webview
+            features: tier-3,webview
 
     steps:
       - uses: actions/checkout@v7.0.1

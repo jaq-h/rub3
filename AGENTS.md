@@ -45,12 +45,12 @@ Consequences that catch people out:
 
 - **Whole modules are `#[cfg]`-gated out.** `src/lib.rs` is the authority. Under `tier-0` the `session`, `identity`, and `session_store` modules do not exist at all, so the set of compiled tests changes with the bundle. Code that builds and passes under the default proves nothing about `tier-0` or `tier-3`.
 - **Cargo features are additive, so `--no-default-features` is mandatory.** `--features tier-0` on its own leaves the `tier-2` default enabled and silently tests tier-2 instead. Always pass `--no-default-features --features <bundle>`.
-- **Run the matrix before claiming a wrapper change works.** All eight must pass. `tier-3,binary-encryption` is the only entry that compiles `src/decrypt.rs`, since no tier bundle enables `binary-encryption`; the last two are the only ones that compile a front door, `src/webview.rs` and the headless door respectively:
+- **Run the matrix before claiming a wrapper change works.** All nine must pass. `tier-3,binary-encryption` is the only entry that compiles `src/decrypt.rs`, since no tier bundle enables `binary-encryption`; the last three are the only ones that compile a front door. `tier-2,webview` and `tier-3,webview` are not redundant: the window's purchase screen and its pre-purchase attestation are gated on `onchain-write`, so only the tier-3 entry compiles them.
 
 ```bash
 fail=0
 for t in tier-0 tier-1 tier-2 tier-3 tier-4 tier-3,binary-encryption \
-         tier-2,webview tier-3,headless; do
+         tier-2,webview tier-3,webview tier-3,headless; do
   cargo test -p rub3-wrapper --no-default-features --features "$t" \
     && echo "$t ok" || { echo "$t FAILED"; fail=1; }
 done

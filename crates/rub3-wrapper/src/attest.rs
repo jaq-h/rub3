@@ -1093,8 +1093,8 @@ mod tests {
     ///
     /// 1. the set of referencing modules is a **subset** of the purchase-path
     ///    allowlist;
-    /// 2. `activation.rs` holds **exactly one** gate call site, since a subset
-    ///    is also satisfied by calling the gate nowhere at all;
+    /// 2. each allowlisted purchase path holds **exactly one** gate call site,
+    ///    since a subset is also satisfied by calling the gate nowhere at all;
     /// 3. the named human launch entry points inside `webview.rs` reference the
     ///    module **not at all**, which is the half the allowlist cannot speak
     ///    for: it is file-granular, and `webview.rs` holds both the path that
@@ -1124,13 +1124,8 @@ mod tests {
     #[test]
     fn the_attest_module_is_reachable_only_from_the_purchase_path() {
         // The paths that spend money, and the only modules that may reach this
-        // one.
-        //
-        // `webview.rs` is on the list although it references nothing here
-        // today: `show_purchase` reads price and supply and hands
-        // `purchase(recipient)` calldata to a human wallet with no code
-        // attestation at all, so gating it is outstanding work, and naming it
-        // here means that work does not have to argue with a test first.
+        // one. Both hold exactly one gate call site: `activation.rs` in
+        // `headless::purchase`, `webview.rs` in `show_purchase`.
         const PURCHASE_PATHS: &[&str] = &["activation.rs", "webview.rs"];
 
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -1167,21 +1162,33 @@ mod tests {
              its own decision. Do not relax this test to let it through."
         );
 
-        let gate_calls: usize = modules
-            .iter()
-            .filter(|(name, _)| name == "activation.rs")
-            .map(|(_, body)| {
-                strip_line_comments(body)
-                    .matches("verify_before_purchase")
-                    .count()
-            })
-            .sum();
-        assert_eq!(
-            gate_calls, 1,
-            "activation.rs::headless::purchase must call the gate exactly once. A subset of the \
-             allowlist is satisfied by calling it nowhere at all, so this is what keeps the gate \
-             from being dropped or duplicated."
-        );
+        // Where each purchase path calls the gate, and how many times. A subset
+        // of the allowlist is also satisfied by calling the gate nowhere at
+        // all, so this is the half that keeps it from being dropped - and it
+        // has to name every purchase path, or dropping the call from one of
+        // them stays invisible.
+        const GATE_CALL_SITES: &[(&str, &str)] = &[
+            ("activation.rs", "headless::purchase"),
+            ("webview.rs", "show_purchase"),
+        ];
+
+        for (module, call_site) in GATE_CALL_SITES {
+            let gate_calls: usize = modules
+                .iter()
+                .filter(|(name, _)| name == module)
+                .map(|(_, body)| {
+                    strip_line_comments(body)
+                        .matches("verify_before_purchase")
+                        .count()
+                })
+                .sum();
+            assert_eq!(
+                gate_calls, 1,
+                "{module}::{call_site} must call the gate exactly once, found {gate_calls}. \
+                 Every path that asks for money verifies the code first, and a path that stopped \
+                 asking the question would otherwise still satisfy the allowlist above."
+            );
+        }
 
         // The human launch entry points inside `webview.rs`. `PURCHASE_PATHS`
         // is file-granular and cannot tell `show_purchase`, which spends money,

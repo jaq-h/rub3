@@ -11,9 +11,17 @@
       background: #0f0f0f;
       color: #e0e0e0;
       height: 100vh;
+      padding: 16px;
       display: flex;
-      align-items: center;
+      /* Centred by the card's auto margins rather than by `align-items:
+         center`, which centres by overflowing equally in both directions: the
+         window is a fixed 480x640 and several screens are taller than that, so
+         that rule put the top of the card above the viewport where nothing can
+         scroll to it. Auto margins collapse to zero once the card overflows, so
+         a tall screen starts at the top and scrolls to its last button. */
+      align-items: flex-start;
       justify-content: center;
+      overflow-y: auto;
     }
 
     .card {
@@ -22,6 +30,7 @@
       border-radius: 12px;
       padding: 32px;
       width: 420px;
+      margin: auto;
     }
 
     h1 { font-size: 18px; font-weight: 600; margin-bottom: 24px; }
@@ -120,6 +129,35 @@
     #screen-processing { text-align: center; }
     #screen-processing p { color: #666; font-size: 14px; }
 
+    /* Purchase refused: the contract's code did not verify. Red-tinted like
+       the cooldown wait box, so "stop" reads before any of the words do. */
+    .notice {
+      background: #2a1a1a;
+      border: 1px solid #4a2a2a;
+      border-radius: 6px;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .notice .nt {
+      color: #f0a0a0;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.35;
+      margin-bottom: 8px;
+    }
+    .notice .nb { color: #c8a4a4; font-size: 12px; line-height: 1.55; }
+
+    .next-step {
+      font-size: 12px;
+      color: #999;
+      line-height: 1.55;
+      margin-bottom: 14px;
+    }
+
+    /* With no retry offered, the cancel button is the first control on the
+       screen and must not inherit the 8px gap that separates stacked buttons. */
+    #btn-b-retry.hidden + #btn-b-cancel { margin-top: 0; }
+
     .hidden { display: none !important; }
   </style>
 </head>
@@ -200,6 +238,23 @@
     </div>
     <button class="btn-primary" id="btn-p-submit">Confirm Purchase</button>
     <button class="btn-ghost"   id="btn-p-cancel">Cancel</button>
+  </div>
+
+  <!-- ── Screen: purchase blocked (contract code did not verify) ── -->
+  <div id="screen-blocked" class="hidden">
+    <div class="notice">
+      <div class="nt" id="b-title">—</div>
+      <p class="nb" id="b-body"></p>
+    </div>
+    <p class="next-step" id="b-next"></p>
+    <div class="token-box">
+      <div class="tl">What the check found</div>
+      <!-- Unlike the hex fields elsewhere, this is a sentence with one long
+           token in it, so it breaks only where a word will not fit. -->
+      <div class="tv" id="b-detail" style="overflow-wrap:anywhere;font-size:11px">—</div>
+    </div>
+    <button class="btn-primary hidden" id="btn-b-retry">Try Again</button>
+    <button class="btn-ghost" id="btn-b-cancel">Cancel</button>
   </div>
 
   <!-- ── Screen: activate ───────────────────────────────────────── -->
@@ -307,7 +362,7 @@
 <script>
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  const SCREENS = ['connect', 'token-select', 'purchase', 'activate', 'cooldown', 'sign-session', 'processing'];
+  const SCREENS = ['connect', 'token-select', 'purchase', 'blocked', 'activate', 'cooldown', 'sign-session', 'processing'];
 
   function show(name) {
     SCREENS.forEach(s => {
@@ -425,6 +480,28 @@
       clearError('p-error');
 
       show('purchase');
+    },
+
+    // The contract's code did not verify, so no purchase is offered at all.
+    // This screen replaces the purchase screen rather than warning beside it:
+    // once an address, a value and calldata are on screen, a wallet can act on
+    // them, and a refusal that arrives after that is not a refusal.
+    // The address is not a field of its own: it is already in the header row
+    // and named inside `body`.
+    // data: { title, body, nextStep, detail, retryable }
+    onPurchaseBlocked(data) {
+      document.getElementById('b-title').textContent    = data.title;
+      document.getElementById('b-body').textContent     = data.body;
+      document.getElementById('b-next').textContent     = data.nextStep;
+      document.getElementById('b-detail').textContent   = data.detail;
+
+      // Only a chain read that never completed is worth retrying. A refused
+      // address is a settled answer, and a retry button there would invite
+      // clicking until the check passes.
+      document.getElementById('btn-b-retry')
+        .classList.toggle('hidden', !data.retryable);
+
+      show('blocked');
     },
 
     // Wallet owns a token — show the signature prompt.
@@ -618,6 +695,20 @@
   });
 
   document.getElementById('btn-p-cancel').addEventListener('click', () => {
+    post({ type: 'cancel' });
+  });
+
+  // ── Blocked screen (contract code did not verify) ─────────────────────────
+
+  // Retry means "ask again", not "ask more nicely": it returns to the connect
+  // screen, and the check runs again from there. Shown only when the gate said
+  // the read failed.
+  document.getElementById('btn-b-retry').addEventListener('click', () => {
+    clearError('connect-error');
+    show('connect');
+  });
+
+  document.getElementById('btn-b-cancel').addEventListener('click', () => {
     post({ type: 'cancel' });
   });
 

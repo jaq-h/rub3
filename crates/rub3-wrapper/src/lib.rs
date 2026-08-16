@@ -35,6 +35,11 @@ mod supervisor;
 #[cfg(feature = "webview")]
 mod webview;
 
+// Test-only helpers shared across modules. Declared here rather than nested in
+// one module's `mod tests` so a second module can use them without a copy.
+#[cfg(test)]
+pub(crate) mod test_support;
+
 /// One process-wide guard for every unit test that touches process
 /// environment variables.
 ///
