@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "note": "The canonical Rub3Factory per chain: the single address that gives \"deployed through the factory\" a verifiable referent. Nothing is deployed to a public network yet, so every entry below is unpopulated. `null` is the ONLY marker for that, in every field: there is deliberately no placeholder address, no zero address and no TBD string anywhere in this file, so no value here can be mistaken for a deploy. A consumer MUST read a null `factory` as \"this chain has no canonical factory\" and MUST NOT substitute any other address. Validated by scripts/check-deployments.sh, which CI runs. See contracts/contracts.md -> Deploying through the factory.",
+  "fields": {
+    "name": "Human-readable chain name, matching the [rpc_endpoints] key in contracts/foundry.toml.",
+    "factory": "The canonical Rub3Factory address on this chain, 0x-prefixed and EIP-55 checksummed. null until deployed.",
+    "deploy_block": "The block the factory was deployed in, so an indexer starts there rather than at genesis. null until deployed.",
+    "generation": "1-based position in the factory's immutable previousFactory chain: 1 is the first factory on this chain (previousFactory == 0x0), 2 is the factory that supersedes it, and so on. null until deployed."
+  },
+  "chains": {
+    "8453": {
+      "name": "base",
+      "factory": null,
+      "deploy_block": null,
+      "generation": null
+    },
+    "84532": {
+      "name": "base_sepolia",
+      "factory": null,
+      "deploy_block": null,
+      "generation": null
+    }
+  }
+}

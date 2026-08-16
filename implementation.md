@@ -592,6 +592,8 @@ rub3 register --name myapp --contract 0x1234...abcd
 - `fetch`: the agent-side half of distribution (§3.1).
 - `register`: registry entry (§3.2).
 
+**`pack` compiles `contracts/deployments.json` into the wrapper.** `--chain base` resolves to a chain id, and the canonical `Rub3Factory` for that chain is read out of that file and baked into the packed binary's constants alongside `CONTRACT` and `CHAIN_ID`, so a wrapper can tell a canonical deploy from any other without a network round trip or a hardcoded address in Rust. A `null` entry - which is every entry until launch - is a hard error from `pack`, never a fallback to the zero address: a distributable that claims a canonical factory it cannot name is worse than one that refuses to build. Same rule for `deploy`, which resolves `FACTORY` the same way.
+
 ### 2.6 - Pre-purchase contract attestation `[complete]`
 
 "Is this contract the code I think it is?", answered before the agent spends anything. Wrapper only; no Solidity change. Closes §2.4's standing gap - the selector scan is a blacklist of names, and the name-independent comparison it pointed at was unbuilt.
@@ -663,6 +665,7 @@ Goal: close the loop - discover → pay → fetch → verify → run - so the co
 - **Discovery, never validity:** delisting removes the badge and the listing; it cannot invalidate a token or a session. This invariant is documented and tested.
 - Each entry doubles as an ERC-8004-style agent card: contract address, price(s), payment methods, `contentURI`, hash set, identity model - machine-readable, so agent spend policies can allowlist "verified rub3 contracts" and audit the §2.4 invariants before buying.
 - Wrapper ENS handling softens accordingly: resolution to a *different* address → hard fail (attack signature); failure to resolve (lapsed name, dead registry, offline) → warn and proceed. The embedded contract address is the root of trust after purchase.
+- **The registry reads `contracts/deployments.json` for the factory it trusts.** `register` gates on `factory.isDeployed(contract)`, so "the factory" needs a single committed referent per chain rather than an address baked into registry tooling; that file is it, keyed by chain id and carrying the deploy block an indexer starts from and the generation in the `previousFactory` chain. A registry that must honour an older generation's deploys walks `previousFactory` from the entry rather than keeping a second list. Every entry is null until launch, which is consistent with the factory and the registry launching together.
 
 ### 3.3 - Agent-facing surface `[not started]`
 
