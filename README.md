@@ -1,15 +1,15 @@
 # rub3
 
-Wallet-native software licensing for the machine economy. NFT-gated access for locally executed software — CLI tools, MCP servers, desktop apps — without a browser or a backend.
+Wallet-native software licensing for the machine economy. NFT-gated access for locally executed software - CLI tools, MCP servers, desktop apps - without a browser or a backend.
 
-rub3 lets machines (and humans) buy, verify, run, and resell software without asking anyone's permission. The NFT is the access credential — owned by a wallet, verifiable on-chain, transferrable, composable — which also makes it a liquid asset: buy a license for a workload, resell it when the job ends. The wrapper is the runtime that enforces this on the machine where the software runs.
+rub3 lets machines (and humans) buy, verify, run, and resell software without asking anyone's permission. The NFT is the access credential - owned by a wallet, verifiable on-chain, transferrable, composable - which also makes it a liquid asset: buy a license for a workload, resell it when the job ends. The wrapper is the runtime that enforces this on the machine where the software runs.
 
 
 ## How it works
 
 1. Developer packages their binary inside the rub3 wrapper
 2. Developer deploys an ERC-721 license contract on Base (`Rub3Access` or `Rub3Subscription`)
-3. User launches the wrapped app — the wrapper checks for a valid cached session
+3. User launches the wrapped app - the wrapper checks for a valid cached session
 4. If no session (or session expired): the wrapper opens a native activation window, verifies on-chain ownership, and requests a wallet signature
 5. On success: session is cached locally, wrapped binary launches
 6. On subsequent launches within TTL: session is verified locally, binary launches immediately
@@ -53,7 +53,7 @@ rub3/
 │           ├── license_e2e.rs        # License verification tests (static + dynamic wallets, SIGTERM)
 │           ├── session_onchain_e2e.rs # Anvil-gated: verify_onchain against a live chain
 │           └── headless_e2e.rs       # Anvil-gated: fresh key → purchase → activate → persist → fast path
-├── contracts/                        # Foundry project — ERC-721 license contracts
+├── contracts/                        # Foundry project - ERC-721 license contracts
 │   ├── src/
 │   │   ├── Rub3License.sol           # Abstract base (ERC-721 + Enumerable + Ownable)
 │   │   ├── Rub3Access.sol            # One-time purchase license
@@ -355,18 +355,18 @@ See [implementation.md](implementation.md) for the full roadmap.
 
 ## Direction
 
-The plan is agent-first (July 2026 revision — see [implementation.md](implementation.md)):
+The plan is agent-first (July 2026 revision - see [implementation.md](implementation.md)):
 
 - **Let machines buy, verify, and resell software without asking anyone's permission.** The adoption unit is one closed loop an agent completes end to end: discover → pay → fetch → verify → run → resell.
 - **Open-source the rails; own the factory, registry, and marketplace.** Revenue is intended to be a 2–3% fee on a payment flow only the wrapper can meter, priced low enough that routing around it is not worth the trouble. Only the factory and its on-chain fee split are built; the registry and marketplace are not, and the contracts are not deployed to mainnet or declared ready for use until the registry is ready. No token.
 - **The token is the invariant; everything else is versioned.** Evolution only ever changes what is offered going forward (price, successor contracts, registry listings), never what was granted (held tokens, their validation, their renewal terms). No proxies, no revocation surface - structurally, not by promise.
 
-First target market: wallet-gated MCP servers — paid MCP servers have no licensing primitive today, and agents are their natural customers.
+First target market: wallet-gated MCP servers - paid MCP servers have no licensing primitive today, and agents are their natural customers.
 
 ## Design documents
 
-- [ideation.md](ideation.md) — project vision, design principles, what rub3 is and isn't
-- [architecture.md](architecture.md) — system design, session model, security tiers, components
-- [implementation.md](implementation.md) — phased development plan with current status
-- [contracts/contracts.md](contracts/contracts.md) — contract setup, local testing, deployment
-- [testing.md](testing.md) — manual testing guide
+- [ideation.md](ideation.md) - project vision, design principles, what rub3 is and isn't
+- [architecture.md](architecture.md) - system design, session model, security tiers, components
+- [implementation.md](implementation.md) - phased development plan with current status
+- [contracts/contracts.md](contracts/contracts.md) - contract setup, local testing, deployment
+- [testing.md](testing.md) - manual testing guide

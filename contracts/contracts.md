@@ -18,7 +18,7 @@ anvil --version
 
 ## Local testing with Anvil
 
-No `.env` file needed. Forge tests use Foundry's built-in VM — they run against an in-process EVM with no network.
+No `.env` file needed. Forge tests use Foundry's built-in VM - they run against an in-process EVM with no network.
 
 ```bash
 cd contracts
@@ -644,9 +644,9 @@ Sanity-check the method itself against a selector that *is* there - `cast sig "a
 
 The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot), the §2.2 stablecoin rail, and the §2.3 factory and protocol fee, all of which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
 
-- **`contentURI`** (§3.1) — content-addressed binary location on-chain, making the contract a complete distribution record
-- **Concurrent seats** (§3.4) — `maxConcurrentSessions[tokenId] = K` generalizing `activeSessionId` for agent fleets
-- **`Rub3Metered`** (§4.1) — per-launch / per-session micropayment billing
-- **`Rub3Registry`** (§3.2) — discovery and verification, never validity; entries double as ERC-8004-style agent cards
+- **`contentURI`** (§3.1) - content-addressed binary location on-chain, making the contract a complete distribution record
+- **Concurrent seats** (§3.4) - `maxConcurrentSessions[tokenId] = K` generalizing `activeSessionId` for agent fleets
+- **`Rub3Metered`** (§4.1) - per-launch / per-session micropayment billing
+- **`Rub3Registry`** (§3.2) - discovery and verification, never validity; entries double as ERC-8004-style agent cards
 
 Invariants for every license contract, present and future: no burn, no admin transfer, no pause on validation reads, no proxies. Evolution changes what is offered going forward, never what was granted.

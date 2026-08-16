@@ -1,12 +1,12 @@
-# rub3 — Implementation Plan
+# rub3 - Implementation Plan
 
-> **Plan revision — July 2026 (agent-first reorientation).**
-> Everything below Phase 1 has been resequenced around a single thesis: agents will do an increasing share of software development, deployment, and purchasing, and they need to buy, verify, run, and resell locally executed software — low cost, high speed, secure payments — with no human in the loop.
+> **Plan revision - July 2026 (agent-first reorientation).**
+> Everything below Phase 1 has been resequenced around a single thesis: agents will do an increasing share of software development, deployment, and purchasing, and they need to buy, verify, run, and resell locally executed software - low cost, high speed, secure payments - with no human in the loop.
 >
 > What changes:
 > - **Headless is the front door.** All session crypto is already native Rust; the webview exists only because humans keep keys in wallet apps. Signer-in/session-out activation (§2.1) becomes the primary mode; the webview is the human fallback floor.
 > - **Machine money.** USDC purchases via EIP-3009 signed authorizations join ETH pricing as the default path (§2.2).
-> - **Revenue at the network layers.** The rails (wrapper, SDK, CLI, contracts) stay open source and free. Revenue is an immutable 2–3% fee stamped by `Rub3Factory` (§2.3), metered per-launch billing only the wrapper can enforce (§4.1), and — once volume shows — a registry-filtered resale marketplace (§4.3).
+> - **Revenue at the network layers.** The rails (wrapper, SDK, CLI, contracts) stay open source and free. Revenue is an immutable 2–3% fee stamped by `Rub3Factory` (§2.3), metered per-launch billing only the wrapper can enforce (§4.1), and - once volume shows - a registry-filtered resale marketplace (§4.3).
 > - **The token is the invariant.** No proxies, no revocation surface, no pause on validation. Evolution only changes what is offered going forward, never what was granted (§2.4).
 > - **Distribution completes the loop.** `contentURI` on-chain + `rub3 fetch` + hash verification = discover → pay → fetch → verify → run (§3.1).
 > - **Seats, not devices.** Fleet concurrency is licensed as K on-chain seats per token (§3.4). Tier-4 device binding and binary encryption move to Deferred.
@@ -18,41 +18,41 @@
 
 Goal: A working wrapper that gates a Rust binary behind wallet ownership, using a cached SIWE-style session.
 
-### 1.1 — Wrapper skeleton `[complete]`
+### 1.1 - Wrapper skeleton `[complete]`
 - `rub3-wrapper` Rust project with CLI: `rub3-wrapper --binary <path>` (clap)
 - Launches embedded app as child process (`supervisor.rs`)
 - SIGTERM forwarding: wrapper forwards signals to child, exits when child exits
 - Process supervision proven with integration tests
 
-### 1.2 — License proof + signature verification `[complete]`
+### 1.2 - License proof + signature verification `[complete]`
 - License proof JSON schema (`license.rs`): `app_id`, `token_id`, `wallet_address`, `signature`, `activated_at`, `chain`, `contract`, optional `paid_by`
-- Activation message: `SHA-256(app_id || token_id_be_bytes)` — deterministic, fixed-width
+- Activation message: `SHA-256(app_id || token_id_be_bytes)` - deterministic, fixed-width
 - Signature verification: `personal_sign` prefix (keccak256), secp256k1 ECDSA recovery via `k256`, address comparison
 - Proof persistence (`store.rs`): save/load to `~/.rub3/licenses/<app_id>.json` or `$RUB3_LICENSE_DIR`
 - Static and dynamic integration tests verify the full crypto pipeline natively in Rust (no external tools)
 - Result: valid proof → launch app, invalid/missing → trigger activation flow
 
-### 1.3 — Activation flow + webview `[partial]`
+### 1.3 - Activation flow + webview `[partial]`
 - Activation orchestration (`activation.rs`): check cached proof → verify → launch, or open activation window
 - Native webview (`wry`/`tao`) with dark-themed activation UI (`assets/activation.html`)
 - IPC message protocol: JS ↔ Rust (ready, connect, token_selected, signed, cancel, error)
 - Screens: connect (address input) → token-select (when multiple tokens owned) → activate (message + signature input) → processing
 - Activate screen surfaces the exact `personal_sign` preimage (hex) so the user knows what to sign in their wallet
 - **Done:** manual wallet address input, `tokensOfOwner()` enumeration, multi-token selection UI, activation message display, manual signature paste, proof storage on success
-- **Not yet done:** WalletConnect integration — tracked as §1.10b (requires WC v2 JS SDK + developer-supplied project ID)
+- **Not yet done:** WalletConnect integration - tracked as §1.10b (requires WC v2 JS SDK + developer-supplied project ID)
 
-### 1.4 — On-chain queries `[complete]`
+### 1.4 - On-chain queries `[complete]`
 - `rpc.rs`: `ownerOf(tokenId)`, `price()`, `balanceOf(owner)`, `tokenOfOwnerByIndex(owner, index)` via alloy JSON-RPC with minimal ABI (`IRub3License`)
 - `tokens_of_owner(rpc_url, contract, owner)` enumerates all tokens held by a wallet via ERC-721Enumerable
 - Synchronous wrapper over async alloy calls (`block_on` with single-threaded tokio runtime)
 - Ownership check wired into webview `Connect` handler: 0 tokens → error, 1 → auto-proceed to activate, N → token-select screen
-- ENS resolution remains a stub (`EnsNotSupported`) — deferred to §1.6 where it is the primary deliverable
+- ENS resolution remains a stub (`EnsNotSupported`) - deferred to §1.6 where it is the primary deliverable
 
-### 1.5 — Smart contracts `[complete]`
+### 1.5 - Smart contracts `[complete]`
 
 Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZeppelin v5.1.0 and forge-std installed as submodules under `contracts/lib/`.
 
-**Abstract base — `Rub3License.sol`**
+**Abstract base - `Rub3License.sol`**
 - Inherits `ERC721`, `ERC721Enumerable`, `Ownable` (OZ v5)
 - Immutable: `identityModel` (0 = access, 1 = account; rejects values > 1), `supplyCap` (0 = uncapped), `cooldownBlocks` (floor `MIN_COOLDOWN_BLOCKS = 15` ≈ 30s on Base)
 - Mutable + owner-gated: `price` (`setPrice`). **Superseded by §2.4:** the single rotatable `wrapperHash` is gone, and `setWrapperHash(bytes32)` is now one of the forbidden selectors asserted absent from the runtime bytecode of all four audited targets. Wrapper hashes live in an append-only set with on-chain revocation reasons instead, so rebuilding the wrapper adds a hash rather than replacing one. See §2.4 for the removal record
@@ -60,45 +60,45 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 - `_resolveRecipient(address)` helper: `address(0)` → `msg.sender` (per architecture.md §1)
 - `withdraw(address payable)` owner-only sweep
 - `_update` / `_increaseBalance` / `supportsInterface` overrides for ERC-721 + Enumerable composition
-- **Activation (tier 3)**: `activate(uint256) returns (sessionId)` — owner-only, bumps `activeSessionId[tokenId]` from a monotonic `_sessionCounter`, records `lastActivationBlock`, reverts `CooldownActive(blocksRemaining)` if called again inside the window (first call, `last == 0`, bypasses); `cooldownReady(tokenId) view returns (bool, uint256)` for the wrapper's pre-tx check; `Activated(tokenId, owner, sessionId)` event
+- **Activation (tier 3)**: `activate(uint256) returns (sessionId)` - owner-only, bumps `activeSessionId[tokenId]` from a monotonic `_sessionCounter`, records `lastActivationBlock`, reverts `CooldownActive(blocksRemaining)` if called again inside the window (first call, `last == 0`, bypasses); `cooldownReady(tokenId) view returns (bool, uint256)` for the wrapper's pre-tx check; `Activated(tokenId, owner, sessionId)` event
 
-**`Rub3Access.sol`** — concrete, one-time purchase:
-- `purchase(address recipient) payable returns (uint256 tokenId)` — pays `price`, mints next id
+**`Rub3Access.sol`** - concrete, one-time purchase:
+- `purchase(address recipient) payable returns (uint256 tokenId)` - pays `price`, mints next id
 - `Purchased(tokenId, recipient, payer)` event
 
-**`Rub3Subscription.sol`** — concrete, time-bounded:
+**`Rub3Subscription.sol`** - concrete, time-bounded:
 - Immutable `period`, `mapping(uint256 => uint256) expiresAt`
-- `purchase(address recipient) payable` — mints + sets `expiresAt = now + period`
-- `renew(uint256 tokenId) payable` — extends from current expiry if still valid, else resets to `now + period`
-- `isValid(uint256 tokenId) view` — `expiresAt[tokenId] > block.timestamp`
+- `purchase(address recipient) payable` - mints + sets `expiresAt = now + period`
+- `renew(uint256 tokenId) payable` - extends from current expiry if still valid, else resets to `now + period`
+- `isValid(uint256 tokenId) view` - `expiresAt[tokenId] > block.timestamp`
 - `Purchased` + `Renewed` events
 
 **Tests:** 30 forge tests at this point (`forge test`), covering metadata, sequential mint, zero-recipient default, over/underpay, supply cap, enumeration via `tokenOfOwnerByIndex`, owner-gated setters, withdraw, subscription expiry, mid-period renewal, post-expiry renewal, nonexistent-token revert, plus activation: first-call success, session-id increments across tokens, cooldown-window revert, post-cooldown success, non-owner revert, nonexistent-token revert, `cooldownReady` in all three states, constructor floor check (`cooldownBlocks < 15`), and transfer-then-activate (new owner authorized, old owner rejected). The suite has since grown to 174 tests across five files; `testing.md` holds the current inventory.
 
-**`script/Deploy.s.sol`** — forge script that deploys either contract from env vars:
+**`script/Deploy.s.sol`** - forge script that deploys either contract from env vars:
 - `CONTRACT_TYPE`, `TOKEN_NAME`, `TOKEN_SYMBOL`, `IDENTITY_MODEL`, `WRAPPER_HASH`, `PRICE` required; `SUPPLY_CAP`, `OWNER`, `COOLDOWN_BLOCKS` (default 1800 ≈ 1hr on Base), `PERIOD` optional. Superseded: `WRAPPER_HASH` is now optional and is the single-hash shorthand for `WRAPPER_HASHES` (§2.4), and later phases added `PRICE_TOKEN` / `PRICE_AMOUNT` (§2.2), `PREDECESSOR` (§2.4) and `FACTORY` (§2.3). `contracts/contracts.md` -> "Deploying" is the current reference
 - Dry run (no `--broadcast`): simulates deployment, prints summary with all params
 - Live: add `--broadcast --verify --etherscan-api-key $BASESCAN_API_KEY`
-- Local: run against `anvil` with `--rpc-url http://localhost:8545` and a pre-funded Anvil key — no `.env` needed
+- Local: run against `anvil` with `--rpc-url http://localhost:8545` and a pre-funded Anvil key - no `.env` needed
 
 **Not yet done:**
-- Tier 4: `activateDevice(tokenId, devicePubKey)` + `registeredDevice` mapping — deferred to tier-4 work
+- Tier 4: `activateDevice(tokenId, devicePubKey)` + `registeredDevice` mapping - deferred to tier-4 work
 - Base Sepolia deployment. Nothing is deployed to any public network yet, and a mainnet deploy waits on the registry: the factory and the registry launch together (§2.3, §3.2)
 
-### 1.6 — Identity model + TBA derivation `[complete]`
+### 1.6 - Identity model + TBA derivation `[complete]`
 
-**Contract change** — `Rub3License.sol` gains `address public immutable tbaImplementation`. Constructor now validates that account-model deploys supply a non-zero impl and access-model deploys supply `address(0)` (new errors `TbaImplementationRequired` / `TbaImplementationForbidden`). Threaded through `Rub3Access` + `Rub3Subscription` constructors, the `Deploy.s.sol` script (new `TBA_IMPLEMENTATION` env var), and the Foundry test fixtures. Forge test suite: 33 pass, up from 29 (4 new tests covering the two new reverts plus the happy-path account-model construction).
+**Contract change** - `Rub3License.sol` gains `address public immutable tbaImplementation`. Constructor now validates that account-model deploys supply a non-zero impl and access-model deploys supply `address(0)` (new errors `TbaImplementationRequired` / `TbaImplementationForbidden`). Threaded through `Rub3Access` + `Rub3Subscription` constructors, the `Deploy.s.sol` script (new `TBA_IMPLEMENTATION` env var), and the Foundry test fixtures. Forge test suite: 33 pass, up from 29 (4 new tests covering the two new reverts plus the happy-path account-model construction).
 
 **Wrapper changes**
-- `identity.rs` (new, gated on `session`) — `IdentityModel { Access, Account }` with `from_u8` / `as_str`; `derive_tba(implementation, chain_id, contract, token_id)` computes the ERC-6551 TBA via CREATE2 against canonical registry `0x000000006551c19487814612e58FE06813775758` with `salt = 0` and the reference account-proxy init bytecode (pure, no RPC); `resolve_user_id(model, wallet, tba)` returns lower-case 0x-hex; `format_addr(addr)` helper
-- `rpc.rs` — `IRub3License` gains `identityModel() -> uint8` + `tbaImplementation() -> address` getters; new `identity_model()` and `tba_implementation()` pub fns
-- `session.rs` — `Session` gains `identity: String`, `user_id: String`, `tba: Option<String>`; `session_message()` adds `identity` + `user_id` into the preimage (between `wallet` and the existing fields) so a forger cannot flip an access-model session into account-model without re-signing. Ordering: `app_id, token_id, identity, user_id, wallet, nonce, [expires_at], [activation_block_hash], [session_id], [device_pubkey]`
-- `webview.rs::spawn_tx_poller` — after the existing `active_session_id` read, calls `identity_model()`; for account model also calls `tba_implementation()` and derives the TBA locally. Includes the resolved `identity`, `user_id`, and optional `tba` in the signed preimage + `onTxConfirmed` payload. `IpcMessage::SessionSigned` / `FinalizeArgs` carry the three identity fields through back to the final `Session`
-- `activation.html` — sign-session screen shows the identity model label, user_id, and (for account model) TBA address. Echoes all three back in the `session_signed` IPC message
+- `identity.rs` (new, gated on `session`) - `IdentityModel { Access, Account }` with `from_u8` / `as_str`; `derive_tba(implementation, chain_id, contract, token_id)` computes the ERC-6551 TBA via CREATE2 against canonical registry `0x000000006551c19487814612e58FE06813775758` with `salt = 0` and the reference account-proxy init bytecode (pure, no RPC); `resolve_user_id(model, wallet, tba)` returns lower-case 0x-hex; `format_addr(addr)` helper
+- `rpc.rs` - `IRub3License` gains `identityModel() -> uint8` + `tbaImplementation() -> address` getters; new `identity_model()` and `tba_implementation()` pub fns
+- `session.rs` - `Session` gains `identity: String`, `user_id: String`, `tba: Option<String>`; `session_message()` adds `identity` + `user_id` into the preimage (between `wallet` and the existing fields) so a forger cannot flip an access-model session into account-model without re-signing. Ordering: `app_id, token_id, identity, user_id, wallet, nonce, [expires_at], [activation_block_hash], [session_id], [device_pubkey]`
+- `webview.rs::spawn_tx_poller` - after the existing `active_session_id` read, calls `identity_model()`; for account model also calls `tba_implementation()` and derives the TBA locally. Includes the resolved `identity`, `user_id`, and optional `tba` in the signed preimage + `onTxConfirmed` payload. `IpcMessage::SessionSigned` / `FinalizeArgs` carry the three identity fields through back to the final `Session`
+- `activation.html` - sign-session screen shows the identity model label, user_id, and (for account model) TBA address. Echoes all three back in the `session_signed` IPC message
 
 **Tests**
 - `identity.rs`: 11 tests - `IdentityModel` from_u8 / as_str / rejects-out-of-range; TBA determinism + sensitivity to each of `{implementation, chain_id, contract, token_id}`; `resolve_user_id` for both models + panic on missing TBA
-- `session.rs`: 2 new preimage tests — differs by identity (access → account), differs by user_id alone; 1 new verify test — tampered identity fails `verify_local` with `AddressMismatch`; all existing tests updated to the new 10-arg `session_message()` signature
+- `session.rs`: 2 new preimage tests - differs by identity (access → account), differs by user_id alone; 1 new verify test - tampered identity fails `verify_local` with `AddressMismatch`; all existing tests updated to the new 10-arg `session_message()` signature
 - `rpc.rs`: 2 new transport-error tests for `identity_model()` + `tba_implementation()`
 - `tests/session_onchain_e2e.rs`: updated `forge create` to pass the new `tbaImplementation = address(0)` arg; `Session` struct literal updated. Passes against anvil.
 
@@ -109,37 +109,37 @@ Branch: `feature/smart-contract`. Foundry project under `contracts/` with OpenZe
 - `forge test` (contracts/): 33 pass
 - Anvil-gated e2e (`session_verify_onchain_e2e`): passes with the new 9-arg constructor
 
-### 1.7 — Purchase UI `[complete]`
+### 1.7 - Purchase UI `[complete]`
 
 In-wrapper purchase flow when the connected wallet owns no token. Gated on
-`onchain-write` (tier 3+). Wrapper never holds keys — it encodes calldata,
+`onchain-write` (tier 3+). Wrapper never holds keys - it encodes calldata,
 surfaces it to the user, and polls the receipt they paste back.
 
 **RPC additions (`rpc.rs`)**
 - `supplyCap()`, `nextTokenId()`, `purchase(address)` added to the `sol!` interface
 - `supply_cap()` / `next_token_id()` public readers
-- `encode_purchase_calldata(recipient)` — pure, `SolCall::abi_encode` over `purchase(address)`
-- `mint_token_id(rpc_url, tx_hash, contract, recipient)` — fetches the receipt and walks `receipt.inner.logs()` for the ERC-721 `Transfer(0x0, recipient, tokenId)` log (topic0 = `0xddf252ad…`), returning the minted id. Constant `ERC721_TRANSFER_SIG` for comparison
+- `encode_purchase_calldata(recipient)` - pure, `SolCall::abi_encode` over `purchase(address)`
+- `mint_token_id(rpc_url, tx_hash, contract, recipient)` - fetches the receipt and walks `receipt.inner.logs()` for the ERC-721 `Transfer(0x0, recipient, tokenId)` log (topic0 = `0xddf252ad…`), returning the minted id. Constant `ERC721_TRANSFER_SIG` for comparison
 - `pub mod rpc` (was private) so integration tests can drive these directly
 
 **Webview wiring (`webview.rs`)**
 - New IPC variant `PurchaseTxSent { tx_hash, owner_address }` gated on `onchain-write`
 - `Connect` handler's empty-tokens branch now calls `show_purchase` under `onchain-write`; tier 0-2 still surface the legacy "no token" error
 - `show_purchase` reads `supplyCap` / `nextTokenId` / `price`, rejects sold-out state, encodes calldata, emits `onShowPurchase({ ownerAddress, contractAddress, chainId, priceWei, valueHex, supplyCap, nextTokenId, calldata })`. Price is serialised as a decimal string + hex string so a full uint256 price survives JSON
-- `spawn_purchase_poller` mirrors `spawn_tx_poller`: polls receipt (30s / 10 × 3s), asserts `status == true` and `receipt.to == contract`, then calls `mint_token_id` to recover the id and re-enters `proceed_after_token_selected` — the downstream cooldown/activate flow is reused verbatim
+- `spawn_purchase_poller` mirrors `spawn_tx_poller`: polls receipt (30s / 10 × 3s), asserts `status == true` and `receipt.to == contract`, then calls `mint_token_id` to recover the id and re-enters `proceed_after_token_selected` - the downstream cooldown/activate flow is reused verbatim
 
 **HTML (`assets/activation.html`)**
 - New `#screen-purchase` with price (ETH + wei), supply counter, recipient, send-to / value / calldata boxes, tx-hash input
 - `onShowPurchase` callback populates the screen, stores `pendingPurchaseCtx.ownerAddress`
-- `formatEth(weiStr)` — BigInt-based wei→ETH formatter with up to 4 fractional digits; 0 renders as "Free"
+- `formatEth(weiStr)` - BigInt-based wei→ETH formatter with up to 4 fractional digits; 0 renders as "Free"
 - `'purchase'` added to the `SCREENS` array so `show('purchase')` hides the others
 
 **Tests**
 - 6 new `rpc` unit tests: purchase calldata selector (`0x25b31a97`) + recipient layout + differs-by-recipient; `supply_cap`, `next_token_id`, `mint_token_id` (both bad-URL and bad-hash) transport-error paths
-- Anvil e2e (`tests/session_onchain_e2e.rs`) extended with `supply_cap`/`next_token_id` pre- and post-purchase checks and a `mint_token_id` parse against the real `purchase()` receipt — all four assertions pass against a live Rub3Access on anvil
+- Anvil e2e (`tests/session_onchain_e2e.rs`) extended with `supply_cap`/`next_token_id` pre- and post-purchase checks and a `mint_token_id` parse against the real `purchase()` receipt - all four assertions pass against a live Rub3Access on anvil
 
 **Deferred**
-- Refactor `activation.html` to Preact (vendored `preact.mjs` + `htm.mjs`, custom-protocol handler via `include_dir` — no Node/build step). Tracked as §5.2.
+- Refactor `activation.html` to Preact (vendored `preact.mjs` + `htm.mjs`, custom-protocol handler via `include_dir` - no Node/build step). Tracked as §5.2.
 - Replace the "paste your tx hash" box with auto-detect + WalletConnect tabs while keeping manual paste as the fallback floor. Tracked as §1.10.
 
 **Verification**
@@ -149,9 +149,9 @@ surfaces it to the user, and polls the receipt they paste back.
 - `forge test` (contracts/): 33 pass
 - Anvil-gated e2e (`session_verify_onchain_e2e`): passes with the new purchase-path assertions
 
-### 1.8 — On-chain cooldown + session model (tier 3) `[partial]`
+### 1.8 - On-chain cooldown + session model (tier 3) `[partial]`
 
-Replaces the legacy `LicenseProof` flow with a full session model backed by an on-chain cooldown. An NFT holder can otherwise run a signing oracle to distribute fresh sessions to non-holders; a contract-enforced `activate()` cooldown rate-limits how many sessions a single token can mint. The wrapper reads cooldown state and encodes calldata — it never sends txs or holds keys.
+Replaces the legacy `LicenseProof` flow with a full session model backed by an on-chain cooldown. An NFT holder can otherwise run a signing oracle to distribute fresh sessions to non-holders; a contract-enforced `activate()` cooldown rate-limits how many sessions a single token can mint. The wrapper reads cooldown state and encodes calldata - it never sends txs or holds keys.
 
 **Contract interface** (now live in `Rub3License.sol`, see §1.5):
 ```solidity
@@ -172,36 +172,36 @@ function cooldownReady(uint256 tokenId)
     external view returns (bool ready, uint256 blocksRemaining) { ... }
 ```
 
-**Phase A — foundation modules `[complete]`**
-- `session.rs` — `Session` schema; `session_message()` (SHA-256 over tier-appropriate field set, BE integers, optional fields omitted when `None`); `new_nonce()` (32-byte random hex); `verify_local()` (reconstruct message → `personal_sign` recover → compare to `session.wallet` → expiry check); `is_expired()` (RFC3339 parse vs `Utc::now()`; `None` → false for tier 4)
-- `session_store.rs` — `session_path()` (`RUB3_SESSION_DIR` override or `~/.rub3/sessions/<app_id>/<token_id>.json`); `load_session()` / `save_session()`; `load_latest_session()` scans app_id dir, filters expired + invalid-signature sessions, returns most-recently-issued valid one
+**Phase A - foundation modules `[complete]`**
+- `session.rs` - `Session` schema; `session_message()` (SHA-256 over tier-appropriate field set, BE integers, optional fields omitted when `None`); `new_nonce()` (32-byte random hex); `verify_local()` (reconstruct message → `personal_sign` recover → compare to `session.wallet` → expiry check); `is_expired()` (RFC3339 parse vs `Utc::now()`; `None` → false for tier 4)
+- `session_store.rs` - `session_path()` (`RUB3_SESSION_DIR` override or `~/.rub3/sessions/<app_id>/<token_id>.json`); `load_session()` / `save_session()`; `load_latest_session()` scans app_id dir, filters expired + invalid-signature sessions, returns most-recently-issued valid one
 - `personal_sign_hash`, `recover_address`, `public_key_to_address` promoted to `pub(crate)` in `license.rs`
 - 15 tests: message determinism + tier diffing, expiry edge cases (future/past/None/unparseable), sign/verify round-trip, wrong-wallet failure, save/load round-trip, load_latest with mixed valid/expired sessions
 
-**Phase B — RPC + IPC wiring `[complete]`**
+**Phase B - RPC + IPC wiring `[complete]`**
 - `rpc.rs` additions: `cooldown_ready` → `(is_ready, blocks_remaining)`, `last_activation_block`, `cooldown_blocks`, `active_session_id` (post-tx revocation read), `encode_activate_calldata` (pure, `SolCall::abi_encode`), `get_tx_receipt` → `TxReceipt { status, block_number, block_hash, to }`, `get_block_number`
-- `webview.rs` new IPC variants (gated on `cooldown` feature): `ActivateTxSent { tx_hash, token_id, owner_address }`, `SessionSigned { signature, ... }` — JS echoes back all state needed to assemble the `Session`, so the Rust handler is stateless across messages. Outbound JS: `onShowCooldown`, `onTxConfirmed`, `onProcessing`, `onError`. Legacy `Signed` path kept for zero-contract fallback.
+- `webview.rs` new IPC variants (gated on `cooldown` feature): `ActivateTxSent { tx_hash, token_id, owner_address }`, `SessionSigned { signature, ... }` - JS echoes back all state needed to assemble the `Session`, so the Rust handler is stateless across messages. Outbound JS: `onShowCooldown`, `onTxConfirmed`, `onProcessing`, `onError`. Legacy `Signed` path kept for zero-contract fallback.
 - `ActivationResult` gains `SessionSuccess { session }` variant (gated); `LegacySuccess { proof }` replaces the old plain `Success`
 - Connect handler branches: zero contract → legacy `show_activate`. Non-zero + `cooldown` → `tokens_of_owner` → `proceed_after_token_selected` → `cooldown_ready` + `encode_activate_calldata` → `onShowCooldown`
 - ActivateTxSent handler: spawns a background polling thread (10 × 3s; 30s total timeout) calling `get_tx_receipt`; on confirmation asserts `receipt.to == contract` and `status == true`, reads `activeSessionId`, mints a `new_nonce()`, computes `expires_at` from `SESSION_TTL_SECS`, builds the session message, and emits `onTxConfirmed`
 - SessionSigned handler: assembles `Session` (tier-3 fields populated from echoed state), calls `verify_local`, sends `ActivationResult::SessionSuccess`
-- `activation.rs::ensure` — tries three paths in order: (1) tier-3 session fast path (`load_latest_session` → `verify_local`), (2) legacy proof fast path, (3) webview. Takes a new `session_ttl_secs` param threaded through from `main.rs` (`SESSION_TTL_SECS = 7 days`). On `SessionSuccess` persists via `session_store::save_session`.
+- `activation.rs::ensure` - tries three paths in order: (1) tier-3 session fast path (`load_latest_session` → `verify_local`), (2) legacy proof fast path, (3) webview. Takes a new `session_ttl_secs` param threaded through from `main.rs` (`SESSION_TTL_SECS = 7 days`). On `SessionSuccess` persists via `session_store::save_session`.
 - `assets/activation.html` new screens: `cooldown` (shows calldata + tx-hash input with per-block-remaining banner when cooldown is active), `sign-session` (shows tx hash / block / session id / session message, captures signature). JS tracks `pendingSessionCtx` across the cooldown → tx-confirm → sign-session flow and echoes it back in `session_signed`. The tx-hash input is the "manual paste" path today; the richer auto-detect and WalletConnect tabs layered on top are tracked as §1.10.
 
-**Phase C — verification hardening `[complete]`**
-- `session::verify_onchain(session, rpc_url)` (gated on `cooldown`) — fetches the activation tx receipt and confirms `status == true`, `receipt.to` matches `session.contract`, `receipt.block_hash` matches `session.activation_block_hash`. Each failure mode has a dedicated `VerifyError` variant (`MissingTxHash`, `MissingBlockHash`, `Rpc`, `ReceiptNotFound`, `TxReverted`, `ContractMismatch`, `BlockHashMismatch`)
-- `session::should_reverify()` — Bernoulli gate (`rand::thread_rng().gen_range(0..5) == 0`) amortising the re-verify cost across cold starts
+**Phase C - verification hardening `[complete]`**
+- `session::verify_onchain(session, rpc_url)` (gated on `cooldown`) - fetches the activation tx receipt and confirms `status == true`, `receipt.to` matches `session.contract`, `receipt.block_hash` matches `session.activation_block_hash`. Each failure mode has a dedicated `VerifyError` variant (`MissingTxHash`, `MissingBlockHash`, `Rpc`, `ReceiptNotFound`, `TxReverted`, `ContractMismatch`, `BlockHashMismatch`)
+- `session::should_reverify()` - Bernoulli gate (`rand::thread_rng().gen_range(0..5) == 0`) amortising the re-verify cost across cold starts
 - `activation.rs::try_session_fast_path` now re-verifies tier-3 sessions (session_id present) on ~1 in 5 launches. `Rpc(_)` errors fall open (offline launches still work); verdict-contradicting errors fall closed (forged session → re-activate)
 - Tx polling (already in Phase B): 30s total (10 × 3s), revert → user-facing error via the existing `onError` IPC path
 
 **Verification**
-- `cargo test` — 35 lib tests pass under default (tier-2); 39 pass under `--no-default-features --features tier-3` (adds 4 new tests: missing tx-hash, missing block-hash, bad-RPC transport, non-constant sampler); integration + license-e2e suites unchanged
+- `cargo test` - 35 lib tests pass under default (tier-2); 39 pass under `--no-default-features --features tier-3` (adds 4 new tests: missing tx-hash, missing block-hash, bad-RPC transport, non-constant sampler); integration + license-e2e suites unchanged
 - All five tier bundles (`tier-0`/`1`/`2`/`3`/`4`) compile clean
 - Phase B `rpc` additions covered by pure tests: selector + calldata layout for `encode_activate_calldata(uint256)`, invalid-hash transport errors for `get_tx_receipt` and `get_block_number`
 - Phase C anvil-gated integration test (`tests/session_onchain_e2e.rs`, `#[ignore]`): spawns `anvil`, deploys `Rub3Access` via `forge create`, runs `purchase(address)` + `activate(uint256)` via `cast send`, extracts the real block hash, and exercises `verify_onchain` on (a) the happy path, (b) a tampered contract field, (c) a tampered block hash, and (d) a non-existent tx hash. Gracefully skips when the Foundry toolchain is unavailable. Run with `cargo test -p rub3-wrapper --no-default-features --features tier-3 -- --ignored session_verify_onchain_e2e`
 - Still to do separately from Phase C: end-to-end against anvil of the full connect → tx → sign → persistence-across-restarts webview flow (that belongs in §1.7's manual testing), cooldown enforcement path, short-TTL expiry re-activation, zero-contract legacy backward-compat test
 
-### 1.9 — Tier scaffold + feature flags `[complete]`
+### 1.9 - Tier scaffold + feature flags `[complete]`
 
 Branch: `feature/tier-scaffold`. The wrapper is a single crate with Cargo features selecting compile-time behavior. Packing a distributable picks one tier bundle; orthogonal add-ons (e.g. binary encryption) compose independently. See `architecture.md` §Security Tiers for tier semantics.
 
@@ -209,7 +209,7 @@ Branch: `feature/tier-scaffold`. The wrapper is a single crate with Cargo featur
 
 | Feature | Composed capabilities |
 |---|---|
-| `tier-0` | — |
+| `tier-0` | - |
 | `tier-1` | `session` |
 | `tier-2` (default) | `session` + `onchain-read` |
 | `tier-3` | `session` + `onchain-read` + `onchain-write` + `cooldown` |
@@ -220,25 +220,25 @@ Branch: `feature/tier-scaffold`. The wrapper is a single crate with Cargo featur
 > The default build is `tier-2` + `webview`, unchanged in behaviour.
 
 **Composable capability flags:**
-- `session` — session schema + persistence (pulls `rand`)
-- `onchain-read` — `ownerOf`, view calls
-- `onchain-write` — calldata encoding, tx receipt polling
-- `cooldown` — cooldown interval check
-- `device-key` — ephemeral secp256k1 device keypair + storage (pulls `keyring`)
-- `binary-encryption` — AES-256-GCM ciphertext unwrap + in-memory exec (pulls `aes-gcm`); orthogonal, composes with tier-3+
+- `session` - session schema + persistence (pulls `rand`)
+- `onchain-read` - `ownerOf`, view calls
+- `onchain-write` - calldata encoding, tx receipt polling
+- `cooldown` - cooldown interval check
+- `device-key` - ephemeral secp256k1 device keypair + storage (pulls `keyring`)
+- `binary-encryption` - AES-256-GCM ciphertext unwrap + in-memory exec (pulls `aes-gcm`); orthogonal, composes with tier-3+
 
 **Module scaffolds** (all `unimplemented!()` stubs behind `#[cfg(feature = "...")]`):
-- `session.rs`, `session_store.rs` — gated on `session`
-- `device.rs` — gated on `device-key`; `StorageBackend` = File | Keychain | Enclave
-- `decrypt.rs` — gated on `binary-encryption`; KEK derivation, AEK unwrap, AES-256-GCM decrypt, in-memory exec (`memfd_create`/`fexecve` on Linux, `$TMPDIR` 0700 + unlink on macOS, `CreateFileMapping` on Windows)
+- `session.rs`, `session_store.rs` - gated on `session`
+- `device.rs` - gated on `device-key`; `StorageBackend` = File | Keychain | Enclave
+- `decrypt.rs` - gated on `binary-encryption`; KEK derivation, AEK unwrap, AES-256-GCM decrypt, in-memory exec (`memfd_create`/`fexecve` on Linux, `$TMPDIR` 0700 + unlink on macOS, `CreateFileMapping` on Windows)
 
 All five tier bundles + `binary-encryption` composition compile clean. The 15 existing lib tests pass under default features. The scaffold establishes the wiring; tier 3 behavior is implemented in §1.8, tier 4 and binary encryption in later phases.
 
-### 1.10 — Frictionless tx confirmation `[not started — demoted to Phase 5]`
+### 1.10 - Frictionless tx confirmation `[not started - demoted to Phase 5]`
 
 > **Plan revision:** this work now lands as §5.1, after the agent-native core. The manual-paste floor already works and stays reachable forever; richer confirmation modes are human-surface polish. The specs below (§1.10, §1.10a, §1.10b) apply unchanged when picked up.
 
-The purchase (§1.7) and activate (§1.8) flows currently ask the user to paste a transaction hash back into the webview after sending from their wallet. That manual-paste path is our robust fallback — it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
+The purchase (§1.7) and activate (§1.8) flows currently ask the user to paste a transaction hash back into the webview after sending from their wallet. That manual-paste path is our robust fallback - it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
 
 **Three modes, in order of preference:**
 
@@ -253,11 +253,11 @@ The three modes surface as three tabs on the cooldown / purchase screens. The de
 - Auto-detect tab visible when `onchain-write` is on (always true for tier 3+, which is the only tier that reaches these screens)
 - Manual tab always visible
 
-Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate_tx_sent`) — the downstream poller/finalize path from §1.7 and §1.8 Phase B is untouched. This keeps auto-detect and WalletConnect as pure front-door improvements rather than new branches in the session pipeline.
+Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate_tx_sent`) - the downstream poller/finalize path from §1.7 and §1.8 Phase B is untouched. This keeps auto-detect and WalletConnect as pure front-door improvements rather than new branches in the session pipeline.
 
-### 1.10a — RPC auto-detect `[not started]`
+### 1.10a - RPC auto-detect `[not started]`
 
-**Rationale.** Many embedded-app developers will never configure WalletConnect — they may not want the relay dependency, may not want to register with Reown, or may be shipping internal / CLI-adjacent tools. Auto-detect gives those deployments a one-click confirm path without adding any JS or external service.
+**Rationale.** Many embedded-app developers will never configure WalletConnect - they may not want the relay dependency, may not want to register with Reown, or may be shipping internal / CLI-adjacent tools. Auto-detect gives those deployments a one-click confirm path without adding any JS or external service.
 
 **How it works.**
 - Purchase: poll `eth_getLogs` for the ERC-721 `Transfer(0x0, wallet, *)` topic signature (already constant in `rpc.rs` as `ERC721_TRANSFER_SIG`) filtered by `address == contract`, starting from the block the user opened the screen. First match wins → its tx hash feeds the same `purchase_tx_sent` handler as manual.
@@ -265,34 +265,34 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 - Poll cadence: 3 s, same as `spawn_tx_poller` / `spawn_purchase_poller`. Total budget configurable, default 120 s (longer than manual because the user is broadcasting the tx in-wallet during this window). Falls back to the Manual tab (pre-populated with helpful copy) on timeout or repeated RPC error.
 
 **Rust additions (`rpc.rs`)**
-- `pub fn watch_for_mint(rpc_url, contract, recipient, from_block, deadline) -> Result<String, RpcError>` — polls `eth_getLogs` with the `Transfer(0x0, recipient, *)` filter; returns the tx hash.
-- `pub fn watch_for_activate(rpc_url, contract, token_id, from_block, deadline) -> Result<String, RpcError>` — polls `lastActivationBlock`; on delta, resolves the tx hash via `eth_getBlockByNumber` + receipt scan.
+- `pub fn watch_for_mint(rpc_url, contract, recipient, from_block, deadline) -> Result<String, RpcError>` - polls `eth_getLogs` with the `Transfer(0x0, recipient, *)` filter; returns the tx hash.
+- `pub fn watch_for_activate(rpc_url, contract, token_id, from_block, deadline) -> Result<String, RpcError>` - polls `lastActivationBlock`; on delta, resolves the tx hash via `eth_getBlockByNumber` + receipt scan.
 
 **Webview wiring**
-- New IPC variants (gated on `onchain-write`): `AutoWatchStart { kind: "mint" | "activate", … }`, `AutoWatchCancel`. `webview.rs` spawns a `thread::spawn` running the watcher; on success the watcher routes its hash through the same internal dispatch as `purchase_tx_sent` / `activate_tx_sent` — no JS round-trip, no duplicated handlers.
+- New IPC variants (gated on `onchain-write`): `AutoWatchStart { kind: "mint" | "activate", … }`, `AutoWatchCancel`. `webview.rs` spawns a `thread::spawn` running the watcher; on success the watcher routes its hash through the same internal dispatch as `purchase_tx_sent` / `activate_tx_sent` - no JS round-trip, no duplicated handlers.
 - Existing purchase / cooldown / session handlers unchanged.
 
 **HTML**
 - Tabs in `#screen-purchase` and `#screen-cooldown`: `[WalletConnect] [Auto-detect] [Manual]`. The auto-detect body is a spinner + "Waiting for your wallet to broadcast the tx…" copy and a "Switch to manual" link.
 
-**Gating.** `onchain-write` (already required by §1.7 / §1.8). No new Cargo feature. Pure additive — tier 3+ builds pick it up automatically.
+**Gating.** `onchain-write` (already required by §1.7 / §1.8). No new Cargo feature. Pure additive - tier 3+ builds pick it up automatically.
 
-### 1.10b — WalletConnect v2 `[not started]`
+### 1.10b - WalletConnect v2 `[not started]`
 
-**Scope.** The developer opts in per deployment by supplying a `wc_project_id` (obtained from cloud.reown.com). No single rub3-wide project ID — project IDs are the abuse / rate-limit boundary, and branding (the wallet QR prompt shows the dApp name) should reflect the embedded app, not rub3.
+**Scope.** The developer opts in per deployment by supplying a `wc_project_id` (obtained from cloud.reown.com). No single rub3-wide project ID - project IDs are the abuse / rate-limit boundary, and branding (the wallet QR prompt shows the dApp name) should reflect the embedded app, not rub3.
 
 **Rust additions**
-- `ActivationContext` (the `main.rs` constants struct) gains `wc_project_id: Option<&'static str>`. Missing or placeholder → WC tab is hidden. Default in the wrapper's own dev builds is `None`, not a shared project ID — `rub3 pack` (§2.5) rejects a distributable that inherits a placeholder value.
-- Feature flag `wallet-connect` on the wrapper crate — opt-in because of the vendored JS weight. Composes with `onchain-write`; does not change tier bundle definitions (developer picks `tier-3,wallet-connect` at pack time).
+- `ActivationContext` (the `main.rs` constants struct) gains `wc_project_id: Option<&'static str>`. Missing or placeholder → WC tab is hidden. Default in the wrapper's own dev builds is `None`, not a shared project ID - `rub3 pack` (§2.5) rejects a distributable that inherits a placeholder value.
+- Feature flag `wallet-connect` on the wrapper crate - opt-in because of the vendored JS weight. Composes with `onchain-write`; does not change tier bundle definitions (developer picks `tier-3,wallet-connect` at pack time).
 - `webview.rs::show_purchase` / `show_cooldown` include the project id in the `onShowPurchase` / `onShowCooldown` payload when the feature is compiled in; JS decides whether to render the tab based on its presence.
 
 **Assets (`assets/vendor/`)**
-- `walletconnect-sign-client.mjs` — Reown SignClient v2 bundle (~250 KB).
-- `qrcode.mjs` — ~5 KB QR-from-URI renderer.
+- `walletconnect-sign-client.mjs` - Reown SignClient v2 bundle (~250 KB).
+- `qrcode.mjs` - ~5 KB QR-from-URI renderer.
 - Both served by the same `include_dir!` custom-protocol handler introduced in §5.2 (Preact refactor); if §5.2 has not landed yet, this section creates that handler.
 
 **Assets (`assets/app/`)**
-- New `wc.js` — init `SignClient`, open a session via `chains: ["eip155:<chain_id>"]`, render the pairing URI as an inline QR, call `client.request({ method: "eth_sendTransaction", params: [{ to, data, value }] })` to dispatch either the purchase or activate tx. Returns the tx hash through the existing `purchase_tx_sent` / `activate_tx_sent` IPC message — reusing the rest of the pipeline.
+- New `wc.js` - init `SignClient`, open a session via `chains: ["eip155:<chain_id>"]`, render the pairing URI as an inline QR, call `client.request({ method: "eth_sendTransaction", params: [{ to, data, value }] })` to dispatch either the purchase or activate tx. Returns the tx hash through the existing `purchase_tx_sent` / `activate_tx_sent` IPC message - reusing the rest of the pipeline.
 
 **HTML**
 - WC tab body: the vendored QR canvas, a "copy pairing URI" fallback, and error copy that suggests falling back to Auto-detect or Manual.
@@ -305,7 +305,7 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 
 ## Phase 2: Agent-Native Core
 
-Goal: an agent holding only a funded wallet key can purchase, activate, and launch a wrapped binary in one programmatic pass — and every contract deployed from here on carries the protocol's economics and ownership invariants.
+Goal: an agent holding only a funded wallet key can purchase, activate, and launch a wrapped binary in one programmatic pass - and every contract deployed from here on carries the protocol's economics and ownership invariants.
 
 ### 2.1 - Headless activation `[complete]`
 
@@ -659,9 +659,9 @@ Threaded through `script/Deploy.s.sol`, all four Foundry fixtures, and both wrap
 
 **Docs** - `architecture.md` North Star mutability table corrected (`supplyCap` is immutable, so supply cannot change at all; added the other immutables) and its Ownership-invariants section rewritten with the successor pattern and a **bytecode vs convention** breakdown naming what an agent can verify before buying and what remains a promise (registry and factory properties, both unbuilt; a revoked binary already running; the developer continuing to publish). `contracts/contracts.md` gains hash-set management, the migration runbook, and the copy-pasteable pre-purchase audit. Both docs also state the duplicate-seat consequence of snapshot-claim plainly, and the audit snippet's conclusion claims only what a selector-name scan can prove: full assurance still needs a name-independent comparison of the deployed runtime bytecode against the canonical template, which is not set up yet. `README.md` moves §2.4 out of "not yet implemented" and matches the corrected mutability table. `AGENTS.md` now points at `.github/workflows/ci.yml` instead of claiming the repo has no CI.
 
-### 2.5 — rub3 CLI `[not started]`
+### 2.5 - rub3 CLI `[not started]`
 
-Pulled forward from the old Phase 2 — a CLI is the natural agent interface, and every step is already scriptable.
+Pulled forward from the old Phase 2 - a CLI is the natural agent interface, and every step is already scriptable.
 
 ```
 rub3 pack --binary ./target/release/myapp --app-id com.example.myapp \
@@ -687,49 +687,49 @@ rub3 register --name myapp --contract 0x1234...abcd
 
 ## Phase 3: Distribution & Discovery
 
-Goal: close the loop — discover → pay → fetch → verify → run — so the contract is a complete, self-describing distribution record, and machines doing integration research find rub3 first.
+Goal: close the loop - discover → pay → fetch → verify → run - so the contract is a complete, self-describing distribution record, and machines doing integration research find rub3 first.
 
-### 3.1 — Content-addressed distribution `[not started]`
+### 3.1 - Content-addressed distribution `[not started]`
 
-- Contract gains `contentURI` (IPFS/Arweave) next to the wrapper hash set — the on-chain record now says *where* the binary lives and *what* it must hash to.
+- Contract gains `contentURI` (IPFS/Arweave) next to the wrapper hash set - the on-chain record now says *where* the binary lives and *what* it must hash to.
 - `rub3 fetch <contract>` downloads from `contentURI`, verifies against the hash set (rejecting `Revoked`), and reports which release it got.
 - `rub3 pack --publish` pins the artifact and writes `contentURI` + hash in one step.
 - Hosted pinning is an optional paid convenience (off the enforcement path); any pinning service works.
 
-### 3.2 — Registry `[not started]` *(replaces old §2.4)*
+### 3.2 - Registry `[not started]` *(replaces old §2.4)*
 
-- Deploy `Rub3Registry` on Base: `register(appName, contract)` requires `factory.isDeployed(contract)` **and** contract ownership — only canonical deploys are listable.
+- Deploy `Rub3Registry` on Base: `register(appName, contract)` requires `factory.isDeployed(contract)` **and** contract ownership - only canonical deploys are listable.
 - **Discovery, never validity:** delisting removes the badge and the listing; it cannot invalidate a token or a session. This invariant is documented and tested.
-- Each entry doubles as an ERC-8004-style agent card: contract address, price(s), payment methods, `contentURI`, hash set, identity model — machine-readable, so agent spend policies can allowlist "verified rub3 contracts" and audit the §2.4 invariants before buying.
+- Each entry doubles as an ERC-8004-style agent card: contract address, price(s), payment methods, `contentURI`, hash set, identity model - machine-readable, so agent spend policies can allowlist "verified rub3 contracts" and audit the §2.4 invariants before buying.
 - Wrapper ENS handling softens accordingly: resolution to a *different* address → hard fail (attack signature); failure to resolve (lapsed name, dead registry, offline) → warn and proceed. The embedded contract address is the root of trust after purchase.
 
-### 3.3 — Agent-facing surface `[not started]`
+### 3.3 - Agent-facing surface `[not started]`
 
 Distribution to the machines doing the integration research.
 
 - `llms.txt` + docs served as clean Markdown (the repo's docs are already agent-legible; formalize it).
 - Docs MCP server so Claude Code / Cursor pull real method signatures and contract ABIs instead of hallucinating them.
-- One-shot quickstart: a single self-contained prompt/script — "paste this into your coding agent and your binary is wallet-gated on Base Sepolia in minutes" — deterministic, testnet-safe, verifiable. Market that fact explicitly.
+- One-shot quickstart: a single self-contained prompt/script - "paste this into your coding agent and your binary is wallet-gated on Base Sepolia in minutes" - deterministic, testnet-safe, verifiable. Market that fact explicitly.
 - Listings: blockchain/MCP server directories, x402-adjacent catalogs (once §2.2 lands), ERC-8004 registries.
-- **Beachhead:** wallet-gated MCP servers — ship the example (`examples/hello-mcp/`) and target paid-MCP developers as design partners.
+- **Beachhead:** wallet-gated MCP servers - ship the example (`examples/hello-mcp/`) and target paid-MCP developers as design partners.
 
-### 3.4 — Concurrent seats `[not started]`
+### 3.4 - Concurrent seats `[not started]`
 
-Fleet licensing — the tier the agent economy actually wants.
+Fleet licensing - the tier the agent economy actually wants.
 
 - Generalize tier 3's single `activeSessionId` into an on-chain semaphore: `maxConcurrentSessions[tokenId] = K` (set at purchase tier / deploy), `activate()` admits up to K live session ids per token, `release()` (or TTL lapse) frees a seat.
 - One license NFT = K concurrent fleet instances; buy another token to scale. Cooldown still rate-limits churn.
 - Wrapper: seat-aware activation + a clear "fleet exhausted, N seats in use" error for orchestrators.
 
-### 3.5 — rub3 SDK crate `[not started]` *(moved from old §2.3)*
+### 3.5 - rub3 SDK crate `[not started]` *(moved from old §2.3)*
 
-- `rub3::heartbeat()` — panics if wrapper is not alive (Unix socket / named pipe)
-- `rub3::session()` — returns `SessionInfo { app_id, token_id, user_id, wallet, identity, expires_at }`
+- `rub3::heartbeat()` - panics if wrapper is not alive (Unix socket / named pipe)
+- `rub3::session()` - returns `SessionInfo { app_id, token_id, user_id, wallet, identity, expires_at }`
 - Application code keys all persistent data on `user_id`, never on `wallet`
-- Socket path passed as env var by wrapper; minimal dependency footprint — no `alloy` or `wry`
+- Socket path passed as env var by wrapper; minimal dependency footprint - no `alloy` or `wry`
 - Needed early for the MCP-server beachhead (a wrapped server checks its session/heartbeat).
 
-**Phase 3 deliverable:** an agent that has never heard of rub3 can find a wrapped app via the registry/docs surface, buy it in USDC, fetch and verify the binary, and run it — headlessly, end to end.
+**Phase 3 deliverable:** an agent that has never heard of rub3 can find a wrapped app via the registry/docs surface, buy it in USDC, fetch and verify the binary, and run it - headlessly, end to end.
 
 ---
 
@@ -737,21 +737,21 @@ Fleet licensing — the tier the agent economy actually wants.
 
 Goal: the payment flows only rub3 can host.
 
-### 4.1 — Metered billing (`Rub3Metered`) `[not started]`
+### 4.1 - Metered billing (`Rub3Metered`) `[not started]`
 
-- Third billing model: the launch gate requires a micropayment — per launch, per session-hour, or per N launches — settled in USDC (EIP-3009 authorizations batched/settled on-chain).
+- Third billing model: the launch gate requires a micropayment - per launch, per session-hour, or per N launches - settled in USDC (EIP-3009 authorizations batched/settled on-chain).
 - The structural moat: x402 meters API calls because the server is a choke point; the wrapper is the only viable choke point for *locally executed* software. Same protocol fee, much higher-frequency flow.
 - Pilot with one or two paid-MCP-server design partners before generalizing.
 
-### 4.2 — Facilitator `[not started]`
+### 4.2 - Facilitator `[not started]`
 
 - Hosted relay that submits EIP-3009 purchase/renew/meter authorizations and fronts gas for buyers holding only stablecoins.
-- Bundled into the protocol fee rather than separately priced — its function is making the fee-carrying path also the lowest-friction path.
+- Bundled into the protocol fee rather than separately priced - its function is making the fee-carrying path also the lowest-friction path.
 - Self-hosting the facilitator remains possible (it's a thin relay); the hosted one is a convenience, not a chokehold.
 
-### 4.3 — License marketplace `[not started]` *(trigger-gated: do not build speculatively)*
+### 4.3 - License marketplace `[not started]` *(trigger-gated: do not build speculatively)*
 
-- **Do not build speculatively.** Trigger: organic `Transfer` volume on factory contracts (all on-chain — query for the moment resale behavior emerges).
+- **Do not build speculatively.** Trigger: organic `Transfer` volume on factory contracts (all on-chain - query for the moment resale behavior emerges).
 - Purpose-built venue for license resale: queryable by agents, filtered to registry-verified contracts, priced in USDC. 1–2% marketplace fee + ERC-2981 royalty split with the developer.
 - This is what makes "licenses as liquid capital assets" real: agents buy for a workload, resell when the job ends.
 
@@ -761,23 +761,23 @@ Goal: the payment flows only rub3 can host.
 
 ## Phase 5: Human Surface *(demoted, not dropped)*
 
-The interactive path stays fully supported — manual tx-hash paste is the floor today and remains reachable forever. Polish lands after the agent path.
+The interactive path stays fully supported - manual tx-hash paste is the floor today and remains reachable forever. Polish lands after the agent path.
 
-### 5.1 — Frictionless tx confirmation `[not started]` *(spec in §1.10 / §1.10a / §1.10b)*
+### 5.1 - Frictionless tx confirmation `[not started]` *(spec in §1.10 / §1.10a / §1.10b)*
 - Auto-detect and WalletConnect tabs on the purchase/cooldown screens, manual paste as the always-available floor. The detailed specs in §1.10a/§1.10b apply unchanged.
 
-### 5.2 — Activation UI refactor to Preact `[not started]` *(was old §2.5)*
+### 5.2 - Activation UI refactor to Preact `[not started]` *(was old §2.5)*
 - Single reducer over `(phase, ctx)`; vendored `preact.mjs` + `htm.mjs` under `assets/vendor/`; `include_dir!` custom-protocol handler; no Node/bundler. No behavioral changes.
 
-### 5.3 — Tauri integration `[not started]` *(was old Phase 3)*
+### 5.3 - Tauri integration `[not started]` *(was old Phase 3)*
 - `tauri-plugin-rub3`: auto-heartbeat, session renewal in the app's own webview, `invoke('plugin:rub3|session')` JS API, `rub3://session-renewed` event.
 - `create-rub3-app` starter template preconfigured against Base Sepolia.
 
-### 5.4 — Polish `[not started]` *(was old Phase 4, minus deferred items)*
+### 5.4 - Polish `[not started]` *(was old Phase 4, minus deferred items)*
 - Background session renewal with OS notification before expiry
 - Windows support: named pipes for heartbeat IPC, MSVC target, WebView2 testing
 - Subscription renewal UI (view expiry, renew from tray/menu)
-- Multi-wallet delegation (hardware wallet owns, hot wallet signs sessions — EIP-7702 or delegation registry; exploratory)
+- Multi-wallet delegation (hardware wallet owns, hot wallet signs sessions - EIP-7702 or delegation registry; exploratory)
 
 ---
 
@@ -785,9 +785,9 @@ The interactive path stays fully supported — manual tx-hash paste is the floor
 
 Cut from the active roadmap with rationale; scaffolds are retained.
 
-- **Tier 4 device binding** (`activateDevice`, `registeredDevice`, Secure Enclave/TPM storage) — device binding treats fleet cloning as an attack, but agent fleets clone VMs as a legitimate pattern; seats (§3.4) are the right concurrency primitive. Human anti-sharing pressure also shrinks when the customer is an agent with a wallet and a spend policy. `device.rs` scaffold stays behind the `device-key` feature.
-- **Binary encryption** (AES-256-GCM unwrap, in-memory exec) — large engineering surface against a threat model the agent thesis dissolves; extraction-resistance was never a goal (see ideation.md, "Not DRM"). `decrypt.rs` scaffold stays behind `binary-encryption`.
-- **Binary obfuscation** (UPX-style) — same rationale.
+- **Tier 4 device binding** (`activateDevice`, `registeredDevice`, Secure Enclave/TPM storage) - device binding treats fleet cloning as an attack, but agent fleets clone VMs as a legitimate pattern; seats (§3.4) are the right concurrency primitive. Human anti-sharing pressure also shrinks when the customer is an agent with a wallet and a spend policy. `device.rs` scaffold stays behind the `device-key` feature.
+- **Binary encryption** (AES-256-GCM unwrap, in-memory exec) - large engineering surface against a threat model the agent thesis dissolves; extraction-resistance was never a goal (see ideation.md, "Not DRM"). `decrypt.rs` scaffold stays behind `binary-encryption`.
+- **Binary obfuscation** (UPX-style) - same rationale.
 
 ---
 
@@ -798,7 +798,7 @@ Cut from the active roadmap with rationale; scaffolds are retained.
 | Wrapper runtime | Rust |
 | Crypto (secp256k1) | `k256` crate |
 | Ethereum RPC | `alloy` crate |
-| Webview (interactive fallback) | `wry` crate — excluded from `headless` builds |
+| Webview (interactive fallback) | `wry` crate - excluded from `headless` builds |
 | IPC (wrapper ↔ app) | Unix domain sockets / named pipes |
 | Smart contracts | Solidity, OpenZeppelin, Foundry |
 | Target chain | Base (primary). Config-abstracted for other EVM L2s |
@@ -841,16 +841,16 @@ Planned (not yet created):
 
 ```
 ├── crates/
-│   ├── rub3-sdk/                # §3.5 — heartbeat, session info
-│   ├── rub3-cli/                # §2.5 — pack, deploy, fetch, register
+│   ├── rub3-sdk/                # §3.5 - heartbeat, session info
+│   ├── rub3-cli/                # §2.5 - pack, deploy, fetch, register
 │   └── tauri-plugin-rub3/       # §5.3
 ├── contracts/src/
-│   ├── Rub3Metered.sol          # §4.1 — per-launch billing
-│   └── Rub3Registry.sol         # §3.2 — discovery + agent cards
+│   ├── Rub3Metered.sol          # §4.1 - per-launch billing
+│   └── Rub3Registry.sol         # §3.2 - discovery + agent cards
 ├── llms.txt                     # §3.3
-├── docs-mcp/                    # §3.3 — docs MCP server
+├── docs-mcp/                    # §3.3 - docs MCP server
 └── examples/
-    ├── hello-mcp/               # §3.3 beachhead — wallet-gated MCP server
+    ├── hello-mcp/               # §3.3 beachhead - wallet-gated MCP server
     ├── hello-rust/
     └── hello-subscription/
 ```
