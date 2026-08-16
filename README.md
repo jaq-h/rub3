@@ -325,7 +325,7 @@ activation failure.
 | 20 | `--token-id` names a token this signer does not hold | Fix the id, or drop the flag to purchase |
 | 21 | Purchase broadcast but not confirmed - timed out, or the receipt query kept failing | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
 | 22 | The listed price is above the configured spend ceiling. The ceiling is weighed before anything is signed, so the rail was not exercised and this is no evidence it is otherwise usable | Terminal - raise `RUB3_AGENT_MAX_TOKEN_AMOUNT` if the price is acceptable, or do not buy |
-| 23 | The contract's deployed code is not canonical rub3 code. Checked before anything is signed, so no transaction was sent and nothing was spent | Terminal - the same address holds the same code. Verify the address, or use a build packed with the release that contract came from |
+| 23 | This build will not buy a licence from the contract at that address, either because the code is canonical rub3 code at an address that sells none (the factory or a deployer helper) or because it matched no fingerprint this build pins. Checked before anything is signed, so no transaction was sent and nothing was spent | Terminal - the same address holds the same code. The detail line below says which case it is: verify the address, or use a build packed with the release that contract came from |
 
 Failures with structured parameters also print one parseable line, carrying only
 parameters the wrapper actually measured:
@@ -334,6 +334,19 @@ parameters the wrapper actually measured:
 error: cooldown active on token 0: retry in 12 blocks
 rub3-detail: token_id=0 blocks_remaining=12
 ```
+
+Code 23's detail line comes in two shapes, told apart by which key is present,
+because the two causes call for different responses:
+
+| Detail line | What happened | What to do |
+|---|---|---|
+| `contract=0x... canonical=NAME sells_licences=false` | The code **is** canonical rub3 code, at an address that sells no licences - the factory, or one of its deployer helpers | Wrong address. Check what the build is pointed at |
+| `contract=0x... code_bytes=N exposed=A\|B` | The code matched no fingerprint this build pins: a modified copy, or a template release newer than this binary | Verify the address, or use a build packed with that release |
+
+`exposed` is a **pipe-separated** list, not comma-separated: an ABI signature
+contains commas of its own, so `burn(address,uint256)` would not survive a comma
+split. It reads `none` when the scan named nothing, which is a diagnostic and
+not a clean bill of health. Neither shape is an accusation.
 
 Code 11's detail line carries `required_wei` and `required_covers`, which says
 what that figure includes:

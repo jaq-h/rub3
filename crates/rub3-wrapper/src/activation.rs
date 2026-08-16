@@ -299,9 +299,24 @@ pub const EXIT_PURCHASE_UNCONFIRMED: i32 = 21;
 /// Never retried and never quietly worked around: the price exceeded a policy,
 /// which is a different thing from the network having failed.
 pub const EXIT_PRICE_ABOVE_POLICY: i32 = 22;
-/// The contract at the configured address is not one this build recognises as
-/// canonical rub3 code, so nothing was bought from it. A refusal of the
-/// address, not a network failure: retrying reaches the same code.
+/// The contract at the configured address is not one this build will buy a
+/// licence from, so nothing was bought from it. A refusal of the address, not a
+/// network failure: retrying reaches the same code.
+///
+/// Two causes, needing two different responses, told apart by which key the
+/// detail line carries:
+///
+/// - `contract=0x... canonical=<name> sells_licences=false` - the code *is*
+///   canonical rub3 code, but at an address that sells no licences (the factory
+///   or one of its deployer helpers). The build is pointed at the wrong
+///   address; check what it was packed with.
+/// - `contract=0x... code_bytes=N exposed=<a>|<b>` - the code matched no
+///   fingerprint this build pins. That is a modified copy, or a template
+///   release newer than this binary.
+///
+/// Neither is an accusation: `exposed` is a diagnostic naming what a blacklist
+/// of names happened to see, and a miss says the code is unrecognised here, not
+/// that it is malicious.
 pub const EXIT_NOT_CANONICAL_CONTRACT: i32 = 23;
 
 /// The exit-code table rendered for `--help`, so the contract is discoverable
@@ -339,12 +354,22 @@ child is the child's status and not an activation failure.
       anything is signed, so the rail was not exercised and this is no
       evidence it is otherwise usable. Not retryable: raise
       RUB3_AGENT_MAX_TOKEN_AMOUNT or do not buy
-  23  the contract's deployed code is not canonical rub3 code - stderr
-      carries `contract=0x... code_bytes=N exposed=...`. Checked before
-      anything is signed, so no transaction was sent and nothing was
-      spent. Not retryable: the same address holds the same code. It
-      says the code did not match what this build knows, which is not
-      the same as the code being malicious
+  23  this build will not buy a licence from the contract at that
+      address. Checked before anything is signed, so no transaction was
+      sent and nothing was spent. Not retryable: the same address holds
+      the same code. Two causes, told apart by which key stderr
+      carries:
+        `contract=0x... canonical=NAME sells_licences=false` - the code
+          IS canonical rub3 code, at an address that sells no licences
+          (the factory, or a deployer helper). Wrong address: check
+          what this build is pointed at
+        `contract=0x... code_bytes=N exposed=A|B` - the code matched no
+          fingerprint this build pins: a modified copy, or a template
+          release newer than this binary. `exposed` is a
+          pipe-separated list, since a signature may contain commas,
+          and is `none` when the scan named nothing
+      Neither is an accusation: the scan is a diagnostic, and a miss
+      says the code is unrecognised here, not that it is malicious
 
 Signer sources, highest precedence first:
   RUB3_AGENT_KEY                        raw hex private key (dev / CI only)
@@ -818,7 +843,7 @@ mod headless {
                         if finding.exposed.is_empty() {
                             "none".to_string()
                         } else {
-                            finding.exposed.join(",")
+                            finding.exposed.join("|")
                         }
                     ),
                     attest::Refusal::NotALicence { contract: name, .. } => {
@@ -1678,7 +1703,11 @@ mod tests {
             contract: "0x00000000000000000000000000000000000000ab".into(),
             refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
                 code_len: 4096,
-                exposed: vec!["seize(uint256)", "pause()"],
+                // `burn(address,uint256)` carries a comma of its own, which is
+                // the whole point: 10 of the 30 forbidden signatures do, so a
+                // comma-separated list is not recoverable by the orchestrator
+                // the detail line exists for.
+                exposed: vec!["seize(uint256)", "burn(address,uint256)", "pause()"],
             }),
         };
 
@@ -1693,9 +1722,16 @@ mod tests {
             .machine_detail()
             .expect("a refusal must carry a detail line");
         assert!(detail.contains("code_bytes=4096"), "{detail}");
-        assert!(
-            detail.contains("exposed=seize(uint256),pause()"),
-            "{detail}"
+
+        let exposed = detail
+            .split("exposed=")
+            .nth(1)
+            .expect("the detail line names the exposed list");
+        assert_eq!(
+            exposed.split('|').collect::<Vec<_>>(),
+            vec!["seize(uint256)", "burn(address,uint256)", "pause()"],
+            "splitting the field on its separator must recover the signatures \
+             whole, argument lists included: {detail}"
         );
     }
 

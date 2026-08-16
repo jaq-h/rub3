@@ -20,6 +20,15 @@
 //!
 //! Modelled on `session_onchain_e2e.rs`; deliberately a separate file with its
 //! own anvil port so the two can run side by side.
+//!
+//! **Every purchase here runs the §2.6 pre-purchase gate**, so every test that
+//! buys depends on the locally compiled `Rub3Access` reproducing
+//! `contracts/canonical-bytecode.json` byte for byte. If your Foundry resolves
+//! a different solc, the whole suite fails as `NotCanonicalContract` / exit 23
+//! rather than as the build mismatch it actually is. `contracts/foundry.toml`
+//! pins `solc_version`, `optimizer_runs`, `evm_version` and `bytecode_hash`;
+//! `scripts/canonical-bytecode-hashes.sh check` is what confirms the local
+//! build still matches.
 
 #![cfg(all(feature = "cooldown", feature = "headless"))]
 
