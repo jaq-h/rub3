@@ -329,7 +329,7 @@ Which path you get is decided by one environment variable, `FACTORY`:
 | the published canonical address | registered | 200-300 bps, immutable | recorded on the canonical factory |
 | some other factory address | that factory's | that factory's, to *its* treasury | recorded only on that factory |
 
-Forgetting `FACTORY` is not an error and does not fail: you get a working, fee-free, unrecorded contract and one line of `console.log` saying so. The canonical mainnet factory address is **not yet published** - publishing it is a separate open decision - so `<CANONICAL_FACTORY_ADDRESS_TBD>` below is a placeholder, not an address to copy.
+Forgetting `FACTORY` is not an error and does not fail: you get a working, fee-free, unrecorded contract and one line of `console.log` saying so. The canonical mainnet factory address is **not yet published** - publishing it is a separate open decision - so `<CANONICAL_FACTORY_ADDRESS_TBD>` below is a placeholder, not an address to copy. There is no canonical mainnet factory to name yet because the contracts are not deployed to mainnet or declared ready for use until the registry is ready; the factory and the registry launch together.
 
 ```bash
 cd contracts
@@ -410,7 +410,9 @@ Stated plainly, because it is a decided trade-off rather than a gap:
 
 **What the row buys today:** a durable, immutable, on-chain record that this contract was deployed through a specific factory - a canonical referent that anyone can check, and the eligibility criterion for the registry and marketplace when they exist.
 
-**What is planned, not shipped:** the registry (§3.2) and the marketplace (§4.3). The live fee ships before them. Until they land, the row buys the record and the future eligibility, and no distribution, no verification service, and no liquidity. Do not read the fee's rationale as a description of features that exist.
+**What is planned, not shipped:** the registry (§3.2) and the marketplace (§4.3). Until they land, the row buys the record and the future eligibility, and no distribution, no verification service, and no liquidity. Do not read the fee's rationale as a description of features that exist.
+
+**The fee does not go live ahead of the registry.** The contracts are not deployed to mainnet, and are not declared ready for use, until the registry is ready: the factory and the registry launch together. So there is no window in which a developer pays a live fee for a carrot that does not exist yet.
 
 **Bytecode identity is never evidence of canonical deployment.** Anyone may call a factory's `accessDeployer()` / `subscriptionDeployer()` directly, pass the canonical factory's own `FeeTerms`, and obtain a licence contract whose runtime code is byte-identical to a genuine factory deploy - and which the factory never recorded. Anyone may also deploy their own `Rub3Factory` with their own treasury and any `feeBps` in [200, 300]; its contracts read as fee-bearing and are `isDeployed` **on that factory**. So a verifier must check `isDeployed` on a specific, known factory address, and must never conclude anything from a matching fingerprint or from a non-zero `feeBps()`.
 
