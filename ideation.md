@@ -59,7 +59,7 @@ Humans complete the same loop through the wrapper's native activation window. Th
 
 ## Business Model
 
-Open-source the rails; own the factory, registry, and marketplace; take 2–3% of a payment flow that only the wrapper can meter — priced low enough that no agent ever bothers to route around it.
+The intent: open-source the rails; own the factory, registry, and marketplace; take 2–3% of a payment flow that only the wrapper can meter, priced low enough that no agent bothers to route around it. Only the factory and its on-chain fee split exist today; the registry, marketplace and metered billing below are not built, and the contracts are not deployed to mainnet or declared ready for use until the registry is ready.
 
 - **Protocol fee** — 2–3% on `purchase()` and `renew()`, split on-chain by factory-deployed contracts. Immutable per contract: a developer's fee can never be raised after deploy. rub3 changes fees by shipping a new factory version, affecting only future deploys.
 - **Metered billing** — the wrapper gates every launch, which makes it the only viable choke point for charging per-use on locally executed software. x402 meters API calls because the server is a choke point; nothing has ever been able to meter local execution. `Rub3Metered` turns the wrapper into a payment terminal: per-launch or per-session micropayments in USDC — same take rate, much higher-frequency flow.
@@ -67,7 +67,7 @@ Open-source the rails; own the factory, registry, and marketplace; take 2–3% o
 - **Hosted conveniences** — dashboards, purchase webhooks, binary pinning, release attestations. Optional SaaS for humans, entirely off the enforcement path.
 - **Never charged:** the wrapper, SDK, CLI, contract templates, self-serve deploys. **No token, ever.** Fees settle in stablecoins.
 
-Why this works better with agent customers than human ones: agents follow the canonical quickstart literally (defaults dominate), won't burn engineering time to dodge 2.5% on a $10 license, and their spend policies allowlist verified factory contracts — making the fee-carrying path also the trusted path.
+Why this is expected to work better with agent customers than human ones: agents follow the canonical quickstart literally (defaults dominate), won't burn engineering time to dodge 2.5% on a $10 license, and their spend policies allowlist verified factory contracts — making the fee-carrying path also the trusted path.
 
 ## Ownership Invariants
 
