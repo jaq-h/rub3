@@ -5,7 +5,7 @@ import {Test, Vm}         from "forge-std/Test.sol";
 import {Rub3Access}       from "../src/Rub3Access.sol";
 import {Rub3License}      from "../src/Rub3License.sol";
 import {Rub3Subscription} from "../src/Rub3Subscription.sol";
-import {Rub3Factory, Rub3LicenseParams} from "../src/Rub3Factory.sol";
+import {Rub3Factory, Rub3LicenseParams, Rub3AccessDeployer} from "../src/Rub3Factory.sol";
 import {MockEIP3009Token} from "./mocks/MockEIP3009Token.sol";
 
 /// @notice A treasury that refuses ETH.
@@ -17,6 +17,20 @@ contract RejectingTreasury {
     // No receive, no fallback: a plain ETH transfer reverts.
     function ping() external pure returns (uint256) {
         return 1;
+    }
+}
+
+/// @notice Answers `isDeployed` like a factory but has no `previousFactory`, so
+///         the chain walk could not continue through it.
+///
+/// The fixture for the constructor probe: a half-factory is exactly the shape
+/// that would deploy fine and then revert every predecessor-bearing deploy
+/// afterwards, when the pointer is immutable and can no longer be corrected.
+contract HalfFactory {
+    mapping(address => bool) public isDeployed;
+
+    function record(address license) external {
+        isDeployed[license] = true;
     }
 }
 
@@ -37,6 +51,9 @@ contract RejectingTreasury {
 ///   3. **Direct deployment still works and is simply unrecorded.** Nothing here
 ///      penalises deploying the open-source template yourself; it just carries
 ///      no fee and gets no row in `isDeployed`.
+///   4. **A factory deploy may only succeed a canonical predecessor.** Migration
+///      is free by design, so an unconstrained `predecessor` would let a whole
+///      fee-free sale be laundered onto a registry-listed contract. Group 8.
 contract Rub3FactoryTest is Test {
     // keccak256("ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
     bytes32 internal constant RECEIVE_TYPEHASH =
@@ -68,7 +85,7 @@ contract Rub3FactoryTest is Test {
     function setUp() public {
         buyer   = vm.addr(BUYER_PK);
         usdc    = new MockEIP3009Token();
-        factory = new Rub3Factory(FEE_BPS, treasury);
+        factory = new Rub3Factory(FEE_BPS, treasury, address(0));
 
         vm.startPrank(developer);
         nft = Rub3Access(factory.deployAccess(_params(_sale(PRICE))));
@@ -123,6 +140,18 @@ contract Rub3FactoryTest is Test {
         });
     }
 
+    /// The same deploy inputs, naming a predecessor. Group 8 is the only place
+    /// that matters, because it is the only thing the factory now checks beyond
+    /// the fee terms it stamps itself.
+    function _paramsWithPredecessor(Rub3License.SaleTerms memory sale, address predecessor)
+        internal
+        view
+        returns (Rub3LicenseParams memory out)
+    {
+        out = _params(sale);
+        out.predecessor = predecessor;
+    }
+
     function _noFee() internal pure returns (Rub3License.FeeTerms memory) {
         return Rub3License.FeeTerms({feeBps: 0, treasury: address(0)});
     }
@@ -142,7 +171,7 @@ contract Rub3FactoryTest is Test {
         internal
         returns (Rub3Access)
     {
-        Rub3Factory f = new Rub3Factory(feeBps, treasury_);
+        Rub3Factory f = new Rub3Factory(feeBps, treasury_, address(0));
         vm.prank(developer);
         return Rub3Access(f.deployAccess(_params(_saleEthOnly(price))));
     }
@@ -284,7 +313,7 @@ contract Rub3FactoryTest is Test {
                 Rub3Factory.FeeBpsOutOfRange.selector, tooLow, uint16(200), uint16(300)
             )
         );
-        new Rub3Factory(tooLow, treasury);
+        new Rub3Factory(tooLow, treasury, address(0));
     }
 
     function test_factory_rejectsFeeAboveRange() public {
@@ -294,17 +323,17 @@ contract Rub3FactoryTest is Test {
                 Rub3Factory.FeeBpsOutOfRange.selector, tooHigh, uint16(200), uint16(300)
             )
         );
-        new Rub3Factory(tooHigh, treasury);
+        new Rub3Factory(tooHigh, treasury, address(0));
     }
 
     function test_factory_acceptsBothEndsOfTheRange() public {
-        assertEq(new Rub3Factory(200, treasury).feeBps(), 200);
-        assertEq(new Rub3Factory(300, treasury).feeBps(), 300);
+        assertEq(new Rub3Factory(200, treasury, address(0)).feeBps(), 200);
+        assertEq(new Rub3Factory(300, treasury, address(0)).feeBps(), 300);
     }
 
     function test_factory_rejectsZeroTreasury() public {
         vm.expectRevert(Rub3Factory.TreasuryRequired.selector);
-        new Rub3Factory(FEE_BPS, address(0));
+        new Rub3Factory(FEE_BPS, address(0), address(0));
     }
 
     /// The factory's initcode carries both deployers, which carry both licence
@@ -331,7 +360,7 @@ contract Rub3FactoryTest is Test {
     /// asserted.
     function test_immutable_olderFactoryDeployKeepsItsOriginalTerms() public {
         address newTreasury = address(0xFEE2);
-        Rub3Factory v2 = new Rub3Factory(300, newTreasury);
+        Rub3Factory v2 = new Rub3Factory(300, newTreasury, address(0));
 
         vm.prank(developer);
         Rub3Access fresh = Rub3Access(v2.deployAccess(_params(_saleEthOnly(PRICE))));
@@ -356,7 +385,7 @@ contract Rub3FactoryTest is Test {
     /// The old factory does not learn about the new one either: `isDeployed` is
     /// per factory, and neither can write the other's.
     function test_immutable_registriesAreDisjointPerFactory() public {
-        Rub3Factory v2 = new Rub3Factory(300, address(0xFEE2));
+        Rub3Factory v2 = new Rub3Factory(300, address(0xFEE2), address(0));
 
         vm.prank(developer);
         address fresh = v2.deployAccess(_params(_saleEthOnly(PRICE)));
@@ -699,7 +728,7 @@ contract Rub3FactoryTest is Test {
         // smallest unit, so the two fees are directly comparable.
         uint256 amount = USDC_PRICE;
 
-        Rub3Factory f = new Rub3Factory(FEE_BPS, treasury);
+        Rub3Factory f = new Rub3Factory(FEE_BPS, treasury, address(0));
         Rub3LicenseParams memory p = _params(
             Rub3License.SaleTerms({
                 price:       amount,
@@ -892,5 +921,221 @@ contract Rub3FactoryTest is Test {
         nft.withdrawFees();
 
         assertEq(treasury.balance, _expectedFee(PRICE, FEE_BPS));
+    }
+
+    // ══ 8. A factory deploy may only succeed a canonical predecessor ═════════
+
+    /// The predecessor-laundering route, closed at the factory door.
+    ///
+    /// Sell every licence on a fee-free direct deploy, then deploy a successor
+    /// *through the factory* naming it as predecessor: `claimFromPredecessor`
+    /// charges nothing by design, because migration must never be taxed, so
+    /// every holder would land on a fee-bearing, `isDeployed`-listed contract
+    /// with the treasury never paid. The deploy is the step that has to fail,
+    /// and it fails before the licence is even built.
+    function test_predecessor_launderingThroughTheFactoryReverts() public {
+        vm.prank(developer);
+        Rub3Access shadow = new Rub3Access(
+            "Shadow", "SHD", _identity(), _hashes(WRAPPER_HASH),
+            _saleEthOnly(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, address(0), developer
+        );
+
+        // The sale itself is legitimate and stays legitimate: a direct deploy is
+        // fee-free and nothing here penalises it.
+        vm.prank(buyer);
+        shadow.purchase{value: PRICE}(address(0));
+        assertEq(shadow.feesAccrued(), 0);
+
+        // The laundering step. The factory will not put its registry row at the
+        // far end of that sale.
+        vm.prank(developer);
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3Factory.PredecessorNotCanonical.selector, address(shadow))
+        );
+        factory.deployAccess(_paramsWithPredecessor(_saleEthOnly(PRICE), address(shadow)));
+
+        assertFalse(factory.isCanonicalPredecessor(address(shadow)));
+        assertEq(factory.deploymentCount(), 2, "and nothing was recorded");
+    }
+
+    /// The counterweight, so the guard is not just a refusal: a contract this
+    /// factory recorded is accepted, and the migration the feature exists for
+    /// still runs end to end.
+    function test_predecessor_canonicalIsAcceptedAndHoldersStillMigrate() public {
+        vm.prank(buyer);
+        uint256 id = nft.purchase{value: PRICE}(address(0));
+
+        vm.prank(developer);
+        Rub3Access v2 = Rub3Access(
+            factory.deployAccess(_paramsWithPredecessor(_saleEthOnly(PRICE), address(nft)))
+        );
+        assertTrue(factory.isDeployed(address(v2)));
+        assertEq(v2.predecessor(), address(nft));
+
+        vm.prank(developer);
+        nft.setSuccessor(address(v2));
+
+        vm.prank(buyer);
+        uint256 claimed = v2.claimFromPredecessor(id);
+        assertEq(v2.ownerOf(claimed), buyer);
+        assertTrue(v2.honorsContract(address(nft), claimed));
+    }
+
+    /// No predecessor is always canonical - the common case, and the one the
+    /// guard must never touch.
+    function test_predecessor_zeroIsAlwaysCanonical() public view {
+        assertTrue(factory.isCanonicalPredecessor(address(0)));
+        assertEq(nft.predecessor(), address(0));
+        assertEq(sub.predecessor(), address(0));
+    }
+
+    /// Both deploy paths carry the guard. Not a copy of the access case: a
+    /// subscription predecessor has to answer `period()`, so both the rejected
+    /// and the accepted contract here are subscriptions.
+    function test_predecessor_subscriptionPathIsGuardedToo() public {
+        vm.prank(developer);
+        Rub3Subscription shadow = new Rub3Subscription(
+            "Shadow", "SHD", _identity(), _hashes(WRAPPER_HASH),
+            _saleEthOnly(PRICE), _noFee(), 0, PERIOD, COOLDOWN_BLOCKS, address(0), developer
+        );
+
+        vm.prank(developer);
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3Factory.PredecessorNotCanonical.selector, address(shadow))
+        );
+        factory.deploySubscription(
+            _paramsWithPredecessor(_saleEthOnly(PRICE), address(shadow)), PERIOD
+        );
+
+        vm.prank(developer);
+        address v2 = factory.deploySubscription(
+            _paramsWithPredecessor(_saleEthOnly(PRICE), address(sub)), PERIOD
+        );
+        assertTrue(factory.isDeployed(v2));
+    }
+
+    /// rub3 changes its take by deploying a *new* factory, so contracts the old
+    /// one recorded have to stay migratable onto the new one. That is the whole
+    /// reason `previousFactory` exists.
+    function test_predecessor_previousFactoryChainIsAccepted() public {
+        Rub3Factory v2Factory = new Rub3Factory(300, address(0xFEE2), address(factory));
+        assertEq(v2Factory.previousFactory(), address(factory));
+
+        // The registries stay disjoint - the new factory never learns the old
+        // one's rows - and the predecessor is accepted anyway, through the chain.
+        assertFalse(v2Factory.isDeployed(address(nft)));
+        assertTrue(v2Factory.isCanonicalPredecessor(address(nft)));
+
+        vm.prank(developer);
+        address v2 =
+            v2Factory.deployAccess(_paramsWithPredecessor(_saleEthOnly(PRICE), address(nft)));
+
+        assertTrue(v2Factory.isDeployed(v2));
+        assertEq(Rub3Access(v2).feeBps(), 300, "and it carries the NEW factory's terms");
+    }
+
+    /// Being a factory is not what carries recognition forward - the pointer is.
+    /// An unlinked new factory recognises nothing the old one deployed.
+    function test_predecessor_unlinkedFactoryInheritsNothing() public {
+        Rub3Factory unlinked = new Rub3Factory(300, address(0xFEE2), address(0));
+        assertFalse(unlinked.isCanonicalPredecessor(address(nft)));
+
+        vm.prank(developer);
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3Factory.PredecessorNotCanonical.selector, address(nft))
+        );
+        unlinked.deployAccess(_paramsWithPredecessor(_saleEthOnly(PRICE), address(nft)));
+    }
+
+    /// The walk is bounded, and the bound is checked at its edge rather than
+    /// asserted: the factory exactly `MAX_PREDECESSOR_FACTORY_HOPS` generations
+    /// later still reaches the oldest registry, and the next one does not.
+    function test_predecessor_chainWalkStopsAtTheDocumentedBound() public {
+        uint256 hops = factory.MAX_PREDECESSOR_FACTORY_HOPS();
+
+        // `factory` is generation 0; build one generation past the bound on it.
+        Rub3Factory[] memory chain = new Rub3Factory[](hops + 2);
+        chain[0] = factory;
+        for (uint256 i = 1; i < chain.length; i++) {
+            chain[i] = new Rub3Factory(FEE_BPS, treasury, address(chain[i - 1]));
+        }
+
+        assertTrue(
+            chain[hops].isCanonicalPredecessor(address(nft)),
+            "the oldest registry is still reachable at exactly the bound"
+        );
+        assertFalse(
+            chain[hops + 1].isCanonicalPredecessor(address(nft)),
+            "one generation further back it is not"
+        );
+
+        // What the bound drops is only the far end: the nearer generations are
+        // untouched by it.
+        vm.prank(developer);
+        address recent = chain[hops].deployAccess(_params(_saleEthOnly(PRICE)));
+        assertTrue(chain[hops + 1].isCanonicalPredecessor(recent));
+    }
+
+    function test_factory_rejectsAPreviousFactoryThatIsNotAContract() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3Factory.IncompatiblePreviousFactory.selector, developer)
+        );
+        new Rub3Factory(FEE_BPS, treasury, developer);
+    }
+
+    /// Half a factory is worse than no factory: it would construct fine and then
+    /// revert every predecessor-bearing deploy for as long as it existed, with
+    /// the pointer immutable and no remedy but redeploying. The probe reads both
+    /// views the walk uses, at the only moment either can still be corrected -
+    /// the same reasoning that makes {Rub3License} probe its predecessor.
+    function test_factory_rejectsAPreviousFactoryMissingHalfTheWalk() public {
+        HalfFactory half = new HalfFactory();
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3Factory.IncompatiblePreviousFactory.selector, address(half))
+        );
+        new Rub3Factory(FEE_BPS, treasury, address(half));
+
+        // And a contract that answers neither view.
+        RejectingTreasury notAFactory = new RejectingTreasury();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Rub3Factory.IncompatiblePreviousFactory.selector, address(notAFactory)
+            )
+        );
+        new Rub3Factory(FEE_BPS, treasury, address(notAFactory));
+    }
+
+    /// Direct deploys are untouched and may still name any predecessor at all.
+    /// They get no registry row, so there is nothing to launder onto.
+    function test_predecessor_directDeployMayStillNameAnything() public {
+        Rub3Access shadow = _deployDirect(PRICE);
+
+        vm.prank(developer);
+        Rub3Access successor = new Rub3Access(
+            "Direct v2", "DIR2", _identity(), _hashes(WRAPPER_HASH),
+            _saleEthOnly(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, address(shadow), developer
+        );
+
+        assertEq(successor.predecessor(), address(shadow));
+        assertFalse(factory.isDeployed(address(successor)));
+        assertFalse(factory.isCanonicalPredecessor(address(shadow)));
+    }
+
+    /// So are the deployer helpers, deliberately: they are permissionless and
+    /// record nothing, so a licence they produce carries no `isDeployed` row and
+    /// none of the standing the laundering route was after. The guard belongs
+    /// where the registry row is granted, which is the factory.
+    function test_predecessor_deployerHelperIsUnconstrainedAndUnrecorded() public {
+        Rub3Access shadow = _deployDirect(PRICE);
+        Rub3AccessDeployer helper = Rub3AccessDeployer(factory.accessDeployer());
+
+        Rub3LicenseParams memory p = _paramsWithPredecessor(_saleEthOnly(PRICE), address(shadow));
+        p.owner = developer; // the owner default lives on the factory, not here
+
+        vm.prank(developer);
+        address viaHelper = helper.deploy(p, _noFee());
+
+        assertEq(Rub3Access(viaHelper).predecessor(), address(shadow));
+        assertFalse(factory.isDeployed(viaHelper), "and it gets no registry row");
     }
 }

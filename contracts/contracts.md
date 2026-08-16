@@ -153,19 +153,20 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | `PRICE_AMOUNT` | no | Purchase price in `PRICE_TOKEN`'s smallest unit (USDC has 6 decimals, so `5000000` = 5 USDC). Must be `0` when `PRICE_TOKEN` is unset, or the deploy reverts with `TokenPriceInconsistent`. An independent quote, never converted from `PRICE` |
 | `WRAPPER_HASHES` | no | Comma-separated `bytes32` SHA-256s of the launch release's wrapper binaries, one per platform. Seeds the append-only hash set; empty is valid |
 | `WRAPPER_HASH` | no | Single-hash shorthand for `WRAPPER_HASHES`. Ignored when `WRAPPER_HASHES` is set; a zero hash means "none" |
-| `PREDECESSOR` | no | License contract whose holders may migrate onto this one via `claimFromPredecessor`. Frozen at deploy; `0x0` (default) accepts no migrations |
+| `PREDECESSOR` | no | License contract whose holders may migrate onto this one via `claimFromPredecessor`. Frozen at deploy; `0x0` (default) accepts no migrations. With `FACTORY` set it must additionally be canonical - see [A factory deploy may only succeed a canonical predecessor](#a-factory-deploy-may-only-succeed-a-canonical-predecessor) |
 | `SUPPLY_CAP` | no | Max mintable tokens; `0` = uncapped (default). Immutable once deployed |
 | `COOLDOWN_BLOCKS` | no | Blocks between activations per token (default `1800` ≈ 1 hr on Base; floor `15` ≈ 30 s is enforced on-chain) |
 | `OWNER` | no | Contract owner address; defaults to broadcaster |
 | `PERIOD` | subscription only | Subscription length in seconds |
-| `FACTORY` | no | `Rub3Factory` to deploy through. Set it to the **published canonical address** to stamp the protocol fee and get an `isDeployed` row. Unset or `0x0` (**the default**) deploys directly: fee-free and **unrecorded**, and nothing fails to tell you so. The canonical mainnet address is not yet published. See [The protocol fee](#the-protocol-fee) |
+| `FACTORY` | no | `Rub3Factory` to deploy through. Set it to the **published canonical address** to stamp the protocol fee and get an `isDeployed` row. It also constrains `PREDECESSOR`, which has to be canonical on this path. Unset or `0x0` (**the default**) deploys directly: fee-free and **unrecorded**, free to name any predecessor, and nothing fails to tell you so. The canonical mainnet address is not yet published. See [The protocol fee](#the-protocol-fee) and [A factory deploy may only succeed a canonical predecessor](#a-factory-deploy-may-only-succeed-a-canonical-predecessor) |
 
-`script/DeployFactory.s.sol` deploys the factory itself and takes two variables of its own:
+`script/DeployFactory.s.sol` deploys the factory itself and takes three variables of its own:
 
 | Variable | Required | Description |
 |---|---|---|
 | `FEE_BPS` | yes | Protocol fee in basis points, within `MIN_FEE_BPS`..`MAX_FEE_BPS` (200-300). No default: this decides rub3's take for every contract the factory ever deploys |
 | `TREASURY` | yes | Fee recipient. Must be non-zero, and must be able to receive ETH |
+| `PREVIOUS_FACTORY` | no | The `Rub3Factory` this one supersedes. Unset (or `0x0`) for the **first** factory only; set it on every later one, or the contracts the old factory recorded stop being acceptable predecessors on the new one. Immutable, so it cannot be added afterwards |
 
 ## Paying in USDC (EIP-3009)
 
@@ -335,6 +336,8 @@ Forgetting `FACTORY` is not an error and does not fail: you get a working, fee-f
 cd contracts
 
 # 1. The factory. FEE_BPS decides rub3's take for everything it will ever deploy.
+#    A later factory adds PREVIOUS_FACTORY=<the one it supersedes>, without which
+#    that factory's deploys stop being acceptable predecessors on the new one.
 FEE_BPS=250 \
 TREASURY=0xYourTreasury \
 forge script script/DeployFactory.s.sol \
@@ -399,6 +402,30 @@ cast send <LICENCE> "withdraw(address)" <DEVELOPER>      --rpc-url $RPC --privat
 ```
 
 A `ProtocolFeeAccrued(address token, uint256 amount, uint256 fee, uint256 developerAmount)` log is emitted on every payment, with `token == address(0)` meaning ETH. Both shares and their sum are readable from that one log.
+
+### A factory deploy may only succeed a canonical predecessor
+
+`claimFromPredecessor` charges nothing, on purpose: migration must never be taxed. Left unconstrained, `PREDECESSOR` would therefore be a way to launder an entire sale through the registry - sell every licence on a fee-free direct deploy, then deploy the successor **through the factory** naming that contract as predecessor, and every holder claims onto a fee-bearing, `isDeployed`-listed contract with the treasury never paid.
+
+So `deployAccess` and `deploySubscription` accept a predecessor only when it is **canonical**:
+
+- `address(0)` (no migrations accepted), or
+- a contract in this factory's `isDeployed`, or
+- a contract in the `isDeployed` of a factory reachable through `previousFactory` (below).
+
+Anything else reverts `PredecessorNotCanonical(address)` before the licence is built. The rule is readable up front, so a deploy never has to be attempted to find out:
+
+```bash
+cast call <FACTORY> "isCanonicalPredecessor(address)(bool)" <PREDECESSOR> --rpc-url $RPC
+```
+
+**The `previousFactory` chain.** rub3 changes its take by deploying a *new* factory, so contracts an earlier factory recorded have to stay migratable onto the new one. Each factory therefore carries an immutable `previousFactory` - `address(0)` on the first one, the superseded factory's address on every later one (`PREVIOUS_FACTORY` on `DeployFactory.s.sol`). `isCanonicalPredecessor` walks it. The pointer is set once at construction and probed there: a `previousFactory` that cannot answer both `isDeployed(address)` and `previousFactory()` reverts `IncompatiblePreviousFactory(address)` at deploy, because it is immutable afterwards and would otherwise break every predecessor-bearing deploy for as long as the factory existed.
+
+**The walk is bounded** at `MAX_PREDECESSOR_FACTORY_HOPS` (8), the number of earlier factories consulted beyond the current one - nine registries in total. It has to be bounded because it sits on the deploy path and the chain's length is decided by whoever deploys the factories. Eight generations is far past any plausible sequence of rate changes; past it, the oldest registries stop being reachable and their contracts migrate onto a directly deployed successor instead.
+
+**The consequence, stated plainly: a pre-factory contract cannot migrate its holders onto a canonical contract through the factory path.** A contract deployed before any factory existed, or deployed directly, is not in any factory's `isDeployed`, so a successor to it cannot be deployed through a factory. That is the cost of closing the route and it is accepted rather than worked around - the alternative is a registry row available at the far end of any fee-free sale. The launch sequencing keeps the cost small: the contracts are not deployed to mainnet or declared ready for use until the registry is ready, so at launch there is no installed base of mainnet holders whose migration onto a canonical successor is being blocked, and a Base Sepolia pilot could never have been a canonical predecessor of a mainnet deploy under any rule, since `isDeployed` is per factory and per chain. It also means every factory deploy at launch names `PREDECESSOR=0x0`, which is the ordinary case and is unaffected by this rule. Migration itself is untouched: deploy the successor **directly** with `PREDECESSOR=<OLD_CONTRACT>`, and holders claim exactly as described in [Migrating holders to a new contract](#migrating-holders-to-a-new-contract). What that successor does not get is a row in `isDeployed`, which is the same thing any direct deploy does not get.
+
+**The check lives on `Rub3Factory` only, not on the deployer helpers.** `Rub3AccessDeployer.deploy` and `Rub3SubscriptionDeployer.deploy` are permissionless and record nothing, so a licence they produce carries no `isDeployed` row and none of the standing the laundering route was after - it is equivalent to deploying the open-source template yourself, which is already free and already fine. Constraining them would restrict a path that grants nothing, while the guard's whole subject is the registry row. It belongs where the registry row is granted. `test_predecessor_deployerHelperIsUnconstrainedAndUnrecorded` pins that split, and `test_predecessor_launderingThroughTheFactoryReverts` is the closed route itself.
 
 ### The accepted position on fee-free deployment
 
@@ -472,7 +499,7 @@ cast call <CONTRACT_ADDRESS> "revocationReason(bytes32)(string)" <H> --rpc-url $
 
 For contract bugs, paid major versions, and chain migration. Both sides opt in, and the holder does the moving.
 
-1. Deploy the successor with `PREDECESSOR=<OLD_CONTRACT>` (immutable - a contract deployed without it accepts no claims). The successor must be the same model as the predecessor: `CONTRACT_TYPE=access` with a subscription predecessor, or `CONTRACT_TYPE=subscription` with an access one, reverts at deploy with `IncompatiblePredecessor(address)`. Cross-model succession is impossible by construction, not a judgement call - both constructors probe `period()` as the discriminator, the subscription requiring the predecessor to answer it and the access license requiring it to fail.
+1. Deploy the successor with `PREDECESSOR=<OLD_CONTRACT>` (immutable - a contract deployed without it accepts no claims). Through a factory, the predecessor must also be canonical - see [A factory deploy may only succeed a canonical predecessor](#a-factory-deploy-may-only-succeed-a-canonical-predecessor); a direct deploy may name any predecessor at all. The successor must be the same model as the predecessor: `CONTRACT_TYPE=access` with a subscription predecessor, or `CONTRACT_TYPE=subscription` with an access one, reverts at deploy with `IncompatiblePredecessor(address)`. Cross-model succession is impossible by construction, not a judgement call - both constructors probe `period()` as the discriminator, the subscription requiring the predecessor to answer it and the access license requiring it to fail.
 2. Point the old contract at it:
 
    ```bash
@@ -530,7 +557,7 @@ Step 2 is not optional and it is not a refinement. Skipping it fails 100% of the
 
 Measured on this branch, `Rub3Access` declares seven immutables inherited from `Rub3License` (`identityModel`, `tbaImplementation`, `supplyCap`, `predecessor`, `cooldownBlocks`, and the §2.3 fee terms `feeBps` and `treasury`), and `Rub3Subscription` declares those seven plus its own `period`, eight in total. Because a single immutable is read at several places in the runtime code, the slot count is higher than the variable count: `Rub3Access` carries 18 ranges (576 bytes) and `Rub3Subscription` 22 (704 bytes). Those numbers move whenever the code that reads an immutable moves, which is also whenever the fingerprint moves, so the manifest records both together and the drift gate compares both.
 
-`Rub3Factory` is fingerprinted too, with four immutables of its own (`feeBps`, `treasury`, `accessDeployer`, `subscriptionDeployer`) across 10 ranges. `Rub3AccessDeployer` and `Rub3SubscriptionDeployer` have none, so their `immutable_ranges` are empty and their runtime code hashes directly - which is what makes them the thing to compare a factory's declared deployers against.
+`Rub3Factory` is fingerprinted too, with five immutables of its own (`feeBps`, `treasury`, `accessDeployer`, `subscriptionDeployer`, and `previousFactory`) across 12 ranges. `Rub3AccessDeployer` and `Rub3SubscriptionDeployer` have none, so their `immutable_ranges` are empty and their runtime code hashes directly - which is what makes them the thing to compare a factory's declared deployers against.
 
 Zeroing an immutable range destroys the constructor argument it held, which is the point: the fingerprint answers "is this the code I expect", not "was this deployed with the terms I expect". Read the terms separately from the contract's own getters (`supplyCap()`, `period()`, `predecessor()`, and the rest), which is where they are authoritative anyway.
 
@@ -630,13 +657,14 @@ for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
            "setWrapperHash(bytes32)" "removeWrapperHash(bytes32)" \
            "unrevokeWrapperHash(bytes32)" \
            "forceMigrate(uint256,address)" "setPredecessor(address)" \
+           "setPreviousFactory(address)" \
            "setFeeBps(uint16)" "setTreasury(address)"; do
   SEL=$(cast sig "$SIG" | sed 's/^0x//')
   case "$CODE" in *"$SEL"*) echo "PRESENT: $SIG";; esac
 done
 ```
 
-Silence means exactly one thing: none of those 29 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical fingerprint of the template built from this repo, after zeroing the immutable ranges published for it. Those fingerprints and ranges are now pinned - see "Reproducible builds and canonical fingerprints" above - but nothing in this repository performs the comparison yet.
+Silence means exactly one thing: none of those 30 known revocation selectors appears in the deployed runtime bytecode. It is not proof that no revocation surface exists. The list is a blacklist of names, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, say - and pass this scan in silence. Full assurance needs a name-independent check: compare the deployed runtime bytecode against the canonical fingerprint of the template built from this repo, after zeroing the immutable ranges published for it. Those fingerprints and ranges are now pinned - see "Reproducible builds and canonical fingerprints" above - but nothing in this repository performs the comparison yet.
 
 Sanity-check the method itself against a selector that *is* there - `cast sig "activate(uint256)"` should be found.
 

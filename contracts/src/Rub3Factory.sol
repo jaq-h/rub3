@@ -124,6 +124,23 @@ contract Rub3SubscriptionDeployer {
 /// direct deploy passes `FeeTerms(0, address(0))` and pays no fee at all. What it
 /// does not get is a row in `isDeployed`, so it is not listable in the registry
 /// or the marketplace. The fee buys distribution, verification, and liquidity.
+///
+/// # A factory deploy may only succeed a canonical predecessor
+///
+/// `claimFromPredecessor` is free by design, because migration must never be
+/// taxed. That makes an unconstrained `predecessor` a way to launder an entire
+/// sale through the registry: sell every licence on a fee-free direct deploy,
+/// then deploy a successor *through this factory* naming it as predecessor, and
+/// every holder claims onto a fee-bearing, `isDeployed`-listed contract with the
+/// treasury never paid. So this factory deploys only successors to contracts a
+/// rub3 factory already recorded - see {isCanonicalPredecessor}.
+///
+/// The check lives here and **not** on the deployer helpers. They are
+/// permissionless and record nothing, so a licence they produce has no
+/// `isDeployed` row and none of the standing the laundering route was after;
+/// constraining them would restrict a path that is already equivalent to
+/// deploying the template yourself. The rule guards the registry row, so it
+/// belongs where the registry row is granted.
 contract Rub3Factory {
     /// @notice Lower bound on a factory's fee, in basis points (2.00%).
     ///         implementation.md §2.3 fixes the protocol's range at 200-300; the
@@ -135,6 +152,32 @@ contract Rub3Factory {
     ///         rub3 factory can ever charge, and it is checked in the
     ///         constructor where the rate is still choosable.
     uint16 public constant MAX_FEE_BPS = 300;
+
+    /// @notice How many *earlier* factories {isCanonicalPredecessor} consults
+    ///         beyond this one, walking {previousFactory}. Nine registries in
+    ///         total are therefore reachable: this factory and the eight
+    ///         generations before it.
+    ///
+    ///         The walk is bounded because it is an unbounded loop on the deploy
+    ///         path otherwise, and the chain's length is decided by whoever
+    ///         deploys the factories rather than by this contract. Eight
+    ///         generations is far past any plausible rate change; a chain longer
+    ///         than that stops recognising its oldest registries, and a
+    ///         predecessor there migrates onto a directly deployed successor
+    ///         instead - see contracts.md -> "Migrating holders to a new
+    ///         contract".
+    uint256 public constant MAX_PREDECESSOR_FACTORY_HOPS = 8;
+
+    /// @notice The factory this one supersedes, or `address(0)` for the first.
+    ///         Set once, at construction, and never rewritten: a factory that
+    ///         could repoint its chain could grant a laundered contract standing
+    ///         after the fact.
+    ///
+    ///         rub3 changes its take by deploying a *new* factory, so the
+    ///         contracts an earlier factory recorded must stay migratable onto
+    ///         the new one. This pointer is what carries that recognition
+    ///         forward; {isCanonicalPredecessor} walks it.
+    address public immutable previousFactory;
 
     /// @notice Protocol fee stamped into every contract this factory deploys, in
     ///         basis points. Frozen for this factory version.
@@ -181,19 +224,50 @@ contract Rub3Factory {
     error FeeBpsOutOfRange(uint16 feeBps, uint16 minimum, uint16 maximum);
     error TreasuryRequired();
 
-    /// @param feeBps_   Protocol fee in basis points. Must be within
-    ///                  [{MIN_FEE_BPS}, {MAX_FEE_BPS}].
-    /// @param treasury_ Fee recipient. Must be set: a fee with nowhere to go
-    ///                  would strand every buyer's money in the license
-    ///                  contract, and the terms are frozen from here.
-    constructor(uint16 feeBps_, address treasury_) {
+    /// @notice `params.predecessor` was not deployed by this factory or by any
+    ///         factory reachable through {previousFactory}. See
+    ///         {isCanonicalPredecessor}.
+    error PredecessorNotCanonical(address predecessor);
+
+    /// @notice `previousFactory_` cannot answer the two views the chain walk
+    ///         reads off it, so it is not a rub3 factory.
+    error IncompatiblePreviousFactory(address previousFactory);
+
+    /// @param feeBps_          Protocol fee in basis points. Must be within
+    ///                         [{MIN_FEE_BPS}, {MAX_FEE_BPS}].
+    /// @param treasury_        Fee recipient. Must be set: a fee with nowhere to
+    ///                         go would strand every buyer's money in the license
+    ///                         contract, and the terms are frozen from here.
+    /// @param previousFactory_ The factory this one supersedes, or `address(0)`
+    ///                         for the first factory. Its deployments become
+    ///                         acceptable predecessors here, and so do those of
+    ///                         the factories it in turn supersedes, up to
+    ///                         {MAX_PREDECESSOR_FACTORY_HOPS}.
+    constructor(uint16 feeBps_, address treasury_, address previousFactory_) {
         if (feeBps_ < MIN_FEE_BPS || feeBps_ > MAX_FEE_BPS) {
             revert FeeBpsOutOfRange(feeBps_, MIN_FEE_BPS, MAX_FEE_BPS);
         }
         if (treasury_ == address(0)) revert TreasuryRequired();
 
-        feeBps   = feeBps_;
-        treasury = treasury_;
+        // `previousFactory` is immutable and every deploy through this factory
+        // walks it, so an address that cannot answer the walk would revert every
+        // deploy that names a predecessor - checked here, the only moment it can
+        // still be corrected, exactly as {Rub3License} probes its predecessor.
+        // Probing both views is what makes the whole chain well-formed by
+        // induction: each factory validated its own link when it was built.
+        if (previousFactory_ != address(0)) {
+            if (previousFactory_.code.length == 0) {
+                revert IncompatiblePreviousFactory(previousFactory_);
+            }
+            try Rub3Factory(previousFactory_).isDeployed(address(0)) returns (bool) {}
+            catch { revert IncompatiblePreviousFactory(previousFactory_); }
+            try Rub3Factory(previousFactory_).previousFactory() returns (address) {}
+            catch { revert IncompatiblePreviousFactory(previousFactory_); }
+        }
+
+        feeBps          = feeBps_;
+        treasury        = treasury_;
+        previousFactory = previousFactory_;
 
         // Created here rather than passed in, so the implementations this
         // factory deploys are settled by the transaction that created it and
@@ -207,7 +281,9 @@ contract Rub3Factory {
     /// @notice Deploy a {Rub3Access} carrying this factory's fee terms, and
     ///         record it.
     /// @dev    `params.owner` of `address(0)` means `msg.sender`.
+    ///         `params.predecessor` must satisfy {isCanonicalPredecessor}.
     function deployAccess(Rub3LicenseParams calldata params) external returns (address license) {
+        _requireCanonicalPredecessor(params.predecessor);
         license = Rub3AccessDeployer(accessDeployer).deploy(_withOwner(params), _fee());
         _record(license, 0);
     }
@@ -217,10 +293,12 @@ contract Rub3Factory {
     /// @param  period Subscription length in seconds. Immutable on the deployed
     ///         contract, like every other renewal term.
     /// @dev    `params.owner` of `address(0)` means `msg.sender`.
+    ///         `params.predecessor` must satisfy {isCanonicalPredecessor}.
     function deploySubscription(Rub3LicenseParams calldata params, uint256 period)
         external
         returns (address license)
     {
+        _requireCanonicalPredecessor(params.predecessor);
         license = Rub3SubscriptionDeployer(subscriptionDeployer)
             .deploy(_withOwner(params), _fee(), period);
         _record(license, 1);
@@ -241,6 +319,34 @@ contract Rub3Factory {
         return _deployments;
     }
 
+    /// @notice Whether `predecessor` may be named as the predecessor of a
+    ///         contract deployed through this factory. True for `address(0)`
+    ///         (no migrations accepted), for anything in this factory's
+    ///         `isDeployed`, and for anything in the `isDeployed` of a factory
+    ///         reachable through {previousFactory} within
+    ///         {MAX_PREDECESSOR_FACTORY_HOPS} hops.
+    ///
+    ///         Call it before deploying: it is the whole rule, and it is the
+    ///         only reason `deployAccess` / `deploySubscription` revert with
+    ///         {PredecessorNotCanonical}.
+    /// @dev    A developer whose predecessor is not canonical - a pre-factory
+    ///         contract, or one deployed directly - can still deploy the
+    ///         successor directly and migrate holders onto it. What the factory
+    ///         path will not do is put a registry row at the far end of a
+    ///         fee-free sale.
+    function isCanonicalPredecessor(address predecessor) public view returns (bool) {
+        if (predecessor == address(0)) return true;
+        if (isDeployed[predecessor]) return true;
+
+        address factory = previousFactory;
+        for (uint256 hops = 0; hops < MAX_PREDECESSOR_FACTORY_HOPS; hops++) {
+            if (factory == address(0)) return false;
+            if (Rub3Factory(factory).isDeployed(predecessor)) return true;
+            factory = Rub3Factory(factory).previousFactory();
+        }
+        return false;
+    }
+
     /// @dev This factory's terms, in the shape the license constructor takes.
     function _fee() private view returns (Rub3License.FeeTerms memory) {
         return Rub3License.FeeTerms({feeBps: feeBps, treasury: treasury});
@@ -256,6 +362,12 @@ contract Rub3Factory {
     {
         resolved = params;
         if (resolved.owner == address(0)) resolved.owner = msg.sender;
+    }
+
+    /// @dev The laundering guard, run before the licence is built so a rejected
+    ///      deploy costs the caller nothing but gas.
+    function _requireCanonicalPredecessor(address predecessor) private view {
+        if (!isCanonicalPredecessor(predecessor)) revert PredecessorNotCanonical(predecessor);
     }
 
     function _record(address license, uint8 model) private {

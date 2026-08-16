@@ -42,6 +42,11 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 ///                     this one via `claimFromPredecessor` (default: 0x0 = no
 ///                     migrations accepted). Frozen at deploy. The predecessor's
 ///                     owner must also point its `successor` here for claims to work.
+///                     With FACTORY set, it must additionally be a contract that
+///                     factory (or one in its `previousFactory` chain) recorded,
+///                     or the deploy reverts `PredecessorNotCanonical(address)` -
+///                     see contracts.md -> "A factory deploy may only succeed a
+///                     canonical predecessor".
 ///   PERIOD          — subscription length in seconds (required for "subscription")
 ///   FACTORY         - address of a deployed Rub3Factory to deploy through
 ///                     (default: 0x0 = deploy directly). Going through a factory

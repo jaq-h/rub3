@@ -745,6 +745,14 @@ contract Rub3InvariantsTest is Test {
         assertTrue(_bytecodeHasSelector(address(nft), bytes4(keccak256("feeBps()"))));
         assertTrue(_bytecodeHasSelector(address(nft), bytes4(keccak256("treasury()"))));
 
+        // The same shape on the factory: the chain the canonical-predecessor
+        // rule walks is readable, and nothing can repoint it.
+        address factory = address(new Rub3Factory(250, address(0x7EA5), address(0)));
+        assertTrue(_bytecodeHasSelector(factory, bytes4(keccak256("previousFactory()"))));
+        assertTrue(
+            _bytecodeHasSelector(factory, bytes4(keccak256("isCanonicalPredecessor(address)")))
+        );
+
         // No fallback, no receive: an unknown selector and plain ETH both revert.
         (bool ok, ) = address(nft).call(hex"deadbeef");
         assertFalse(ok, "unknown selector must revert");
@@ -763,10 +771,10 @@ contract Rub3InvariantsTest is Test {
             address(nft),
             address(_deploySubscription(address(0))),
             address(_deploySuccessor(address(nft))),
-            address(new Rub3Factory(250, address(0x7EA5)))
+            address(new Rub3Factory(250, address(0x7EA5), address(0)))
         ];
 
-        string[29] memory forbidden = [
+        string[30] memory forbidden = [
             // Burn - nothing may destroy an issued token.
             "burn(uint256)",
             "burn(address,uint256)",
@@ -802,9 +810,12 @@ contract Rub3InvariantsTest is Test {
             "setWrapperHash(bytes32)",
             "removeWrapperHash(bytes32)",
             "unrevokeWrapperHash(bytes32)",
-            // Forced migration, and repointing an immutable predecessor.
+            // Forced migration, and repointing an immutable predecessor - on
+            // the licence contract, and on the factory whose registry decides
+            // which predecessors a canonical deploy may name at all.
             "forceMigrate(uint256,address)",
             "setPredecessor(address)",
+            "setPreviousFactory(address)",
             // The protocol fee, on both sides of it. `feeBps` and `treasury`
             // are immutable on the licence contract *and* on the factory that
             // stamped them, which is what makes "a developer's economics can
