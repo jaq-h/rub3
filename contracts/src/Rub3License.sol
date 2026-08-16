@@ -376,6 +376,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     error TbaImplementationForbidden();
     error SoldOut();
     error InsufficientPayment(uint256 sent, uint256 required);
+    error IncorrectPayment(uint256 sent, uint256 required);
     error TokenPaymentUnavailable();
     error IncompatiblePriceToken(address token);
     error TokenPriceInconsistent(address token, uint256 amount);
@@ -803,7 +804,29 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     }
 
     /// @dev The ETH leg of a payment: the buyer's own transaction carries the
-    ///      money, so there is nothing to move, only a floor to check.
+    ///      money, so there is nothing to move, only an amount to check.
+    ///
+    ///      **Exact payment, no refund.** `msg.value` must equal `due` to the
+    ///      wei; anything else reverts, over as well as under. The rule is
+    ///      about a price that moves between the read and the transaction. An
+    ///      agent reads `price()`, the developer changes it, and the agent's
+    ///      transaction lands against terms it never saw. A floor check would
+    ///      let the overpaying half of that go through silently - the buyer
+    ///      pays the stale price, keeps nothing back, and the fee is charged on
+    ///      the excess as well. Requiring the exact amount makes the price move
+    ///      a failed transaction the buyer can re-read and retry.
+    ///
+    ///      This is the same behaviour {_payWithAuthorization} already has, for
+    ///      the same reason: there `value` is read at execution, so a price
+    ///      move leaves the buyer's signed digest no longer matching and the
+    ///      token rejects it. Both rails now fail loudly on a price move rather
+    ///      than one failing and the other overpaying.
+    ///
+    ///      Refunding the difference was considered and rejected. A refund
+    ///      would put a call out to the buyer on the money path - the thing
+    ///      {_accrueFee} keeps off it - and would still settle a purchase
+    ///      against terms the buyer had not read. Reverting says the same thing
+    ///      without either cost.
     ///
     ///      This and {_payWithAuthorization} are the only two places in the
     ///      contracts where a payment is taken, which is why the §2.3 protocol
@@ -811,8 +834,8 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///      path changed for it, and neither rail can acquire a payment the
     ///      other's fee rule does not reach.
     function _payEth(uint256 due) internal {
-        if (msg.value < due) revert InsufficientPayment(msg.value, due);
-        _accrueFee(address(0), msg.value);
+        if (msg.value != due) revert IncorrectPayment(msg.value, due);
+        _accrueFee(address(0), due);
     }
 
     /// @dev The stablecoin leg: pull exactly `amount` of `token` from
@@ -868,24 +891,28 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         uint256 received = erc20.balanceOf(address(this)) - balanceBefore;
         if (received < amount) revert InsufficientPayment(received, amount);
 
-        // The fee is taken on what measurably arrived, exactly as the ETH rail
-        // takes it on `msg.value`, so the split is the same rule on both rails
-        // rather than two rules that happen to agree.
+        // The fee is taken on what measurably arrived. On the ETH rail
+        // `msg.value` is required to equal the listed price, so both rails
+        // charge the fee on the same thing - the price the buyer agreed to -
+        // rather than on two quantities that happen to agree.
         _accrueFee(token, received);
     }
 
     /// @dev Split a payment that has just arrived: `feeBps` of it to
     ///      {treasury}, everything else to the developer.
     ///
-    ///      **The fee is charged on the amount received, not on the listed
-    ///      price.** Charging the listed price would leave a hole wide enough to
-    ///      drive the whole protocol fee through: a developer lists at 0 (or at
-    ///      1 wei), publishes a client that pays the real price as
-    ///      "overpayment", and the fee on every sale is zero while the money
-    ///      still lands in `withdraw`. Charging what arrived closes it, and it
-    ///      is also the reading that makes the arithmetic exact - `fee` plus the
-    ///      developer's share is the payment, with nothing left over and no
-    ///      rounding to account for anywhere else.
+    ///      **The fee is charged on the amount received.** No rail can deliver
+    ///      more than the listed price - {_payEth} requires `msg.value` to
+    ///      equal it exactly, and the authorization's `value` is the listed
+    ///      price read at execution - so the developer's old evasion route is
+    ///      closed where the payment is taken rather than here: listing at 0
+    ///      and collecting the real price as "overpayment" no longer reaches
+    ///      this function, it reverts. What remains for `received` to exceed is
+    ///      a payment token that credits more than it was asked for, and taxing
+    ///      what arrived is the correct reading of that too. It is also what
+    ///      makes the arithmetic exact - `fee` plus the developer's share is
+    ///      the payment, with nothing left over and no rounding to account for
+    ///      anywhere else.
     ///
     ///      Rounding is integer division, so it favours the developer: a fee
     ///      that comes to less than one wei (or one of the token's smallest

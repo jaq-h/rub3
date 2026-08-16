@@ -509,34 +509,53 @@ contract Rub3FactoryTest is Test {
         assertEq(treasury.balance + developer.balance, 3 * PRICE);
     }
 
-    /// Overpayment is charged on, deliberately. Charging the *listed* price
-    /// instead would let a developer list at zero, take the real price as
-    /// "overpayment", and pay no fee on any sale.
-    function test_eth_feeIsChargedOnWhatArrivedNotOnTheListedPrice() public {
-        uint256 paid = PRICE + 0.37 ether;
-        uint256 fee  = _expectedFee(paid, FEE_BPS);
-        assertGt(fee, _expectedFee(PRICE, FEE_BPS));
+    /// There is no such thing as an overpayment to charge a fee on: the ETH
+    /// rail takes the listed price exactly, so the fee base and the listed
+    /// price are the same number and no fee can ever accrue on an amount above
+    /// the price. This is the inverted form of a test that used to send more
+    /// than the listed price and assert the excess was taxed.
+    function test_eth_feeIsChargedOnTheListedPriceBecauseNothingElseArrives() public {
+        uint256 over = PRICE + 0.37 ether;
 
         vm.prank(buyer);
-        nft.purchase{value: paid}(address(0));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, over, PRICE)
+        );
+        nft.purchase{value: over}(address(0));
 
-        assertEq(nft.feesAccrued(), fee);
+        assertEq(nft.feesAccrued(), 0, "a rejected payment accrues nothing");
+
+        // The exact price is what mints, and the fee is charged on that.
+        vm.prank(buyer);
+        nft.purchase{value: PRICE}(address(0));
+        assertEq(nft.feesAccrued(), _expectedFee(PRICE, FEE_BPS));
 
         nft.withdrawFees();
         vm.prank(developer);
         nft.withdraw(payable(developer));
-        assertEq(treasury.balance + developer.balance, paid);
+        assertEq(treasury.balance + developer.balance, PRICE);
     }
 
-    /// A developer listing at zero and collecting by overpayment pays the fee on
-    /// every wei of it - the evasion route, closed, stated as its own test.
-    function test_eth_zeroPriceListingCannotAvoidTheFee() public {
+    /// The evasion route the old fee-on-what-arrived rule existed to close -
+    /// list at zero, collect the real price as "overpayment", pay no fee - is
+    /// now closed one step earlier, at the payment itself. A zero-price listing
+    /// takes zero and nothing else, so there is no revenue to hide in it.
+    function test_eth_zeroPriceListingCannotCollectByOverpaying() public {
         Rub3Access free = _deployWithFee(0, FEE_BPS, treasury);
 
         vm.prank(buyer);
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, 10 ether, 0)
+        );
         free.purchase{value: 10 ether}(address(0));
 
-        assertEq(free.feesAccrued(), _expectedFee(10 ether, FEE_BPS));
+        assertEq(address(free).balance, 0);
+        assertEq(free.feesAccrued(),    0);
+
+        // Zero is the only amount it accepts, and it is genuinely free.
+        vm.prank(buyer);
+        free.purchase{value: 0}(address(0));
+        assertEq(free.feesAccrued(), 0);
     }
 
     /// Boundary: the smallest non-zero payment there is. The fee rounds to zero,

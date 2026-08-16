@@ -172,7 +172,19 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 
 ## Paying in USDC (EIP-3009)
 
-A contract deployed with `PRICE_TOKEN` sells on two rails at once. `purchase(address)` keeps taking ETH exactly as before; `purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,bytes))` takes a stablecoin payment the buyer authorised off-chain, and **anyone may submit it** - the developer, a facilitator, or the buyer. That is what makes it gasless for the buyer, and an agent holding only USDC can obtain a licence without ever owning ETH.
+A contract deployed with `PRICE_TOKEN` sells on two rails at once. `purchase(address)` takes ETH; `purchaseWithAuthorization(address,(address,uint256,uint256,bytes32,bytes))` takes a stablecoin payment the buyer authorised off-chain, and **anyone may submit it** - the developer, a facilitator, or the buyer. That is what makes it gasless for the buyer, and an agent holding only USDC can obtain a licence without ever owning ETH.
+
+### Both rails require the exact listed price
+
+**The ETH rail takes the listed price to the wei and nothing else.** `purchase` and `renew` revert `IncorrectPayment(sent, required)` unless `msg.value` equals the price they are charging - `price()` for a purchase, `renewPrice(tokenId)` for a renewal. Over reverts exactly as under does, and **there is no refund path**: the transaction fails rather than settling and paying anything back.
+
+That rule exists for one event: a price that moves between the read and the transaction. An agent reads `price()`, the developer calls `setPrice`, and the agent's transaction lands against terms it never saw. A price *rise* was always rejected. A price *cut* used to go through silently - the buyer paid the stale higher amount, kept nothing back, and the protocol fee was charged on the excess as well.
+
+**Both rails now fail loudly on that event, and they fail on the same event.** The stablecoin rail already did: `value` is not a parameter, it is the listed price read at execution, so a price move leaves the buyer's signed digest no longer matching and the token rejects the authorization. The ETH rail reaches the same outcome through the exact-amount check. Neither rail can settle a payment against a price the buyer did not read, and no fee can ever accrue on an amount above the listed price, because no such amount can arrive.
+
+What a caller does about it is the same on both: re-read the price and resubmit. For an agent that means a failed transaction it can retry, rather than a successful purchase at a price it never agreed to.
+
+A zero price is not a special case: a contract listing at zero accepts a payment of exactly zero, and `purchase{value: anything}` reverts.
 
 ### Which payment tokens work
 
@@ -376,7 +388,7 @@ cast call <FACTORY> "isDeployed(address)(bool)" <LICENCE> --rpc-url $RPC
 
 The fee runs on-chain inside `purchase()` and `renew()`, on **both** payment rails, and it is the same rule on each: `feeBps` of *what arrived* to the treasury, the remainder to the developer.
 
-- **On the amount received, not the listed price.** ETH: `msg.value`. Stablecoin: the measured balance delta. A zero-price listing paid as "overpayment" is still charged.
+- **On the amount received.** ETH: `msg.value`, which the rail requires to equal the listed price exactly (see "Both rails require the exact listed price" above). Stablecoin: the measured balance delta, against a `value` that is the listed amount read at execution. Neither rail can deliver more than the price, so the fee base is the listed price and a listing at zero has no revenue to hide in it.
 - **Rounding favours the developer.** Integer division, so a fee below one wei (or one of the token's smallest units) is zero and the whole payment is the developer's.
 - **Accrued, not pushed.** The fee is held in the contract and swept separately rather than transferred to the treasury inside the purchase, so nothing on the buyer's path calls out.
 

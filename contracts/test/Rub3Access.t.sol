@@ -144,16 +144,54 @@ contract Rub3AccessTest is Test {
         assertEq(nft.ownerOf(id), alice);
     }
 
+    /// The ETH rail takes the listed price exactly. Under is rejected, as it
+    /// always was.
     function test_purchase_underpay_reverts() public {
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.InsufficientPayment.selector, PRICE - 1, PRICE));
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE - 1, PRICE));
         nft.purchase{value: PRICE - 1}(alice);
     }
 
-    function test_purchase_overpay_accepted() public {
+    /// And over is rejected too, with no refund path: a buyer whose price read
+    /// went stale gets a failed transaction rather than a silent overpayment.
+    /// See {Rub3License-_payEth}.
+    function test_purchase_overpay_reverts() public {
+        uint256 balanceBefore = alice.balance;
+
         vm.prank(alice);
-        uint256 id = nft.purchase{value: PRICE * 2}(alice);
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE * 2, PRICE));
+        nft.purchase{value: PRICE * 2}(alice);
+
+        assertEq(nft.nextTokenId(), 0);
+        assertEq(address(nft).balance, 0);
+        assertEq(alice.balance, balanceBefore);
+    }
+
+    /// The exact amount, and only the exact amount, mints.
+    function test_purchase_exactPayment_succeeds() public {
+        vm.prank(alice);
+        uint256 id = nft.purchase{value: PRICE}(alice);
+
         assertEq(nft.ownerOf(id), alice);
+        assertEq(address(nft).balance, PRICE);
+    }
+
+    /// A one-wei tolerance either side would be a tolerance; there is none.
+    function testFuzz_purchase_onlyTheListedPriceIsAccepted(uint256 sent) public {
+        sent = bound(sent, 0, 1 ether);
+        vm.deal(alice, 1 ether);
+
+        vm.prank(alice);
+        if (sent == PRICE) {
+            nft.purchase{value: sent}(alice);
+            assertEq(nft.nextTokenId(), 1);
+        } else {
+            vm.expectRevert(
+                abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, sent, PRICE)
+            );
+            nft.purchase{value: sent}(alice);
+            assertEq(nft.nextTokenId(), 0);
+        }
     }
 
     function test_supplyCap_enforced() public {

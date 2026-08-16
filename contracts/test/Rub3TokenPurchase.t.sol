@@ -614,6 +614,51 @@ contract Rub3TokenPurchaseTest is Test {
         assertEq(usdc.balanceOf(buyer), 1_000_000_000);
     }
 
+    /// The ETH counterpart of the test above, and the reason both are here:
+    /// **both rails fail loudly when the price moves between the read and the
+    /// transaction.** The stablecoin rail does it through the signed digest;
+    /// the ETH rail does it because {Rub3License-_payEth} requires the exact
+    /// listed price. The direction that matters most is the *cut* - before
+    /// exact payment it was the one case that went through silently, charging
+    /// the buyer a stale price and taxing the excess.
+    function test_priceMove_afterReadingRejectsOnTheEthRailToo() public {
+        vm.deal(outsider, 100 ether);
+
+        // The agent reads the listed price.
+        uint256 read = nft.price();
+        assertEq(read, PRICE);
+
+        // The developer cuts it before the agent's transaction lands.
+        vm.prank(owner);
+        nft.setPrice(PRICE / 10);
+
+        vm.prank(outsider);
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, read, PRICE / 10)
+        );
+        nft.purchase{value: read}(outsider);
+
+        // And the same on a raise, which always reverted but now says so with
+        // the same error rather than a different one.
+        vm.prank(owner);
+        nft.setPrice(PRICE * 10);
+
+        vm.prank(outsider);
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, read, PRICE * 10)
+        );
+        nft.purchase{value: read}(outsider);
+
+        // Nothing was minted and nothing was kept on either attempt.
+        assertEq(nft.nextTokenId(), 0);
+        assertEq(address(nft).balance, 0);
+        assertEq(outsider.balance, 100 ether);
+
+        // Re-reading the price is all it takes to succeed.
+        vm.prank(outsider);
+        assertEq(nft.ownerOf(nft.purchase{value: nft.price()}(outsider)), outsider);
+    }
+
     /// The independent check on top of the token's own accounting: the mint
     /// happens only if the money actually arrived.
     function test_silentToken_mintDoesNotHappenWithoutFunds() public {
@@ -962,9 +1007,15 @@ contract Rub3TokenPurchaseTest is Test {
 
         vm.prank(outsider);
         vm.expectRevert(
-            abi.encodeWithSelector(Rub3License.InsufficientPayment.selector, PRICE - 1, PRICE)
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE - 1, PRICE)
         );
         nft.purchase{value: PRICE - 1}(outsider);
+
+        vm.prank(outsider);
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE + 1, PRICE)
+        );
+        nft.purchase{value: PRICE + 1}(outsider);
     }
 }
 
