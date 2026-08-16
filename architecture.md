@@ -890,17 +890,15 @@ Signature covers: `SHA-256(app_id || token_id || wallet || nonce || expires_at [
 
 Deferred; no session format is fixed. See "Deferred designs".
 
-Session files stored at `~/.rub3/sessions/<app_id>/<token_id>.json` - one per token, not one per app.
-
 ---
 
 ## Deferred designs
 
-Two designs below tier 3 are specified only as intent. Both are cut from the active roadmap; the rationale is in `implementation.md` → "Deferred".
+Two designs beyond tier 3 are specified only as intent. Both are cut from the active roadmap; the rationale is in `implementation.md` → "Deferred".
 
 **Tier 4 (`hardened`)** would bind a session to one machine. At activation the wrapper would generate an ephemeral secp256k1 device key, register its public key on-chain alongside the session, and sign the current block hash at every launch, so a copied session file is useless without the device key and no TTL is needed. It is deferred because device binding treats fleet cloning as an attack while agent fleets clone VMs as a legitimate pattern; seats (implementation.md §3.4) are the right concurrency primitive.
 
-**Binary encryption** would ship the embedded app binary as AES-256-GCM ciphertext, unwrapped into memory at launch from a key the licence contract releases only to a valid holder. It is deferred because extraction resistance was never a goal, as `ideation.md` → "What This Is Not" states.
+**Binary encryption** would ship the embedded app binary as AES-256-GCM ciphertext, decrypted into memory only after the session check passes. The key-encryption key would be derived from public on-chain values, SHA-256 over the contract address, chain id and salt, plus the device-key fingerprint at tier 4; the contract would store only SHA-256 of the binary key, for verification, and never release a secret, since a public chain cannot release one to a single holder. It is deferred because extraction resistance was never a goal, as `ideation.md` → "What This Is Not" states.
 
 The `src/device.rs` and `src/decrypt.rs` scaffolds stay in the tree behind the `device-key` and `binary-encryption` Cargo features, so neither is compiled by any tier bundle on its own.
 

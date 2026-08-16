@@ -215,12 +215,11 @@ rub3-wrapper --headless --token-id 3 --binary /path/to/your/app
 
 `--headless` requires a build with the `headless` feature; other builds exit 18.
 
-**`rub3-wrapper --help` is the contract.** The binary prints the two tables below
-and the full reasoning behind them: why a malformed `RUB3_AGENT_KEY` is a hard
-error rather than a silent fall-through to a keystore, why the spend ceiling
-starts unavailable rather than unlimited, why code 21 is deliberately not code
-14. The tables are reproduced here for discoverability; if they ever disagree
-with `--help`, `--help` is right.
+**`rub3-wrapper --help` owns the exit-code and signer-source contract.** The
+binary prints both tables below, with the reasoning that matters at the call
+site: why the spend ceiling starts unavailable rather than unlimited, and why
+code 21 is deliberately not code 14. The tables are reproduced here for
+discoverability.
 
 Two properties to know before reading them. Every `RUB3_AGENT_*` credential
 variable is removed from the wrapped binary's environment before launch -
@@ -290,6 +289,14 @@ parameters the wrapper actually measured:
 error: cooldown active on token 0: retry in 12 blocks
 rub3-detail: token_id=0 blocks_remaining=12
 ```
+
+Code 11's detail line carries `required_wei` and `required_covers`, which says
+what that figure includes:
+
+| `required_covers` | `required_wei` is | Top up |
+|---|---|---|
+| `price_plus_gas` | price + `gas_limit * max_fee_per_gas`, the full ceiling | that amount |
+| `price` | the purchase price alone, measured before gas could be estimated | that amount plus gas |
 
 `RUB3_SESSION_DIR` overrides where sessions are cached (default
 `~/.rub3/sessions/<app_id>/<token_id>.json`) - useful for containers with a
