@@ -15,7 +15,7 @@
       "generation": null
     },
     "84532": {
-      "name": "base-sepolia",
+      "name": "base_sepolia",
       "factory": null,
       "deploy_block": null,
       "generation": null

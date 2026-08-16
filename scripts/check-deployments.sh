@@ -15,6 +15,8 @@
 #     factory address with no deploy block is a record nobody can verify
 #   * an address is checksummed 0x-hex and never the zero address, which the
 #     deploy scripts already read as "no factory"
+#   * both chains the project targets stay present, so deleting the entry the
+#     file exists to answer cannot land silently
 #
 # Usage, from anywhere in the repo:
 #   scripts/check-deployments.sh
@@ -41,38 +43,49 @@ errors="$(jq -r '
     (if .schema != 1 then fail("schema must be 1") else empty end),
     (if (.note | type) != "string" then fail("note must be a string") else empty end),
     (if (.fields | type) != "object" then fail("fields must be an object") else empty end),
-    (if (.chains | type) != "object" then fail("chains must be an object") else empty end),
+    (if (.chains | type) != "object"
+      then fail("chains must be an object")
+      else (
+        (if (.chains | has("8453") and has("84532") | not)
+          then fail("chains must include both 8453 (Base mainnet) and 84532 (Base Sepolia)") else empty end),
 
-    (.chains | to_entries[] |
-      . as $e |
-      ($e.key) as $id |
-      ($e.value) as $c |
-      (
-        (if ($id | test("^[1-9][0-9]*$") | not)
-          then fail("chain key \($id): must be a decimal chain id") else empty end),
-        (if ($c | type) != "object"
-          then fail("chain \($id): entry must be an object") else empty end),
-        (if ($c | keys) != ["deploy_block", "factory", "generation", "name"]
-          then fail("chain \($id): keys must be exactly name, factory, deploy_block, generation") else empty end),
-        (if ($c.name | type) != "string" or ($c.name | length) == 0
-          then fail("chain \($id): name must be a non-empty string") else empty end),
+        (.chains | to_entries[] |
+          . as $e |
+          ($e.key) as $id |
+          ($e.value) as $c |
+          (
+            (if ($id | test("^[1-9][0-9]*$") | not)
+              then fail("chain key \($id): must be a decimal chain id") else empty end),
+            (if ($c | type) != "object"
+              then fail("chain \($id): entry must be an object")
+              else (
+                (if ($c | keys) != ["deploy_block", "factory", "generation", "name"]
+                  then fail("chain \($id): keys must be exactly name, factory, deploy_block, generation") else empty end),
+                (if ($c.name | type) != "string" or ($c.name | length) == 0
+                  then fail("chain \($id): name must be a non-empty string") else empty end),
 
-        (if $c.factory != null and (($c.factory | type) != "string" or ($c.factory | test("^0x[0-9a-fA-F]{40}$") | not))
-          then fail("chain \($id): factory must be null or 0x-prefixed 40-hex") else empty end),
-        (if ($c.factory | type) == "string" and ($c.factory | ascii_downcase) == "0x0000000000000000000000000000000000000000"
-          then fail("chain \($id): factory must not be the zero address") else empty end),
-        (if ($c.factory | type) == "string" and ($c.factory | test("^0x[0-9a-f]{40}$")) and ($c.factory | test("[a-f]"))
-          then fail("chain \($id): factory must be EIP-55 checksummed, not all lower case") else empty end),
+                (if $c.factory != null and (($c.factory | type) != "string" or ($c.factory | test("^0x[0-9a-fA-F]{40}$") | not))
+                  then fail("chain \($id): factory must be null or 0x-prefixed 40-hex") else empty end),
+                (if ($c.factory | type) == "string" and ($c.factory | ascii_downcase) == "0x0000000000000000000000000000000000000000"
+                  then fail("chain \($id): factory must not be the zero address") else empty end),
+                (if ($c.factory | type) == "string" and ($c.factory | test("^0x[0-9a-f]{40}$")) and ($c.factory | test("[a-f]"))
+                  then fail("chain \($id): factory must be EIP-55 checksummed, not all lower case") else empty end),
+                (if ($c.factory | type) == "string" and ($c.factory | test("^0x[0-9A-F]{40}$")) and ($c.factory | test("[A-F]"))
+                  then fail("chain \($id): factory must be EIP-55 checksummed, not all upper case") else empty end),
 
-        (if $c.deploy_block != null and (($c.deploy_block | type) != "number" or ($c.deploy_block | floor) != $c.deploy_block or $c.deploy_block < 0)
-          then fail("chain \($id): deploy_block must be null or a non-negative integer") else empty end),
-        (if $c.generation != null and (($c.generation | type) != "number" or ($c.generation | floor) != $c.generation or $c.generation < 1)
-          then fail("chain \($id): generation must be null or an integer >= 1") else empty end),
+                (if $c.deploy_block != null and (($c.deploy_block | type) != "number" or ($c.deploy_block | floor) != $c.deploy_block or $c.deploy_block < 0)
+                  then fail("chain \($id): deploy_block must be null or a non-negative integer") else empty end),
+                (if $c.generation != null and (($c.generation | type) != "number" or ($c.generation | floor) != $c.generation or $c.generation < 1)
+                  then fail("chain \($id): generation must be null or an integer >= 1") else empty end),
 
-        (if ([$c.factory, $c.deploy_block, $c.generation] | map(. == null) | unique | length) != 1
-          then fail("chain \($id): an entry is wholly populated or wholly null, never partly") else empty end)
+                (if ([$c.factory, $c.deploy_block, $c.generation] | map(. == null) | unique | length) != 1
+                  then fail("chain \($id): an entry is wholly populated or wholly null, never partly") else empty end)
+              )
+              end)
+          )
+        )
       )
-    )
+      end)
   ] | .[]
 ' "$manifest")"
 
