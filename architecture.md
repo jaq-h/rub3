@@ -347,8 +347,8 @@ For interactive builds, how the "wait" happens is an orthogonal concern. **Today
 | Mode | Status | Reliance | Tolerant of offline activation | JS bundle |
 |---|---|---|---|---|
 | **Manual** | **the only interactive path today** | User copies a tx hash back into the wrapper | yes (paste later) | none |
-| **Auto-detect** | planned, implementation.md §1.10a | Chain RPC (filter `eth_getLogs` / read `lastActivationBlock`) | no | none |
-| **WalletConnect** | planned, implementation.md §1.10b | Reown relay + chain RPC | no | ~255 KB vendored |
+| **Auto-detect** | planned, implementation.md §5.1a | Chain RPC (filter `eth_getLogs` / read `lastActivationBlock`) | no | none |
+| **WalletConnect** | planned, implementation.md §5.1b | Reown relay + chain RPC | no | ~255 KB vendored |
 | **Headless** | built, implementation.md §2.1 | operator-supplied signer + chain RPC | n/a - no user round-trip | none |
 
 Manual is the floor and stays available whatever else lands: no dependencies, and the one path that still works when the user's machine is offline as they open the wrapper but they want to send the tx from a hardware wallet elsewhere and paste the hash later.

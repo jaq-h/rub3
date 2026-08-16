@@ -12,7 +12,7 @@ This file owns the roadmap and the build record: what exists, what is next, and 
 > - **The token is the invariant.** No proxies, no revocation surface, no pause on validation. Evolution only changes what is offered going forward, never what was granted (§2.4).
 > - **Distribution completes the loop.** `contentURI` on-chain + `rub3 fetch` + hash verification = discover → pay → fetch → verify → run (§3.1).
 > - **Seats, not devices.** Fleet concurrency is licensed as K on-chain seats per token (§3.4). Tier-4 device binding and binary encryption move to Deferred.
-> - **Human UX polish is demoted, not dropped.** WalletConnect tabs (§1.10), the Preact refactor, and the Tauri plugin move to Phase 5.
+> - **Human UX polish is demoted, not dropped.** WalletConnect tabs (§5.1), the Preact refactor, and the Tauri plugin move to Phase 5.
 >
 > Phase 1 sections below are the build record of what exists today. They are corrected in place when a later phase supersedes a fact, with the pointer to the section that superseded it; §2.4 carries the removal record for everything the ownership invariants took out.
 
@@ -41,7 +41,7 @@ Goal: A working wrapper that gates a Rust binary behind wallet ownership, using 
 - Screens: connect (address input) → token-select (when multiple tokens owned) → activate (message + signature input) → processing
 - Activate screen surfaces the exact `personal_sign` preimage (hex) so the user knows what to sign in their wallet
 - **Done:** manual wallet address input, `tokensOfOwner()` enumeration, multi-token selection UI, activation message display, manual signature paste, proof storage on success
-- **Not yet done:** WalletConnect integration - tracked as §1.10b (requires WC v2 JS SDK + developer-supplied project ID)
+- **Not yet done:** WalletConnect integration - tracked as §5.1b (requires WC v2 JS SDK + developer-supplied project ID)
 
 ### 1.4 - On-chain queries `[complete]`
 - `rpc.rs`: `ownerOf(tokenId)`, `price()`, `balanceOf(owner)`, `tokenOfOwnerByIndex(owner, index)` via alloy JSON-RPC with minimal ABI (`IRub3License`)
@@ -142,7 +142,7 @@ surfaces it to the user, and polls the receipt they paste back.
 
 **Deferred**
 - Refactor `activation.html` to Preact (vendored `preact.mjs` + `htm.mjs`, custom-protocol handler via `include_dir` - no Node/build step). Tracked as §5.2.
-- Replace the "paste your tx hash" box with auto-detect + WalletConnect tabs while keeping manual paste as the fallback floor. Tracked as §1.10.
+- Replace the "paste your tx hash" box with auto-detect + WalletConnect tabs while keeping manual paste as the fallback floor. Tracked as §5.1.
 
 **Verification**
 - `cargo test -p rub3-wrapper --lib` (default tier-2): 57 pass (up from 51)
@@ -188,7 +188,7 @@ function cooldownReady(uint256 tokenId)
 - ActivateTxSent handler: spawns a background polling thread (10 × 3s; 30s total timeout) calling `get_tx_receipt`; on confirmation asserts `receipt.to == contract` and `status == true`, reads `activeSessionId`, mints a `new_nonce()`, computes `expires_at` from `SESSION_TTL_SECS`, builds the session message, and emits `onTxConfirmed`
 - SessionSigned handler: assembles `Session` (tier-3 fields populated from echoed state), calls `verify_local`, sends `ActivationResult::SessionSuccess`
 - `activation.rs::ensure` - tries three paths in order: (1) tier-3 session fast path (`load_latest_session` → `verify_local`), (2) legacy proof fast path, (3) webview. Takes a new `session_ttl_secs` param threaded through from `main.rs` (`SESSION_TTL_SECS = 7 days`). On `SessionSuccess` persists via `session_store::save_session`.
-- `assets/activation.html` new screens: `cooldown` (shows calldata + tx-hash input with per-block-remaining banner when cooldown is active), `sign-session` (shows tx hash / block / session id / session message, captures signature). JS tracks `pendingSessionCtx` across the cooldown → tx-confirm → sign-session flow and echoes it back in `session_signed`. The tx-hash input is the "manual paste" path today; the richer auto-detect and WalletConnect tabs layered on top are tracked as §1.10.
+- `assets/activation.html` new screens: `cooldown` (shows calldata + tx-hash input with per-block-remaining banner when cooldown is active), `sign-session` (shows tx hash / block / session id / session message, captures signature). JS tracks `pendingSessionCtx` across the cooldown → tx-confirm → sign-session flow and echoes it back in `session_signed`. The tx-hash input is the "manual paste" path today; the richer auto-detect and WalletConnect tabs layered on top are tracked as §5.1.
 
 **Phase C - verification hardening `[complete]`**
 - `session::verify_onchain(session, rpc_url)` (gated on `cooldown`) - fetches the activation tx receipt and confirms `status == true`, `receipt.to` matches `session.contract`, `receipt.block_hash` matches `session.activation_block_hash`. Each failure mode has a dedicated `VerifyError` variant (`MissingTxHash`, `MissingBlockHash`, `Rpc`, `ReceiptNotFound`, `TxReverted`, `ContractMismatch`, `BlockHashMismatch`)
@@ -235,71 +235,6 @@ Branch: `feature/tier-scaffold`. The wrapper is a single crate with Cargo featur
 - `decrypt.rs` - gated on `binary-encryption`; KEK derivation, AEK unwrap, AES-256-GCM decrypt, in-memory exec (`memfd_create`/`fexecve` on Linux, `$TMPDIR` 0700 + unlink on macOS, `CreateFileMapping` on Windows)
 
 All five tier bundles + `binary-encryption` composition compile clean. The 15 existing lib tests pass under default features. The scaffold establishes the wiring; tier 3 behavior is implemented in §1.8, tier 4 and binary encryption in later phases.
-
-### 1.10 - Frictionless tx confirmation `[not started - demoted to Phase 5]`
-
-> **Plan revision:** this work now lands as §5.1, after the agent-native core. The manual-paste floor already works and stays reachable forever; richer confirmation modes are human-surface polish. The specs below (§1.10, §1.10a, §1.10b) apply unchanged when picked up.
-
-The purchase (§1.7) and activate (§1.8) flows currently ask the user to paste a transaction hash back into the webview after sending from their wallet. That manual-paste path is our robust fallback - it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
-
-**Three modes, in order of preference:**
-
-| Mode | Project ID | JS bundle | Offline tolerant | Relies on |
-|---|---|---|---|---|
-| `wallet-connect` | required (dev-supplied) | ~255 KB vendored | no | Reown relay + chain RPC |
-| `auto-detect` | none | none | no | chain RPC only |
-| `manual` (§1.7, §1.8) | none | none | yes (paste later) | user copy/paste |
-
-The three modes surface as three tabs on the cooldown / purchase screens. The default tab at render time is the highest-capability one available for the current build:
-- WalletConnect tab visible when the `wallet-connect` feature is compiled in **and** the developer supplied a non-placeholder `wc_project_id`
-- Auto-detect tab visible when `onchain-write` is on (always true for tier 3+, which is the only tier that reaches these screens)
-- Manual tab always visible
-
-Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate_tx_sent`) - the downstream poller/finalize path from §1.7 and §1.8 Phase B is untouched. This keeps auto-detect and WalletConnect as pure front-door improvements rather than new branches in the session pipeline.
-
-### 1.10a - RPC auto-detect `[not started]`
-
-**Rationale.** Many embedded-app developers will never configure WalletConnect - they may not want the relay dependency, may not want to register with Reown, or may be shipping internal / CLI-adjacent tools. Auto-detect gives those deployments a one-click confirm path without adding any JS or external service.
-
-**How it works.**
-- Purchase: poll `eth_getLogs` for the ERC-721 `Transfer(0x0, wallet, *)` topic signature (already constant in `rpc.rs` as `ERC721_TRANSFER_SIG`) filtered by `address == contract`, starting from the block the user opened the screen. First match wins → its tx hash feeds the same `purchase_tx_sent` handler as manual.
-- Activate: poll `lastActivationBlock(tokenId)` (already in `rpc.rs`); when it advances past the starting block, resolve the block's receipts and pick the one whose `to == contract && from == wallet`. That receipt's tx hash feeds `activate_tx_sent`.
-- Poll cadence: 3 s, same as `spawn_tx_poller` / `spawn_purchase_poller`. Total budget configurable, default 120 s (longer than manual because the user is broadcasting the tx in-wallet during this window). Falls back to the Manual tab (pre-populated with helpful copy) on timeout or repeated RPC error.
-
-**Rust additions (`rpc.rs`)**
-- `pub fn watch_for_mint(rpc_url, contract, recipient, from_block, deadline) -> Result<String, RpcError>` - polls `eth_getLogs` with the `Transfer(0x0, recipient, *)` filter; returns the tx hash.
-- `pub fn watch_for_activate(rpc_url, contract, token_id, from_block, deadline) -> Result<String, RpcError>` - polls `lastActivationBlock`; on delta, resolves the tx hash via `eth_getBlockByNumber` + receipt scan.
-
-**Webview wiring**
-- New IPC variants (gated on `onchain-write`): `AutoWatchStart { kind: "mint" | "activate", … }`, `AutoWatchCancel`. `webview.rs` spawns a `thread::spawn` running the watcher; on success the watcher routes its hash through the same internal dispatch as `purchase_tx_sent` / `activate_tx_sent` - no JS round-trip, no duplicated handlers.
-- Existing purchase / cooldown / session handlers unchanged.
-
-**HTML**
-- Tabs in `#screen-purchase` and `#screen-cooldown`: `[WalletConnect] [Auto-detect] [Manual]`. The auto-detect body is a spinner + "Waiting for your wallet to broadcast the tx…" copy and a "Switch to manual" link.
-
-**Gating.** `onchain-write` (already required by §1.7 / §1.8). No new Cargo feature. Pure additive - tier 3+ builds pick it up automatically.
-
-### 1.10b - WalletConnect v2 `[not started]`
-
-**Scope.** The developer opts in per deployment by supplying a `wc_project_id` (obtained from cloud.reown.com). No single rub3-wide project ID - project IDs are the abuse / rate-limit boundary, and branding (the wallet QR prompt shows the dApp name) should reflect the embedded app, not rub3.
-
-**Rust additions**
-- `ActivationContext` (the `main.rs` constants struct) gains `wc_project_id: Option<&'static str>`. Missing or placeholder → WC tab is hidden. Default in the wrapper's own dev builds is `None`, not a shared project ID - `rub3 pack` (§2.5) rejects a distributable that inherits a placeholder value.
-- Feature flag `wallet-connect` on the wrapper crate - opt-in because of the vendored JS weight. Composes with `onchain-write`; does not change tier bundle definitions (developer picks `tier-3,wallet-connect` at pack time).
-- `webview.rs::show_purchase` / `show_cooldown` include the project id in the `onShowPurchase` / `onShowCooldown` payload when the feature is compiled in; JS decides whether to render the tab based on its presence.
-
-**Assets (`assets/vendor/`)**
-- `walletconnect-sign-client.mjs` - Reown SignClient v2 bundle (~250 KB).
-- `qrcode.mjs` - ~5 KB QR-from-URI renderer.
-- Both served by the same `include_dir!` custom-protocol handler introduced in §5.2 (Preact refactor); if §5.2 has not landed yet, this section creates that handler.
-
-**Assets (`assets/app/`)**
-- New `wc.js` - init `SignClient`, open a session via `chains: ["eip155:<chain_id>"]`, render the pairing URI as an inline QR, call `client.request({ method: "eth_sendTransaction", params: [{ to, data, value }] })` to dispatch either the purchase or activate tx. Returns the tx hash through the existing `purchase_tx_sent` / `activate_tx_sent` IPC message - reusing the rest of the pipeline.
-
-**HTML**
-- WC tab body: the vendored QR canvas, a "copy pairing URI" fallback, and error copy that suggests falling back to Auto-detect or Manual.
-
-**Gating recap.** `wallet-connect` Cargo feature + developer-supplied project id. Both must be present for the tab to render; either absent → the tab is silently omitted and the user sees a 2-tab (or 1-tab) screen.
 
 **Phase 1 deliverable:** A wrapped binary that requires wallet ownership + session signature to run, with session caching, on-chain cooldown enforcement (tier 3), and automatic re-activation on expiry.
 
@@ -756,8 +691,70 @@ Goal: the payment flows only rub3 can host.
 
 The interactive path stays fully supported - manual tx-hash paste is the floor today and remains reachable forever. Polish lands after the agent path.
 
-### 5.1 - Frictionless tx confirmation `[not started]` *(spec in §1.10 / §1.10a / §1.10b)*
-- Auto-detect and WalletConnect tabs on the purchase/cooldown screens, manual paste as the always-available floor. The detailed specs in §1.10a/§1.10b apply unchanged.
+### 5.1 - Frictionless tx confirmation `[not started]`
+
+Demoted from Phase 1, where it was specified as §1.10 before the agent-first revision; the spec below applies unchanged when picked up. The manual-paste floor already works and stays reachable forever, so richer confirmation modes are human-surface polish rather than a gap.
+
+The purchase (§1.7) and activate (§1.8) flows currently ask the user to paste a transaction hash back into the webview after sending from their wallet. That manual-paste path is our robust fallback - it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
+
+**Three modes, in order of preference:**
+
+| Mode | Project ID | JS bundle | Offline tolerant | Relies on |
+|---|---|---|---|---|
+| `wallet-connect` | required (dev-supplied) | ~255 KB vendored | no | Reown relay + chain RPC |
+| `auto-detect` | none | none | no | chain RPC only |
+| `manual` (§1.7, §1.8) | none | none | yes (paste later) | user copy/paste |
+
+The three modes surface as three tabs on the cooldown / purchase screens. The default tab at render time is the highest-capability one available for the current build:
+- WalletConnect tab visible when the `wallet-connect` feature is compiled in **and** the developer supplied a non-placeholder `wc_project_id`
+- Auto-detect tab visible when `onchain-write` is on (always true for tier 3+, which is the only tier that reaches these screens)
+- Manual tab always visible
+
+Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate_tx_sent`) - the downstream poller/finalize path from §1.7 and §1.8 Phase B is untouched. This keeps auto-detect and WalletConnect as pure front-door improvements rather than new branches in the session pipeline.
+
+#### 5.1a - RPC auto-detect `[not started]`
+
+**Rationale.** Many embedded-app developers will never configure WalletConnect - they may not want the relay dependency, may not want to register with Reown, or may be shipping internal / CLI-adjacent tools. Auto-detect gives those deployments a one-click confirm path without adding any JS or external service.
+
+**How it works.**
+- Purchase: poll `eth_getLogs` for the ERC-721 `Transfer(0x0, wallet, *)` topic signature (already constant in `rpc.rs` as `ERC721_TRANSFER_SIG`) filtered by `address == contract`, starting from the block the user opened the screen. First match wins → its tx hash feeds the same `purchase_tx_sent` handler as manual.
+- Activate: poll `lastActivationBlock(tokenId)` (already in `rpc.rs`); when it advances past the starting block, resolve the block's receipts and pick the one whose `to == contract && from == wallet`. That receipt's tx hash feeds `activate_tx_sent`.
+- Poll cadence: 3 s, same as `spawn_tx_poller` / `spawn_purchase_poller`. Total budget configurable, default 120 s (longer than manual because the user is broadcasting the tx in-wallet during this window). Falls back to the Manual tab (pre-populated with helpful copy) on timeout or repeated RPC error.
+
+**Rust additions (`rpc.rs`)**
+- `pub fn watch_for_mint(rpc_url, contract, recipient, from_block, deadline) -> Result<String, RpcError>` - polls `eth_getLogs` with the `Transfer(0x0, recipient, *)` filter; returns the tx hash.
+- `pub fn watch_for_activate(rpc_url, contract, token_id, from_block, deadline) -> Result<String, RpcError>` - polls `lastActivationBlock`; on delta, resolves the tx hash via `eth_getBlockByNumber` + receipt scan.
+
+**Webview wiring**
+- New IPC variants (gated on `onchain-write`): `AutoWatchStart { kind: "mint" | "activate", … }`, `AutoWatchCancel`. `webview.rs` spawns a `thread::spawn` running the watcher; on success the watcher routes its hash through the same internal dispatch as `purchase_tx_sent` / `activate_tx_sent` - no JS round-trip, no duplicated handlers.
+- Existing purchase / cooldown / session handlers unchanged.
+
+**HTML**
+- Tabs in `#screen-purchase` and `#screen-cooldown`: `[WalletConnect] [Auto-detect] [Manual]`. The auto-detect body is a spinner + "Waiting for your wallet to broadcast the tx…" copy and a "Switch to manual" link.
+
+**Gating.** `onchain-write` (already required by §1.7 / §1.8). No new Cargo feature. Pure additive - tier 3+ builds pick it up automatically.
+
+#### 5.1b - WalletConnect v2 `[not started]`
+
+**Scope.** The developer opts in per deployment by supplying a `wc_project_id` (obtained from cloud.reown.com). No single rub3-wide project ID - project IDs are the abuse / rate-limit boundary, and branding (the wallet QR prompt shows the dApp name) should reflect the embedded app, not rub3.
+
+**Rust additions**
+- `ActivationContext` (the `main.rs` constants struct) gains `wc_project_id: Option<&'static str>`. Missing or placeholder → WC tab is hidden. Default in the wrapper's own dev builds is `None`, not a shared project ID - `rub3 pack` (§2.5) rejects a distributable that inherits a placeholder value.
+- Feature flag `wallet-connect` on the wrapper crate - opt-in because of the vendored JS weight. Composes with `onchain-write`; does not change tier bundle definitions (developer picks `tier-3,wallet-connect` at pack time).
+- `webview.rs::show_purchase` / `show_cooldown` include the project id in the `onShowPurchase` / `onShowCooldown` payload when the feature is compiled in; JS decides whether to render the tab based on its presence.
+
+**Assets (`assets/vendor/`)**
+- `walletconnect-sign-client.mjs` - Reown SignClient v2 bundle (~250 KB).
+- `qrcode.mjs` - ~5 KB QR-from-URI renderer.
+- Both served by the same `include_dir!` custom-protocol handler introduced in §5.2 (Preact refactor); if §5.2 has not landed yet, this section creates that handler.
+
+**Assets (`assets/app/`)**
+- New `wc.js` - init `SignClient`, open a session via `chains: ["eip155:<chain_id>"]`, render the pairing URI as an inline QR, call `client.request({ method: "eth_sendTransaction", params: [{ to, data, value }] })` to dispatch either the purchase or activate tx. Returns the tx hash through the existing `purchase_tx_sent` / `activate_tx_sent` IPC message - reusing the rest of the pipeline.
+
+**HTML**
+- WC tab body: the vendored QR canvas, a "copy pairing URI" fallback, and error copy that suggests falling back to Auto-detect or Manual.
+
+**Gating recap.** `wallet-connect` Cargo feature + developer-supplied project id. Both must be present for the tab to render; either absent → the tab is silently omitted and the user sees a 2-tab (or 1-tab) screen.
 
 ### 5.2 - Activation UI refactor to Preact `[not started]` *(was old §2.5)*
 - Single reducer over `(phase, ctx)`; vendored `preact.mjs` + `htm.mjs` under `assets/vendor/`; `include_dir!` custom-protocol handler; no Node/bundler. No behavioral changes.
@@ -806,8 +803,8 @@ Cut from the active roadmap with rationale; scaffolds are retained.
 ## Directory Structure
 
 Current (implemented). The per-module map is not repeated here: README.md →
-"Project structure" names every wrapper module, and architecture.md → "Source
-layout (current)" adds the deferred `device.rs` / `decrypt.rs` scaffolds.
+"Project structure" names every wrapper module, including the deferred
+`device.rs` / `decrypt.rs` scaffolds.
 
 ```
 rub3/
@@ -830,8 +827,6 @@ rub3/
 ├── testing.md
 └── README.md
 ```
-
-The per-module map, including the deferred `device.rs` / `decrypt.rs` scaffolds, is in `README.md` → "Project structure".
 
 Planned (not yet created):
 
