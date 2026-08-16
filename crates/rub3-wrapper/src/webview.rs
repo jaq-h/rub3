@@ -803,8 +803,16 @@ fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNo
                  did not complete, so there is nothing to compare. Nothing has been signed and \
                  nothing has been sent."
             ),
-            next_step: "This is a connection problem, not a verdict on the contract. \
-                        Check your network and try again.",
+            // Tied to `retryable` below, so the words and the button always
+            // agree: telling someone to try again beside a screen with no Try
+            // Again button on it is an instruction they cannot follow.
+            next_step: if e.is_retryable() {
+                "This is a connection problem, not a verdict on the contract. \
+                 Check your network and try again."
+            } else {
+                "This is not a verdict on the contract, but repeating it will not help. \
+                 Check the network and address settings with whoever published this software."
+            },
             // The kind of failure only, which is a narrower thing than the
             // redaction `RpcError::transport` already applies. That one strips
             // the URL out of the error value so no surface can leak the packed

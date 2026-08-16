@@ -191,17 +191,29 @@ impl RpcError {
 /// other member is excluded by RFC 3986 outright. `,`, `.` and `;` are
 /// deliberately absent: they are legal in a query string, and cutting the token
 /// short at one would leave the tail of the URL - which is where a key sits -
-/// standing in the message.
+/// standing in the message. `[` and `]` are absent for the same reason and a
+/// sharper one: they open and close an IPv6 host, so treating them as
+/// terminators would cut the token to `scheme://` and leave the entire
+/// authority, path and query behind as prose.
 const URL_TERMINATORS: &[char] = &[
-    ' ', '\t', '\n', '\r', '"', '\'', '(', ')', '[', ']', '{', '}', '<', '>', '`', '|', '\\', '^',
+    ' ', '\t', '\n', '\r', '"', '\'', '(', ')', '{', '}', '<', '>', '`', '|', '\\', '^',
 ];
+
+/// What replaces a URL whose authority could not be read.
+const UNREADABLE_URL: &str = "[redacted url]";
 
 /// Rewrites every URL in `message` to `scheme://host[:port]`.
 ///
 /// The host and port stay: an operator chasing a dead endpoint needs to know
 /// which one failed, and neither is the secret. Userinfo, path, query and
 /// fragment all go, because a provider key is put in one of those three.
-fn redact_urls(message: &str) -> String {
+///
+/// Fails closed. A token whose authority will not parse is replaced by
+/// [`UNREADABLE_URL`] and then consumed to the next whitespace, because the
+/// alternative - emitting the placeholder and letting the unparsed tail through
+/// as prose - would print the key while claiming to have redacted it, which is
+/// worse than not redacting at all.
+pub(crate) fn redact_urls(message: &str) -> String {
     let bytes = message.as_bytes();
     let mut out = String::with_capacity(message.len());
     let mut cursor = 0;
@@ -230,33 +242,61 @@ fn redact_urls(message: &str) -> String {
         out.push_str(&message[cursor..start]);
 
         let authority_start = separator + 3;
-        let rest = &message[authority_start..];
-        let mut end = authority_start + rest.find(URL_TERMINATORS).unwrap_or(rest.len());
+        let mut end = url_token_end(message, authority_start);
         // Sentence punctuation trailing the URL belongs to the sentence, so it
         // is handed back rather than parsed as part of the address.
         while end > authority_start && matches!(bytes[end - 1], b'.' | b',' | b';' | b':') {
             end -= 1;
         }
 
-        out.push_str(&redact_url(&message[start..end]));
-        cursor = end;
+        match redact_url(&message[start..end]) {
+            Some(origin) => {
+                out.push_str(&origin);
+                cursor = end;
+            }
+            None => {
+                out.push_str(UNREADABLE_URL);
+                let tail = &message[end..];
+                cursor = end + tail.find(char::is_whitespace).unwrap_or(tail.len());
+            }
+        }
     }
 
     out.push_str(&message[cursor..]);
     out
 }
 
-/// One URL token, reduced to its origin. Anything that will not parse is
-/// dropped whole: an address this cannot read is an address it cannot promise
-/// carries no key.
-fn redact_url(token: &str) -> String {
-    let Ok(url) = token.parse::<url::Url>() else {
-        return "[redacted url]".to_string();
+/// Where the URL beginning at `authority_start` stops.
+///
+/// An IPv6 host is bracketed, and the brackets belong to it, so the scan skips
+/// past the matching `]` before looking for a terminator. Its port, path and
+/// query then terminate exactly as any other URL's do. An opening bracket with
+/// no closing one is not an authority this can read, so the token is cut to
+/// nothing and the caller's fail-closed branch takes it.
+fn url_token_end(message: &str, authority_start: usize) -> usize {
+    let rest = &message[authority_start..];
+    let scan_from = if rest.starts_with('[') {
+        match rest.find(']') {
+            Some(bracket) => authority_start + bracket + 1,
+            None => return authority_start,
+        }
+    } else {
+        authority_start
     };
+    let tail = &message[scan_from..];
+    scan_from + tail.find(URL_TERMINATORS).unwrap_or(tail.len())
+}
+
+/// One URL token, reduced to its origin, or `None` when there is no authority
+/// to reduce it to. An address this cannot read is an address it cannot promise
+/// carries no key, so the caller drops it whole rather than passing any of it
+/// on.
+fn redact_url(token: &str) -> Option<String> {
+    let url = token.parse::<url::Url>().ok()?;
     match (url.host_str(), url.port()) {
-        (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
-        (Some(host), None) => format!("{}://{host}", url.scheme()),
-        (None, _) => format!("{}://[redacted]", url.scheme()),
+        (Some(host), Some(port)) => Some(format!("{}://{host}:{port}", url.scheme())),
+        (Some(host), None) => Some(format!("{}://{host}", url.scheme())),
+        (None, _) => None,
     }
 }
 
@@ -1107,6 +1147,73 @@ mod tests {
             redact_urls("the scheme :// on its own is prose"),
             "the scheme :// on its own is prose"
         );
+    }
+
+    /// An IPv6 endpoint is bracketed, and the brackets are part of the host.
+    /// Reading them as delimiters used to cut the token to `scheme://`, which
+    /// failed to parse, so the placeholder was emitted and then the whole
+    /// authority, path and query were appended verbatim as prose - destroying
+    /// the host it meant to keep while publishing the key it meant to strip.
+    #[test]
+    fn a_bracketed_ipv6_endpoint_keeps_its_host_and_loses_its_key() {
+        const KEY: &str = "9f3c1d7ab24e4a1e8c05f6d2b7e19a44";
+
+        assert_eq!(
+            redact_urls(&format!(
+                "error sending request for url (http://[::1]:8545/v2/{KEY})"
+            )),
+            "error sending request for url (http://[::1]:8545)"
+        );
+        assert_eq!(
+            redact_urls(&format!(
+                "could not reach https://[2001:db8::ff00:42:8329]/rpc?apiKey={KEY}"
+            )),
+            "could not reach https://[2001:db8::ff00:42:8329]"
+        );
+        // The trailing-punctuation loop is what could not advance when the
+        // token was cut to `scheme://`, so it gets a bracketed case of its own.
+        assert_eq!(
+            redact_urls(&format!(
+                "node http://[::1]:8545/v2/{KEY}, and then nothing."
+            )),
+            "node http://[::1]:8545, and then nothing."
+        );
+
+        for message in [
+            format!("http://[::1]:8545/v2/{KEY}"),
+            format!("https://[2001:db8::1]:443/rpc?apiKey={KEY}"),
+            format!("http://user:{KEY}@[::1]:8545/rpc"),
+        ] {
+            let rendered = redact_urls(&message);
+            assert!(!rendered.contains(KEY), "the key survived: {rendered}");
+        }
+    }
+
+    /// A URL whose authority cannot be read must fail closed. Emitting the
+    /// placeholder and then letting the unparsed tail through as prose is the
+    /// one outcome worse than no redaction at all: it prints the key while
+    /// claiming to have removed it.
+    #[test]
+    fn an_unreadable_url_is_dropped_whole_rather_than_half_printed() {
+        const KEY: &str = "8b21e5c0f7a94d63b0e2417cf5da9e38";
+
+        for message in [
+            // An opening bracket with no closing one: no authority to read.
+            format!("failed: http://[::1:8545/v2/{KEY} and stopped"),
+            // No host at all, so nothing survives redaction.
+            format!("failed: file:///var/keys/{KEY} and stopped"),
+        ] {
+            let rendered = redact_urls(&message);
+            assert!(!rendered.contains(KEY), "the key survived: {rendered}");
+            assert!(
+                rendered.contains(UNREADABLE_URL),
+                "an unreadable address must say so: {rendered}"
+            );
+            assert!(
+                rendered.ends_with("and stopped"),
+                "only the address is dropped, not the rest of the message: {rendered}"
+            );
+        }
     }
 
     /// The window's "ownership check failed" box is the error surface every
