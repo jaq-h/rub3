@@ -118,8 +118,24 @@ contract Rub3SubscriptionTest is Test {
         uint256 id = nft.purchase{value: PRICE}(alice);
 
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.InsufficientPayment.selector, PRICE - 1, PRICE));
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE - 1, PRICE));
         nft.renew{value: PRICE - 1}(id);
+    }
+
+    /// Renewal takes the snapshot exactly, over as well as under: the same
+    /// rule as {Rub3License-_payEth} applies on every ETH entry point.
+    function test_renew_overpay_reverts() public {
+        vm.prank(alice);
+        uint256 id = nft.purchase{value: PRICE}(alice);
+
+        uint256 expiry = nft.expiresAt(id);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE * 2, PRICE));
+        nft.renew{value: PRICE * 2}(id);
+
+        assertEq(nft.expiresAt(id), expiry, "a rejected renewal extends nothing");
+        assertEq(address(nft).balance, PRICE, "and keeps nothing");
     }
 
     // ── Per-token renewal snapshot (implementation.md §2.4) ───────────────────
@@ -170,7 +186,7 @@ contract Rub3SubscriptionTest is Test {
 
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(
-            Rub3License.InsufficientPayment.selector, PRICE / 10, PRICE
+            Rub3License.IncorrectPayment.selector, PRICE / 10, PRICE
         ));
         nft.renew{value: PRICE / 10}(id);
 
@@ -197,7 +213,7 @@ contract Rub3SubscriptionTest is Test {
         nft.renew{value: PRICE}(cheap);
 
         vm.expectRevert(abi.encodeWithSelector(
-            Rub3License.InsufficientPayment.selector, PRICE, PRICE * 5
+            Rub3License.IncorrectPayment.selector, PRICE, PRICE * 5
         ));
         nft.renew{value: PRICE}(dear);
 
@@ -205,11 +221,20 @@ contract Rub3SubscriptionTest is Test {
         vm.stopPrank();
     }
 
-    /// Overpaying `price` at mint does not inflate the snapshot - it tracks the
-    /// listed price, not what happened to be sent.
-    function test_renewPrice_snapshotTracksListedPriceNotAmountPaid() public {
+    /// The snapshot cannot be inflated by what was sent, because nothing but
+    /// the listed price can be sent: the ETH rail takes the exact amount, so
+    /// "paid" and "listed" are the same number by construction. This is the
+    /// inverted form of a test that used to overpay at mint and assert the
+    /// snapshot ignored it.
+    function test_renewPrice_snapshotCannotBeInflatedByOverpaying() public {
         vm.prank(alice);
-        uint256 id = nft.purchase{value: PRICE * 3}(alice);
+        vm.expectRevert(abi.encodeWithSelector(
+            Rub3License.IncorrectPayment.selector, PRICE * 3, PRICE
+        ));
+        nft.purchase{value: PRICE * 3}(alice);
+
+        vm.prank(alice);
+        uint256 id = nft.purchase{value: PRICE}(alice);
         assertEq(nft.renewPrice(id), PRICE);
     }
 

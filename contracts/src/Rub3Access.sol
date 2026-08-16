@@ -44,6 +44,12 @@ contract Rub3Access is Rub3License {
     }
 
     /// @notice Mint a fresh license token to `recipient`, paying in ETH.
+    ///
+    /// `msg.value` must equal {price} exactly. Sending more reverts just as
+    /// sending less does, and nothing is refunded - see {Rub3License-_payEth}
+    /// for why a price that moved between the read and the transaction should
+    /// fail rather than settle.
+    ///
     /// @dev    Passing `address(0)` mints to `msg.sender`.
     function purchase(address recipient) external payable returns (uint256 tokenId) {
         _payEth(price);

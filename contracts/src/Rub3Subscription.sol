@@ -105,10 +105,13 @@ contract Rub3Subscription is Rub3License {
 
     /// @notice Mint a fresh subscription token to `recipient`, starting now,
     ///         paying in ETH.
-    /// @dev    Passing `address(0)` mints to `msg.sender`.
+    ///
+    /// `msg.value` must equal {price} exactly; see {Rub3License-_payEth}.
     ///
     /// Freezes this token's renewal terms - both rails - at whatever is listed
     /// right now.
+    ///
+    /// @dev    Passing `address(0)` mints to `msg.sender`.
     function purchase(address recipient) external payable returns (uint256 tokenId) {
         _payEth(price);
         return _mintSubscription(_resolveRecipient(recipient), msg.sender);
@@ -138,11 +141,13 @@ contract Rub3Subscription is Rub3License {
     /// @dev The one mint, reached by both rails, and the only place a
     ///      subscription token's terms are ever written.
     ///
-    ///      Snapshots the *listed* prices, not the amounts paid: overpaying at
-    ///      mint does not inflate what the holder renews at. Every per-token
-    ///      mapping is written against the reserved id before {_safeMint} hands
-    ///      control to a contract recipient, so `onERC721Received` can never
-    ///      observe a token whose terms are still at their defaults (§2.4).
+    ///      Snapshots the *listed* prices, which on the ETH rail is also the
+    ///      only amount that can have been paid: {Rub3License-_payEth} takes
+    ///      the exact price, so what a buyer sent cannot inflate what they
+    ///      renew at. Every per-token mapping is written against the reserved
+    ///      id before {_safeMint} hands control to a contract recipient, so
+    ///      `onERC721Received` can never observe a token whose terms are still
+    ///      at their defaults (§2.4).
     function _mintSubscription(address to, address payer) private returns (uint256 tokenId) {
         tokenId = _reserveNextId();
 
@@ -168,7 +173,8 @@ contract Rub3Subscription is Rub3License {
     /// Reverts if the token does not exist.
     ///
     /// Charges `renewPrice[tokenId]`, never the current `price` - a holder's
-    /// cost to stay subscribed is fixed at the moment they bought.
+    /// cost to stay subscribed is fixed at the moment they bought. `msg.value`
+    /// must equal that snapshot exactly; see {Rub3License-_payEth}.
     function renew(uint256 tokenId) external payable {
         _requireOwned(tokenId);
         _payEth(renewPrice[tokenId]);
