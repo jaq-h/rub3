@@ -49,7 +49,8 @@ rub3/
 │       │   ├── session.rs            # Session schema, message hash, verify_local, is_expired
 │       │   ├── session_store.rs      # Session persistence, load_latest_session
 │       │   ├── device.rs             # Device keypair scaffold (feature `device-key`, tier 4 - deferred)
-│       │   └── decrypt.rs            # Binary decryption scaffold (feature `binary-encryption` - deferred)
+│       │   ├── decrypt.rs            # Binary decryption scaffold (feature `binary-encryption` - deferred)
+│       │   └── test_support.rs       # Test-only scaffolding shared by more than one module (`#[cfg(test)]`, never shipped)
 │       ├── assets/
 │       │   └── activation.html       # Activation UI (address input, token select, signature)
 │       └── tests/
@@ -160,7 +161,7 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --li
 cargo test -p rub3-wrapper -- --ignored
 ```
 
-**Unit tests** (`src/`): `license`, `store`, `rpc`, `session`, `session_store`, `identity`, `activation`, `signer`, `tx`
+**Unit tests** (`src/`): one suite per module, so which ones compile follows the tier bundle and front door selected. [testing.md](testing.md) owns the per-suite inventory and the `--lib` count for each bundle.
 
 **Integration tests** (`tests/`): wrapper binary exit codes, argument passing, SIGTERM forwarding, static + dynamic license E2E
 
@@ -193,6 +194,13 @@ On first run with no cached proof, the wrapper opens an activation window:
 ```bash
 cargo run -p rub3-wrapper -- --binary /path/to/your/app
 ```
+
+If the wallet holds no licence, the window verifies the contract's code before
+it shows a purchase screen at all (see
+[Contract code check](#contract-code-check)). A contract that does not verify
+gets a screen explaining what was found and what to do about it, in place of the
+purchase screen rather than beside it, so no address, value or calldata the
+wrapper could not vouch for ever reaches a wallet.
 
 To skip activation during development, seed a valid license proof:
 
@@ -280,8 +288,10 @@ hashes the result, and compares that against a table of canonical fingerprints
 compiled into the binary. A match needs no further network round trip and is
 the common case; it prints one stderr line naming what matched
 (`rub3: 0x... verified as canonical Rub3Access (...)`) and the purchase goes
-ahead. A miss refuses the purchase with exit code 23, before anything is signed
-and with no transaction sent.
+ahead. A miss refuses the purchase before anything is signed and with no
+transaction sent. Both front doors run the same check and differ only in how
+they say no: the headless door exits 23 with a machine-readable detail line, and
+the activation window shows a person what was found and what to do about it.
 
 Masking the immutables is what makes the comparison work at all: they hold the
 constructor's arguments, so two legitimate deploys of identical code that chose

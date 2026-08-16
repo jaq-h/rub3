@@ -731,7 +731,7 @@ print("MATCH" if match else "MISMATCH")
 EOF
 ```
 
-The wrapper does this itself before it spends anything: `crates/rub3-wrapper/src/attest.rs` pins the same fingerprints and ranges in the binary, `headless::purchase` refuses on a miss with exit code 23, and a unit test fails if the pinned table and this manifest drift apart. See [../implementation.md](../implementation.md) §2.6.
+The wrapper does this itself before it spends anything: `crates/rub3-wrapper/src/attest.rs` pins the same fingerprints and ranges in the binary, both purchase paths refuse on a miss before anything is signed (`headless::purchase` with exit code 23, the activation window with a refusal screen in place of the purchase screen), and a unit test fails if the pinned table and this manifest drift apart. See [../implementation.md](../implementation.md) §2.6 and §2.8.
 
 What a match does **not** say is worth as much as what it does. Zeroing the immutable ranges destroys the constructor arguments they held, so a match is silent about `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` and the fee terms; read those from the contract's own getters and check them against your own policy. It says nothing about how a canonical contract's owner will use the powers the invariants deliberately preserve (`setPrice`, `setSuccessor`, `revokeWrapperHash`, `withdraw`). And it rests entirely on the RPC endpoint answering `eth_getCode` honestly: the claim it supports is "an honest view of chain state implies canonical code", and no stronger one. A mismatch is likewise not an accusation - a contract deployed from a later release of these templates than the comparator knows about looks exactly the same way.
 

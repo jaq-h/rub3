@@ -24,7 +24,7 @@ capabilities nor the headless front door. Cargo features are additive, so
 # tier-3 (adds onchain-write + cooldown): 106 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
 
-# tier-3 + the headless (agent) front door: 168 lib tests
+# tier-3 + the headless (agent) front door: 169 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
 
 # tier-3 + the webview (human) front door: 113 lib tests
@@ -33,7 +33,7 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3,webview --lib
 
 For reference, `--lib` counts per bundle: `tier-0` 51, `tier-1` 81, `tier-2` 96,
 `tier-3`/`tier-4` 106, `tier-2,webview` 96, `tier-3,webview` 113,
-`tier-3,headless` 168. Each total includes the one `#[ignore]`d network test,
+`tier-3,headless` 169. Each total includes the one `#[ignore]`d network test,
 which a plain run skips, so a bundle reports one fewer as passed. `tier-1` and
 `tier-2` diverge because `attest` needs `onchain-read`. `tier-2,webview` and
 `tier-3,webview` diverge because the window's purchase screen, and the code
