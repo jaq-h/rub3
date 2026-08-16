@@ -776,8 +776,9 @@ struct RefusalNotice {
     /// Whether trying again could plausibly change the answer. True only for a
     /// chain read that did not complete; a refused address is a settled answer
     /// and offering a retry for it would invite the buyer to keep clicking
-    /// until the check passes. Emitted as `"retryable"`, and toggles
-    /// `#btn-b-retry`.
+    /// until the check passes. Derived from [`crate::rpc::RpcError::is_retryable`]
+    /// rather than decided here, so the two cannot drift apart. Emitted as
+    /// `"retryable"`, and toggles `#btn-b-retry`.
     retryable: bool,
 }
 
@@ -804,11 +805,14 @@ fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNo
             ),
             next_step: "This is a connection problem, not a verdict on the contract. \
                         Check your network and try again.",
-            // The kind of failure only. The transport error's own message
-            // carries the request URL, and the URL packed into this build can
-            // hold a provider API key; putting it on screen would publish that
-            // key to whoever is looking and add nothing the next step above
-            // does not already say. Stderr still gets the whole error.
+            // The kind of failure only, which is a narrower thing than the
+            // redaction `RpcError::transport` already applies. That one strips
+            // the URL out of the error value so no surface can leak the packed
+            // key; this one decides that a buyer being told to forward what
+            // they see should be forwarding a sentence about the failure and
+            // not a network error at all. The redaction is the floor; this is
+            // the choice made on top of it, and neither replaces the other.
+            // Stderr still gets the sanitized error in full.
             detail: match e {
                 RpcError::Transport(_) => {
                     "The node this app reads the chain through did not answer the request for \
@@ -831,7 +835,7 @@ fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNo
                         .to_string()
                 }
             },
-            retryable: true,
+            retryable: e.is_retryable(),
         },
 
         GateError::Refused(refusal) => match refusal {
@@ -1225,6 +1229,42 @@ mod tests {
         assert!(
             !notice.detail.is_empty(),
             "redacting the endpoint must not leave the buyer with a blank finding"
+        );
+    }
+
+    /// The refusal screen is not the only place an RPC failure is shown, and it
+    /// is not even the first. `Connect` runs the ownership check before a
+    /// purchase screen exists in the flow at all, and its failure arm puts the
+    /// error straight into the window's error box - which is also where the
+    /// blocked screen's `Try Again` button sends the buyer back to. Driven
+    /// through `handle` so the message asserted on is the one the window is
+    /// actually given.
+    ///
+    /// The other `eval_err` call sites in this file - the cooldown check, the
+    /// supply cap, `nextTokenId`, the price read and the tx pollers - render
+    /// the same `RpcError` the same way, and inherit the same protection from
+    /// its constructors rather than from anything here.
+    #[test]
+    fn the_ownership_check_error_box_never_shows_the_packed_endpoint() {
+        const KEY: &str = "c7e1f4a30b9d42e8a6135f0c8b27d954";
+        let (state, rx) = state_for(&format!("http://127.0.0.1:1/v2/{KEY}?apiKey={KEY}"));
+
+        state.handle(format!(r#"{{"type":"connect","address":"{BUYER}"}}"#));
+
+        let scripts = scripts(&rx);
+        assert_eq!(
+            scripts.len(),
+            1,
+            "expected one error message, got {scripts:?}"
+        );
+        let shown = &scripts[0];
+        assert!(
+            shown.contains("ownership check failed"),
+            "this test is meant to drive the ownership check: {shown}"
+        );
+        assert!(
+            !shown.contains(KEY),
+            "the packed endpoint's key reached the window: {shown}"
         );
     }
 }
