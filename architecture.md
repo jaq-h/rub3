@@ -737,7 +737,7 @@ Trust chain: **ENS → contract → content URI → binary hash → running wrap
 
 ### Binary encryption (tiers 3-4, optional) *(deferred)*
 
-Would ship the embedded app binary as ciphertext that only a valid on-chain session can unwrap. Not built; see "Deferred designs" below.
+Would ship the embedded app binary as ciphertext the wrapper decrypts into memory only after the session check passes. Not built; see "Deferred designs" below.
 
 ---
 
@@ -900,7 +900,7 @@ Two designs beyond tier 3 are specified only as intent. Both are cut from the ac
 
 **Binary encryption** would ship the embedded app binary as AES-256-GCM ciphertext, decrypted into memory only after the session check passes. The key-encryption key would be derived from public on-chain values, SHA-256 over the contract address, chain id and salt, plus the device-key fingerprint at tier 4; the contract would store only SHA-256 of the binary key, for verification, and never release a secret, since a public chain cannot release one to a single holder. It is deferred because extraction resistance was never a goal, as `ideation.md` → "What This Is Not" states.
 
-The `src/device.rs` and `src/decrypt.rs` scaffolds stay in the tree behind the `device-key` and `binary-encryption` Cargo features, so neither is compiled by any tier bundle on its own.
+The `src/device.rs` and `src/decrypt.rs` scaffolds stay in the tree behind the `device-key` and `binary-encryption` Cargo features. `device.rs` is compiled by the `tier-4` bundle, which enables `device-key` and which CI and the AGENTS.md matrix build; `decrypt.rs` is compiled by no tier bundle at all, because `binary-encryption` is an orthogonal add-on that only an explicit composition such as `tier-3,binary-encryption` enables.
 
 ---
 
