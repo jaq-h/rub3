@@ -158,7 +158,7 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | `COOLDOWN_BLOCKS` | no | Blocks between activations per token (default `1800` ≈ 1 hr on Base; floor `15` ≈ 30 s is enforced on-chain) |
 | `OWNER` | no | Contract owner address; defaults to broadcaster |
 | `PERIOD` | subscription only | Subscription length in seconds |
-| `FACTORY` | no | `Rub3Factory` to deploy through. Deploying through one is what stamps the protocol fee and records the contract in `isDeployed`, which is what the registry and marketplace list. `0x0` (default) deploys directly: no fee, and unrecorded. See [The protocol fee](#the-protocol-fee) |
+| `FACTORY` | no | `Rub3Factory` to deploy through. Set it to the **published canonical address** to stamp the protocol fee and get an `isDeployed` row. Unset or `0x0` (**the default**) deploys directly: fee-free and **unrecorded**, and nothing fails to tell you so. The canonical mainnet address is not yet published. See [The protocol fee](#the-protocol-fee) |
 
 `script/DeployFactory.s.sol` deploys the factory itself and takes two variables of its own:
 
@@ -321,6 +321,16 @@ Both are `immutable`. There is no setter on the licence contract, none on the fa
 
 ### Deploying through the factory
 
+Which path you get is decided by one environment variable, `FACTORY`:
+
+| `FACTORY` | Path | Fee | `isDeployed` |
+|---|---|---|---|
+| unset / `0x0` (**the default**) | direct | none | no row anywhere - **unrecorded** |
+| the published canonical address | registered | 200-300 bps, immutable | recorded on the canonical factory |
+| some other factory address | that factory's | that factory's, to *its* treasury | recorded only on that factory |
+
+Forgetting `FACTORY` is not an error and does not fail: you get a working, fee-free, unrecorded contract and one line of `console.log` saying so. The canonical mainnet factory address is **not yet published** - publishing it is a separate open decision - so `<CANONICAL_FACTORY_ADDRESS_TBD>` below is a placeholder, not an address to copy. There is no canonical mainnet factory to name yet because the contracts are not deployed to mainnet or declared ready for use until the registry is ready; the factory and the registry launch together.
+
 ```bash
 cd contracts
 
@@ -333,13 +343,14 @@ forge script script/DeployFactory.s.sol \
   --broadcast
 
 # 2. Any number of licence contracts through it. The fee is not an input here:
-#    the factory reads it off itself.
+#    the factory reads it off itself. FACTORY is the published canonical
+#    address, or a local factory when testing.
 CONTRACT_TYPE=access \
 TOKEN_NAME="My App License" \
 TOKEN_SYMBOL=MAL \
 IDENTITY_MODEL=0 \
 PRICE=50000000000000000 \
-FACTORY=0xTheFactoryAddress \
+FACTORY=<CANONICAL_FACTORY_ADDRESS_TBD> \
 forge script script/Deploy.s.sol \
   --rpc-url http://127.0.0.1:8545 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
@@ -379,7 +390,7 @@ The two fee sweeps are permissionless because their destination is immutable: th
 
 So a developer knows exactly where they stand: **the fee is charged on value that arrives through the contract's payment functions** - `purchase`, `purchaseWithAuthorization`, `renew`, `renewWithAuthorization`. Value that reaches the contract any other way is never accrued against, and `withdraw` / `withdrawToken` release it in full to the developer. Concretely, that means a direct ERC-20 `transfer` to the licence contract, a `selfdestruct` beneficiary, and a coinbase payout: nothing was taken on them, so all of it is the developer's.
 
-This is a deliberate, reasoned position on where the fee's scope ends, not an implementation gap. The fee is an economic argument, not a technical lock. A developer who wants to route around it can already take payment entirely off-chain and mint free licences, so tightening the on-contract case would close nothing; what the fee buys is distribution, verification, and liquidity, priced so that routing around it costs more than paying it, and the registry and marketplace listing is the carrot. Charging on unaccounted balance was considered and rejected: it would take a cut of mistaken transfers and airdrops, which are not revenue, and would quietly change what the fee means. `test_token_unaccruedBalanceSweepsEntirelyToTheDeveloper` pins the behaviour.
+This is a deliberate, reasoned position on where the fee's scope ends, not an implementation gap. The fee is an economic argument, not a technical lock. A developer who wants to route around it can already take payment entirely off-chain and list the licence at zero, so tightening the on-contract case would close nothing. What the fee is *intended* to buy is distribution, verification, and liquidity - see "The accepted position on fee-free deployment" below for what that row buys today versus what is still planned. Charging on unaccounted balance was considered and rejected: it would take a cut of mistaken transfers and airdrops, which are not revenue, and would quietly change what the fee means. `test_token_unaccruedBalanceSweepsEntirelyToTheDeveloper` pins the behaviour.
 
 ```bash
 # Settle both halves of a sale.
@@ -389,9 +400,29 @@ cast send <LICENCE> "withdraw(address)" <DEVELOPER>      --rpc-url $RPC --privat
 
 A `ProtocolFeeAccrued(address token, uint256 amount, uint256 fee, uint256 developerAmount)` log is emitted on every payment, with `token == address(0)` meaning ETH. Both shares and their sum are readable from that one log.
 
-### Deploying directly is still fine
+### The accepted position on fee-free deployment
 
-Nothing prevents or penalises deploying the open-source templates yourself. A direct deploy passes `FeeTerms(0, address(0))` and pays no fee at all; the two rails, the mint, the invariants, and the wrapper all behave identically. The one thing it does not get is a row in a factory's `isDeployed`, so it is not listable in the registry (§3.2) or the marketplace (§4.3). The fee buys distribution, verification, and liquidity.
+Stated plainly, because it is a decided trade-off rather than a gap:
+
+**A direct deploy is fee-free, unrecorded, and fully functional. By design.** Deploying the open-source templates yourself passes `FeeTerms(0, address(0))` and pays nothing, ever. Both payment rails, the mint, the claim path, the ownership invariants, and the wrapper behave identically to a factory deploy. Nothing prevents or penalises it, and nothing will: penalising a direct deploy would need exactly the revocation surface §2.4 forbids. The fee is an economic argument, not a technical lock.
+
+**The factory path stamps 200-300 bps and grants an `isDeployed` row.** That is the entire difference.
+
+**What the row buys today:** a durable, immutable, on-chain record that this contract was deployed through a specific factory - a canonical referent that anyone can check, and the eligibility criterion for the registry and marketplace when they exist.
+
+**What is planned, not shipped:** the registry (§3.2) and the marketplace (§4.3). Until they land, the row buys the record and the future eligibility, and no distribution, no verification service, and no liquidity. Do not read the fee's rationale as a description of features that exist.
+
+**The fee does not go live ahead of the registry.** The contracts are not deployed to mainnet, and are not declared ready for use, until the registry is ready: the factory and the registry launch together. So there is no window in which a developer pays a live fee for a carrot that does not exist yet.
+
+**Bytecode identity is never evidence of canonical deployment.** Anyone may call a factory's `accessDeployer()` / `subscriptionDeployer()` directly, pass the canonical factory's own `FeeTerms`, and obtain a licence contract whose runtime code is byte-identical to a genuine factory deploy - and which the factory never recorded. Anyone may also deploy their own `Rub3Factory` with their own treasury and any `feeBps` in [200, 300]; its contracts read as fee-bearing and are `isDeployed` **on that factory**. So a verifier must check `isDeployed` on a specific, known factory address, and must never conclude anything from a matching fingerprint or from a non-zero `feeBps()`.
+
+```bash
+# The only check that means anything. <CANONICAL_FACTORY> is not interchangeable
+# with "some factory" - it must be the published canonical address.
+cast call <CANONICAL_FACTORY> "isDeployed(address)(bool)" <LICENCE> --rpc-url $RPC
+```
+
+The canonical mainnet factory address is **not yet published**; where it is published is an open decision. Until then there is no address to check against, and "deployed through the factory" has no verifiable referent outside a deployment you performed yourself.
 
 ### Why the factory deploys through two helper contracts
 
