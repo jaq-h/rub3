@@ -627,7 +627,7 @@ rub3 register --name myapp --contract 0x1234...abcd
 
 **Failure posture: closed on purchase, open on launch**
 - Refusing to spend money on code that could not be verified is correct, so a chain read that fails is also a refusal
-- Refusing to *start* a program the user already paid for because a check could not complete would be a de-facto revocation surface, which §2.4 rules out. Nothing on the launch path consults the module - there is no shared helper and no flag, and a unit test fails if a second caller appears anywhere in the crate
+- Refusing to *start* a program the user already paid for because a check could not complete would be a de-facto revocation surface, which §2.4 rules out. Nothing on the launch path consults the module - there is no shared helper and no flag, and a unit test walking `src/` fails if any module other than `activation.rs` names the module at all, by any of its items. That test guards source structure, not runtime wiring; the behaviour is pinned by `headless_launch_of_a_held_licence_never_enters_the_purchase_path_e2e`, which relaunches a held licence against anvil and asserts it activates without minting
 
 **The selector scan is demoted to a diagnostic**
 - `attest::FORBIDDEN_SIGNATURES` mirrors the 30 signatures `test/Rub3Invariants.t.sol` asserts absent, searched over raw bytes rather than hex text so an odd-nibble coincidence cannot invent a finding
@@ -646,15 +646,18 @@ rub3 register --name myapp --contract 0x1234...abcd
 
 **Files** - `attest.rs` (new), `lib.rs` (`pub mod attest;` gated on `onchain-read`), `rpc.rs` (`get_code` via `provider.get_code_at`), `activation.rs` (the call site, the error variant, exit code 23 and its help text)
 
-**Tests** - 15 unit tests in `attest`, 5 in `activation`, 1 in `rpc`, 1 anvil-gated e2e
+**Tests** - 15 unit tests in `attest`, 5 in `activation`, 1 in `rpc`, 2 anvil-gated e2e
 - The negative case is executable: a copy carrying `reconcileLedger(uint256,address)` - an owner-only seizure under an innocuous name - is asserted to pass the selector scan in silence and to fail the hash. That asymmetry is the whole justification for the work
 - Also covered: a legitimate deploy that chose different immutables still matching, a truncated deploy refused rather than partially masked, an address with no code, the refusal naming what the pre-filter saw, the role check, and the pinned table's shape
 - `headless_refuses_a_contract_whose_code_is_not_canonical_e2e` drives the refusal against a real deployed non-rub3 contract on anvil and asserts the signer's nonce and ETH balance are both unchanged - the executable form of "no transaction was sent"
+- `headless_launch_of_a_held_licence_never_enters_the_purchase_path_e2e` is the other half of the posture: buy once through the gate, wipe the cached session so the fast path cannot answer, mine past the cooldown, and relaunch → `Activated` rather than `PurchasedAndActivated`, with `nextTokenId` unchanged read through `cast`
 - Full 8-bundle matrix green. `--lib` counts move to `tier-0` 46, `tier-1` 76, `tier-2` 91, `tier-3`/`tier-4` 101, `tier-3,headless` 156. `tier-0` and `tier-1` gain only the one `rpc::get_code` error-path test and none of `attest`'s fifteen, which is the module compiling away as required
 
 **Fixed in passing** - `tests/license_e2e.rs` had a real flake, roughly one run in sixty: `static_license_loads_and_verifies` and `dynamic_license_round_trips` both set and cleared the process-global `RUB3_LICENSE_DIR`, so one test's `remove_var` could land between the other's `set_var` and its read, failing it with an unrelated `NotFound`. Both now load through one helper holding a file-level lock across the whole set -> read -> unset window. 40 consecutive runs clean.
 
 **Deliberately not built here** - the on-chain `Rub3CodeRegistry` (a separate deploy, and the answer to "several legitimate releases live at once"), a signed release manifest fetched over HTTP (would add an HTTP client and a signature dependency to a crate with neither, to avoid a chain the agent is about to transact on anyway), and the immutables-versus-policy check, which is the one gap a fingerprint structurally cannot close.
+
+One test gap is left open for the same reason. "A launch still works when the check *cannot complete*" has no executable coverage: constructing it needs a licence contract whose code is deliberately not canonical, which is a Solidity change, and `contracts/` was left alone here because a separate lane is editing it. What is covered is the structural half - a held licence relaunches without entering the purchase path at all - and the unbuilt half is follow-up work for whenever a non-canonical licence fixture can land alongside it.
 
 **Phase 2 deliverable:** `rub3 deploy` → fund a fresh key → `rub3-wrapper --headless` completes purchase → activation → launch with no human present, and the deployed contract carries the fee split and ownership invariants.
 

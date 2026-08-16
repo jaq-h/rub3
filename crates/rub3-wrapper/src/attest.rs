@@ -565,6 +565,19 @@ mod tests {
                 })
                 .collect();
 
+            // A contract the table already knows has exactly one role, and a
+            // new fingerprint for it does not change what the contract is for.
+            // Suggesting that role is what keeps a pasted row from silently
+            // demoting the factory or a deployer helper to a purchase target; a
+            // contract name the table has never seen gets a placeholder that
+            // says out loud that it is one.
+            let role_line = match CANONICAL.iter().find(|entry| entry.contract == name) {
+                Some(known) => format!("role: Role::{:?},", known.role),
+                None => {
+                    "role: Role::Licence,   // NEW CONTRACT - choose this deliberately".to_string()
+                }
+            };
+
             let pinned = CANONICAL
                 .iter()
                 .find(|entry| entry.contract == name && entry.masked_sha256 == hash)
@@ -578,8 +591,8 @@ mod tests {
                          \x20   CanonicalContract {{\n\
                          \x20       contract: {name:?},\n\
                          \x20       source: \"contracts/{}\",\n\
-                         \x20       role: Role::Licence,   // check this\n\
-                         \x20       release: RELEASE,      // and this\n\
+                         \x20       {role_line}\n\
+                         \x20       release: RELEASE,      // check this\n\
                          \x20       masked_sha256: {hash:?},\n\
                          \x20       immutable_ranges: &{ranges:?},\n\
                          \x20   }},\n",
@@ -592,6 +605,26 @@ mod tests {
                 "{name} is pinned at the published masked hash but with different immutable \
                  ranges. A comparator zeroing these ranges would hash something the manifest \
                  never described; regenerate the row from the manifest."
+            );
+        }
+
+        // The manifest carries no role, so the row above inherits its
+        // contract's role from the table rather than from the published record.
+        // This is what makes that inheritance binding: two rows for one
+        // contract disagreeing about what it is for would mean one release of
+        // `Rub3Factory` or of a deployer helper had quietly become a valid
+        // purchase target, with every other test in the crate still green.
+        for entry in CANONICAL {
+            let first = CANONICAL
+                .iter()
+                .find(|other| other.contract == entry.contract)
+                .expect("an entry finds at least itself");
+            assert_eq!(
+                entry.role, first.role,
+                "{} is pinned as both {:?} and {:?}. What a contract is *for* does not change \
+                 between releases, and a row that downgrades a factory or a deployer helper to \
+                 Role::Licence removes the NotALicence guard from the purchase path.",
+                entry.contract, first.role, entry.role
             );
         }
     }
@@ -653,8 +686,24 @@ mod tests {
     /// stale copy is the usual casualty. This is a fifth copy of it, so it is
     /// checked against the one that runs against real bytecode rather than
     /// trusted to stay in step.
+    ///
+    /// The parse leans on a textual contract in `Rub3Invariants.t.sol`, and
+    /// asserts each part of it rather than assuming it: `string[` appears
+    /// exactly once in the file, its `= [ ... ];` literal holds one quoted
+    /// signature per line and nothing else quoted, and the count it parses
+    /// matches the declared `N`. Comments come out first, because the prose
+    /// around the array quotes text and a naive quoted-string scan would take a
+    /// sentence fragment for a signature and misalign every entry after it.
     #[test]
     fn forbidden_signatures_mirror_the_solidity_audit() {
+        assert_eq!(
+            INVARIANTS_SOL.matches("string[").count(),
+            1,
+            "Rub3Invariants.t.sol now declares more than one `string[N]` array, so this parse \
+             can no longer tell which one is the forbidden-signature list. Point it at that \
+             declaration deliberately rather than letting it take whichever comes first."
+        );
+
         let declaration = INVARIANTS_SOL
             .find("string[")
             .expect("Rub3Invariants.t.sol declares no `string[N] memory forbidden` array");
@@ -903,7 +952,75 @@ mod tests {
         assert!(matches!(refusal, Refusal::Unrecognised(_)));
     }
 
-    /// The gate is wired into the purchase path and into nothing else.
+    /// Every `.rs` file under `root`, recursively, paired with its path
+    /// relative to `root` so a module moved into a subdirectory is still named
+    /// rather than escaping the walk.
+    fn rust_sources(root: &std::path::Path) -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let entries =
+                std::fs::read_dir(dir).expect("the crate's own src directory is readable");
+            for entry in entries {
+                let path = entry.expect("readable directory entry").path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let name = path
+                        .strip_prefix(root)
+                        .expect("walked from root")
+                        .to_string_lossy()
+                        .into_owned();
+                    let body =
+                        std::fs::read_to_string(&path).expect("a crate source file is readable");
+                    out.push((name, body));
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    /// `source` with `//` line comments removed, string literals left alone.
+    ///
+    /// A doc comment that *names* the module is not a way into it - `rpc.rs`
+    /// points at `crate::attest` in prose - so counting one would leave this
+    /// check unable to tell a reference from a mention.
+    fn strip_line_comments(source: &str) -> String {
+        source
+            .lines()
+            .map(|line| {
+                let bytes = line.as_bytes();
+                let mut in_string = false;
+                let mut escaped = false;
+                for i in 0..bytes.len() {
+                    match bytes[i] {
+                        b'\\' if in_string => escaped = !escaped,
+                        b'"' if !escaped => {
+                            in_string = !in_string;
+                            escaped = false;
+                        }
+                        b'/' if !in_string && bytes.get(i + 1) == Some(&b'/') => return &line[..i],
+                        _ => escaped = false,
+                    }
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Whether `needle` occurs in `haystack` as a whole identifier, so
+    /// `attestation` does not read as a reference to `attest`.
+    fn mentions_ident(haystack: &str, needle: &str) -> bool {
+        let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        haystack.match_indices(needle).any(|(at, _)| {
+            boundary(haystack[..at].chars().next_back())
+                && boundary(haystack[at + needle.len()..].chars().next())
+        })
+    }
+
+    /// Nothing in the crate reaches this module except the purchase path.
     ///
     /// This is the subtlest property in the module and the one a later change
     /// is most likely to break by accident, because adding "verify the contract
@@ -911,43 +1028,100 @@ mod tests {
     /// a program the user has already paid for, and a check that can refuse to
     /// start it is a revocation surface wearing an integrity check's clothes.
     /// The posture is structural - there is no shared helper and no flag - so
-    /// this test guards the structure rather than a default value.
+    /// what has to be guarded is the absence of a second caller.
+    ///
+    /// **It guards source structure, not runtime wiring.** It reads the crate's
+    /// own `src/` at test time, so it says exactly the same thing under
+    /// `tier-2` and `tier-2,webview`, where the call site is `cfg`-compiled out
+    /// and the gate never runs at all. It does not prove the gate runs, and the
+    /// behaviour it is paired with is
+    /// `tests/headless_e2e.rs::headless_launch_of_a_held_licence_never_enters_the_purchase_path_e2e`,
+    /// which drives a real launch of an already-held licence and asserts it
+    /// activates without minting.
+    ///
+    /// It guards every way in rather than one name: [`classify`], [`decide`]
+    /// and [`Verdict`] are as reachable as [`verify_before_purchase`], and a
+    /// launch-path caller written against any of them reintroduces the same
+    /// surface.
     #[test]
-    fn the_gate_is_wired_into_the_purchase_path_and_nowhere_else() {
+    fn the_attest_module_is_reachable_only_from_the_purchase_path() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut callers: Vec<(String, usize)> = std::fs::read_dir(&src)
-            .expect("the crate's own src directory is readable")
-            .map(|entry| entry.expect("readable directory entry").path())
-            .filter(|path| path.extension().is_some_and(|e| e == "rs"))
-            .filter_map(|path| {
-                let name = path.file_name()?.to_string_lossy().into_owned();
-                if name == "attest.rs" {
-                    return None;
-                }
-                let body = std::fs::read_to_string(&path).ok()?;
-                let mentions = body.matches("verify_before_purchase").count();
-                (mentions > 0).then_some((name, mentions))
-            })
+        let modules = rust_sources(&src);
+        assert!(
+            modules.iter().any(|(name, _)| name == "activation.rs"),
+            "the walk found no activation.rs, so it is not reading what it thinks it is"
+        );
+
+        let mut referencing: Vec<&str> = modules
+            .iter()
+            // `attest.rs` is this module, and `lib.rs` only declares it.
+            .filter(|(name, _)| name != "attest.rs" && name != "lib.rs")
+            .filter(|(_, body)| mentions_ident(&strip_line_comments(body), "attest"))
+            .map(|(name, _)| name.as_str())
             .collect();
-        callers.sort();
+        referencing.sort();
 
         assert_eq!(
-            callers,
-            vec![("activation.rs".to_string(), 1)],
-            "the pre-purchase gate must be called exactly once, from the purchase path in \
-             activation.rs, and from nowhere else.\n\n\
-             If this failed because a launch path now calls it: that is the one thing this \
-             module must not do. Refusing to start an already-paid-for licence because an \
-             integrity check could not complete is a de-facto revocation surface, which this \
-             project has ruled out. Fail closed on purchase, fail open on launch."
+            referencing,
+            vec!["activation.rs"],
+            "the attest module must be reached from the purchase path in activation.rs and from \
+             nowhere else in the crate.\n\n\
+             If this failed because a launch path now names it - through verify_before_purchase, \
+             classify, decide, Verdict or any other item - that is the one thing this module \
+             must not do. Refusing to start an already-paid-for licence because an integrity \
+             check could not complete is a de-facto revocation surface, which this project has \
+             ruled out. Fail closed on purchase, fail open on launch."
+        );
+
+        let gate_calls: usize = modules
+            .iter()
+            .filter(|(name, _)| name != "attest.rs")
+            .map(|(_, body)| {
+                strip_line_comments(body)
+                    .matches("verify_before_purchase")
+                    .count()
+            })
+            .sum();
+        assert_eq!(
+            gate_calls, 1,
+            "the gate must have exactly one call site in the crate, and it is the one in \
+             activation.rs::headless::purchase"
         );
     }
 
     /// Every pinned licence contract really is buyable, and every other role
-    /// really is not - asserted against the shipped table, not a synthetic one.
+    /// really is not - asserted by running the gate's decision over the shipped
+    /// table, not a synthetic one.
     #[test]
     fn only_licence_roles_are_purchase_targets() {
-        let licences = CANONICAL.iter().filter(|e| e.role == Role::Licence).count();
+        let mut licences = 0;
+        for entry in CANONICAL {
+            match (entry.role, decide(Verdict::Canonical(entry))) {
+                (Role::Licence, Ok(accepted)) => {
+                    assert_eq!(accepted.contract, entry.contract);
+                    licences += 1;
+                }
+                (
+                    role,
+                    Err(Refusal::NotALicence {
+                        contract,
+                        role: refused,
+                    }),
+                ) if role != Role::Licence => {
+                    assert_eq!(contract, entry.contract);
+                    assert_eq!(refused, role);
+                }
+                (role, outcome) => panic!(
+                    "{} is pinned as {role:?}; the gate must {}, got {outcome:?}",
+                    entry.contract,
+                    if role == Role::Licence {
+                        "accept it"
+                    } else {
+                        "refuse it as NotALicence"
+                    }
+                ),
+            }
+        }
         assert!(
             licences >= 2,
             "the table should pin both licence templates, found {licences}"

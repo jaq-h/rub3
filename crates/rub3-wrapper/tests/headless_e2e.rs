@@ -903,6 +903,79 @@ fn headless_refuses_a_contract_whose_code_is_not_canonical_e2e() {
     );
 }
 
+/// Launching a licence the agent already holds does not enter the purchase
+/// path, so it never runs the pre-purchase gate.
+///
+/// The posture the gate depends on is "fail closed on purchase, fail open on
+/// launch", built as two code paths rather than one helper with a flag. This is
+/// the launch half, driven for real: buy once (through the gate), wipe the
+/// cached session so the fast path cannot short-circuit anything, let the
+/// cooldown elapse, and run again. The second run reaches `activate()` with the
+/// token already held, reports `Activated` rather than `PurchasedAndActivated`,
+/// and mints nothing - `nextTokenId` is read through `cast`, not through the
+/// code under test.
+///
+/// **What this does not prove**: behaviour when the check *cannot complete*.
+/// Constructing that needs a licence contract whose code is deliberately not
+/// canonical, which means a Solidity change, and `contracts/` is off limits in
+/// this change because a separate lane is editing it. Recorded as follow-up
+/// work in `implementation.md` §2.6 under "Deliberately not built here".
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_launch_of_a_held_licence_never_enters_the_purchase_path_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    // Cooldown 15 blocks = the contract's enforced floor (MIN_COOLDOWN_BLOCKS).
+    let contract = deploy_access(PRICE_WEI, "0", "15");
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    // First run: the purchase path, which is the one that runs the gate.
+    let (bought, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a canonical contract must be buyable");
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { .. } => {}
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    let minted = cast_call_uint(&contract, "nextTokenId()(uint256)", &[]);
+    assert_eq!(
+        minted, 1,
+        "the first run should have minted exactly one token"
+    );
+
+    // Wipe the cached session so the second run cannot answer from disk: it has
+    // to go back on-chain, find the token already held, and activate it.
+    std::fs::remove_file(session_store::session_path(APP_ID, bought.token_id).unwrap())
+        .expect("remove cached session");
+
+    // The first activation started the cooldown; step past it.
+    mine(16);
+
+    let (relaunched, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a held licence must launch without going near the purchase path");
+
+    assert_eq!(
+        outcome,
+        HeadlessOutcome::Activated,
+        "the token is already held, so no purchase may run"
+    );
+    assert_eq!(
+        relaunched.token_id, bought.token_id,
+        "the same licence should be re-activated"
+    );
+    session::verify_local(&relaunched).expect("re-activated session must verify");
+    assert_eq!(
+        cast_call_uint(&contract, "nextTokenId()(uint256)", &[]),
+        minted,
+        "a launch must not mint a second token",
+    );
+}
+
 /// Re-activating inside the cooldown window must report the remaining blocks so
 /// a scheduler knows exactly how long to back off - and must succeed once the
 /// window has passed.
