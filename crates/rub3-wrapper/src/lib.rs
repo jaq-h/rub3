@@ -2,6 +2,12 @@ pub mod agent_env;
 pub mod license;
 pub mod store;
 
+// Pre-purchase contract attestation. Needs to read the chain, so it exists from
+// tier-2 up and compiles away entirely below that: a tier-0 or tier-1 build
+// never touches the chain, so it has nothing to attest.
+#[cfg(feature = "onchain-read")]
+pub mod attest;
+
 #[cfg(feature = "binary-encryption")]
 pub mod decrypt;
 #[cfg(feature = "device-key")]

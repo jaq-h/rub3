@@ -20,6 +20,15 @@
 //!
 //! Modelled on `session_onchain_e2e.rs`; deliberately a separate file with its
 //! own anvil port so the two can run side by side.
+//!
+//! **Every purchase here runs the §2.6 pre-purchase gate**, so every test that
+//! buys depends on the locally compiled `Rub3Access` reproducing
+//! `contracts/canonical-bytecode.json` byte for byte. If your Foundry resolves
+//! a different solc, the whole suite fails as `NotCanonicalContract` / exit 23
+//! rather than as the build mismatch it actually is. `contracts/foundry.toml`
+//! pins `solc_version`, `optimizer_runs`, `evm_version` and `bytecode_hash`;
+//! `scripts/canonical-bytecode-hashes.sh check` is what confirms the local
+//! build still matches.
 
 #![cfg(all(feature = "cooldown", feature = "headless"))]
 
@@ -333,6 +342,23 @@ fn eth_balance(who: Address) -> u128 {
         .trim()
         .parse()
         .expect("cast balance did not return a number")
+}
+
+/// The number of transactions `who` has ever sent, read through `cast`.
+///
+/// The measure of "no transaction was sent": a refusal that has already
+/// broadcast something moves this, whatever else it reports.
+fn tx_count(who: Address) -> u64 {
+    let who_hex = format!("0x{}", hex::encode(who.as_slice()));
+    let output = Command::new("cast")
+        .args(["nonce", &who_hex, "--rpc-url", &rpc_url()])
+        .output()
+        .expect("failed to run cast nonce");
+    assert!(output.status.success(), "cast nonce failed");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("cast nonce did not return a number")
 }
 
 /// Reads an ERC-20 balance through `cast`, independently of the wrapper's own
@@ -821,6 +847,152 @@ fn headless_sold_out_e2e() {
     }
     assert_eq!(err.exit_code(), 12);
     assert!(err.machine_detail().unwrap().contains("supply_cap=1"));
+}
+
+// ── Pre-purchase code attestation ─────────────────────────────────────────────
+
+/// A contract whose deployed code is not the rub3 template is refused before
+/// anything is signed, and no transaction leaves the wrapper.
+///
+/// The fixture is a real, working, fully deployed contract that simply is not a
+/// rub3 licence - which is the shape of the actual threat. A modified copy of
+/// the templates would present the same way: it answers the reads, it looks
+/// like a licence contract, and its masked code hash is in no pinned table.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_refuses_a_contract_whose_code_is_not_canonical_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    // Real deployed code that is not a rub3 licence contract.
+    let impostor = deploy_mock_usdc();
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    let nonce_before = tx_count(agent.address());
+    let balance_before = eth_balance(agent.address());
+
+    let err = ensure_headless(agent.signer.as_ref(), &ctx(&impostor, None))
+        .expect_err("code that matches no canonical fingerprint must not be bought from");
+
+    match &err {
+        HeadlessError::NotCanonicalContract { contract, .. } => {
+            assert_eq!(
+                contract.to_lowercase(),
+                impostor.to_lowercase(),
+                "the refusal must name the address it refused"
+            );
+        }
+        other => panic!("expected NotCanonicalContract, got {other:?}"),
+    }
+    assert_eq!(err.exit_code(), 23);
+
+    let detail = err
+        .machine_detail()
+        .expect("a refusal carries a detail line");
+    assert!(
+        detail.contains("code_bytes="),
+        "the detail line must say how much code was there: {detail}"
+    );
+
+    // The whole point: the gate runs before the first signature, so nothing was
+    // broadcast and no gas was burned.
+    assert_eq!(
+        tx_count(agent.address()),
+        nonce_before,
+        "a refusal must not send a transaction"
+    );
+    assert_eq!(
+        eth_balance(agent.address()),
+        balance_before,
+        "a refusal must not spend gas"
+    );
+}
+
+/// Launching a licence the agent already holds does not enter the purchase
+/// path, so it never runs the pre-purchase gate.
+///
+/// The posture the gate depends on is "fail closed on purchase, fail open on
+/// launch", built as two code paths rather than one helper with a flag. This is
+/// the launch half, driven for real: buy once (through the gate), wipe the
+/// cached session so the fast path cannot short-circuit anything, let the
+/// cooldown elapse, and run again. The second run reaches `activate()` with the
+/// token already held, reports `Activated` rather than `PurchasedAndActivated`,
+/// and mints nothing - `nextTokenId` is read through `cast`, not through the
+/// code under test.
+///
+/// **What this does not prove**: behaviour when the check *cannot complete*.
+/// Constructing that needs a licence contract whose code is deliberately not
+/// canonical, which means a Solidity change, and `contracts/` is off limits in
+/// this change because a separate lane is editing it. Recorded as follow-up
+/// work in `implementation.md` §2.6 under "Deliberately not built here". Nor
+/// can it separate "the launch path never runs the gate" from "it runs it and
+/// passes", since the fixture contract is canonical either way; that half is
+/// what `attest`'s reachability unit test covers.
+///
+/// It knowingly repeats the setup of the second half of
+/// [`headless_cooldown_active_then_ready_e2e`] - the overlap is the setup, not
+/// the assertions, which are the two `nextTokenId` reads. Kept separate on
+/// purpose: the fail-open property deserves its own name and its own failure,
+/// so it cannot be dropped silently when someone edits the cooldown test for an
+/// unrelated reason. The extra anvil spin-up is the accepted cost.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_launch_of_a_held_licence_never_enters_the_purchase_path_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    // Cooldown 15 blocks = the contract's enforced floor (MIN_COOLDOWN_BLOCKS).
+    let contract = deploy_access(PRICE_WEI, "0", "15");
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    // First run: the purchase path, which is the one that runs the gate.
+    let (bought, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a canonical contract must be buyable");
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { .. } => {}
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    let minted = cast_call_uint(&contract, "nextTokenId()(uint256)", &[]);
+    assert_eq!(
+        minted, 1,
+        "the first run should have minted exactly one token"
+    );
+
+    // Wipe the cached session so the second run cannot answer from disk: it has
+    // to go back on-chain, find the token already held, and activate it.
+    std::fs::remove_file(session_store::session_path(APP_ID, bought.token_id).unwrap())
+        .expect("remove cached session");
+
+    // The first activation started the cooldown; step past it.
+    mine(16);
+
+    let (relaunched, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a held licence must launch without going near the purchase path");
+
+    assert_eq!(
+        outcome,
+        HeadlessOutcome::Activated,
+        "the token is already held, so no purchase may run"
+    );
+    assert_eq!(
+        relaunched.token_id, bought.token_id,
+        "the same licence should be re-activated"
+    );
+    session::verify_local(&relaunched).expect("re-activated session must verify");
+    assert_eq!(
+        cast_call_uint(&contract, "nextTokenId()(uint256)", &[]),
+        minted,
+        "a launch must not mint a second token",
+    );
 }
 
 /// Re-activating inside the cooldown window must report the remaining blocks so

@@ -299,6 +299,25 @@ pub const EXIT_PURCHASE_UNCONFIRMED: i32 = 21;
 /// Never retried and never quietly worked around: the price exceeded a policy,
 /// which is a different thing from the network having failed.
 pub const EXIT_PRICE_ABOVE_POLICY: i32 = 22;
+/// The contract at the configured address is not one this build will buy a
+/// licence from, so nothing was bought from it. A refusal of the address, not a
+/// network failure: retrying reaches the same code.
+///
+/// Two causes, needing two different responses, told apart by which key the
+/// detail line carries:
+///
+/// - `contract=0x... canonical=<name> sells_licences=false` - the code *is*
+///   canonical rub3 code, but at an address that sells no licences (the factory
+///   or one of its deployer helpers). The build is pointed at the wrong
+///   address; check what it was packed with.
+/// - `contract=0x... code_bytes=N exposed=<a>|<b>` - the code matched no
+///   fingerprint this build pins. That is a modified copy, or a template
+///   release newer than this binary.
+///
+/// Neither is an accusation: `exposed` is a diagnostic naming what a blacklist
+/// of names happened to see, and a miss says the code is unrecognised here, not
+/// that it is malicious.
+pub const EXIT_NOT_CANONICAL_CONTRACT: i32 = 23;
 
 /// The exit-code table rendered for `--help`, so the contract is discoverable
 /// from the binary itself and not only from the docs.
@@ -335,6 +354,22 @@ child is the child's status and not an activation failure.
       anything is signed, so the rail was not exercised and this is no
       evidence it is otherwise usable. Not retryable: raise
       RUB3_AGENT_MAX_TOKEN_AMOUNT or do not buy
+  23  this build will not buy a licence from the contract at that
+      address. Checked before anything is signed, so no transaction was
+      sent and nothing was spent. Not retryable: the same address holds
+      the same code. Two causes, told apart by which key stderr
+      carries:
+        `contract=0x... canonical=NAME sells_licences=false` - the code
+          IS canonical rub3 code, at an address that sells no licences
+          (the factory, or a deployer helper). Wrong address: check
+          what this build is pointed at
+        `contract=0x... code_bytes=N exposed=A|B` - the code matched no
+          fingerprint this build pins: a modified copy, or a template
+          release newer than this binary. `exposed` is a
+          pipe-separated list, since a signature may contain commas,
+          and is `none` when the scan named nothing
+      Neither is an accusation: the scan is a diagnostic, and a miss
+      says the code is unrecognised here, not that it is malicious
 
 Signer sources, highest precedence first:
   RUB3_AGENT_KEY                        raw hex private key (dev / CI only)
@@ -372,6 +407,7 @@ mod headless {
     use super::*;
     use alloy::primitives::U256;
 
+    use crate::attest;
     use crate::tx::{self, TxError, TxPlan};
 
     /// Build-time facts the headless flow needs. Mirrors the webview's
@@ -601,6 +637,19 @@ mod headless {
             /// The payment token, when the rail has one.
             token: Option<String>,
         },
+        /// The contract at the configured address is not canonical rub3 code,
+        /// so this run refused to buy from it. Nothing was signed and nothing
+        /// was sent: the check runs before the first signature, because a
+        /// refusal that has already signed something is not a refusal.
+        ///
+        /// A refusal of *this address*, never retryable, and deliberately not
+        /// an accusation: it says the deployed code matched no entry this
+        /// build pins, which is equally what a legitimate contract released
+        /// after this wrapper was packed looks like.
+        NotCanonicalContract {
+            contract: String,
+            refusal: attest::Refusal,
+        },
         /// An operator-supplied configuration value could not be read. A hard
         /// stop rather than a guess: every reading of a malformed spend
         /// ceiling is wrong, and the wrong ones spend money.
@@ -682,6 +731,13 @@ mod headless {
                          refuses, so it is no evidence the rail is otherwise usable"
                     )
                 }
+                HeadlessError::NotCanonicalContract { contract, refusal } => write!(
+                    f,
+                    "refusing to buy from {contract}: {refusal}. Nothing was signed and no \
+                     transaction was sent. This build compares a contract's deployed code \
+                     against the canonical fingerprints it was packed with, and buys only on a \
+                     match; a contract released after this build was packed will also land here"
+                ),
                 HeadlessError::Config { var, detail } => {
                     write!(f, "invalid configuration: {var} {detail}")
                 }
@@ -715,6 +771,7 @@ mod headless {
                 HeadlessError::TokenNotOwned { .. } => EXIT_TOKEN_NOT_OWNED,
                 HeadlessError::PurchaseUnconfirmed { .. } => EXIT_PURCHASE_UNCONFIRMED,
                 HeadlessError::PriceAbovePolicy { .. } => EXIT_PRICE_ABOVE_POLICY,
+                HeadlessError::NotCanonicalContract { .. } => EXIT_NOT_CANONICAL_CONTRACT,
                 // No dedicated code: a malformed variable is an operator
                 // mistake to read on stderr, not a state an orchestrator
                 // branches on. It is still a hard stop.
@@ -773,6 +830,25 @@ mod headless {
                         format!("rail={rail} listed={listed} maximum={maximum} token={token}")
                     }
                     None => format!("rail={rail} listed={listed} maximum={maximum}"),
+                }),
+                // What the check actually saw, so an operator can tell "an
+                // address holding no contract" from "a contract that answers
+                // to seize(uint256)" without reading the chain again. The
+                // exposed list is a diagnostic and nothing more: an empty one
+                // is not a clean bill of health.
+                HeadlessError::NotCanonicalContract { contract, refusal } => Some(match refusal {
+                    attest::Refusal::Unrecognised(finding) => format!(
+                        "contract={contract} code_bytes={} exposed={}",
+                        finding.code_len,
+                        if finding.exposed.is_empty() {
+                            "none".to_string()
+                        } else {
+                            finding.exposed.join("|")
+                        }
+                    ),
+                    attest::Refusal::NotALicence { contract: name, .. } => {
+                        format!("contract={contract} canonical={name} sells_licences=false")
+                    }
                 }),
                 _ => None,
             }
@@ -989,6 +1065,36 @@ mod headless {
         contract: Address,
         wallet: Address,
     ) -> Result<(u64, PaymentRail), HeadlessError> {
+        // Is this contract the code we think it is? One `eth_getCode`, compared
+        // against the fingerprints this build was packed with.
+        //
+        // **First, before every other step in this function.** "Before
+        // `tx::send`" is not enough: `choose_rail` signs an EIP-3009
+        // authorization and hands it to the RPC endpoint as pre-flight
+        // calldata, and anyone may submit a `purchaseWithAuthorization`, so
+        // disclosure is the spend. A refusal that arrives after that has
+        // already paid. The ordering rule is the same one the spend ceiling
+        // follows, for the same reason.
+        //
+        // The gate fails closed, including on a chain read that did not
+        // complete: refusing to spend money on code that could not be verified
+        // is the correct default here. It is emphatically *not* the default on
+        // the launch path, which never calls this - see `attest`'s module docs.
+        let canonical =
+            attest::verify_before_purchase(&ctx.rpc_url, contract).map_err(|e| match e {
+                attest::GateError::Fetch(e) => HeadlessError::Rpc(e.to_string()),
+                attest::GateError::Refused(refusal) => HeadlessError::NotCanonicalContract {
+                    contract: crate::identity::format_addr(contract),
+                    refusal,
+                },
+            })?;
+        // One line, on the one path that spends money, naming what the money
+        // is about to go to. Mirrors the rail-fallback note below.
+        eprintln!(
+            "rub3: {contract} verified as canonical {} ({})",
+            canonical.contract, canonical.release
+        );
+
         let supply_cap = rpc::supply_cap(&ctx.rpc_url, contract)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
         let minted = rpc::next_token_id(&ctx.rpc_url, contract)
@@ -1333,6 +1439,7 @@ mod headless {
 #[cfg(all(test, feature = "headless"))]
 mod tests {
     use super::*;
+    use crate::attest;
     use crate::signer::SignerError;
 
     /// The exit-code contract is a public API: orchestrators branch on these
@@ -1402,6 +1509,16 @@ mod tests {
                 },
                 22,
             ),
+            (
+                HeadlessError::NotCanonicalContract {
+                    contract: "0x0000000000000000000000000000000000000abc".into(),
+                    refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
+                        code_len: 4096,
+                        exposed: vec!["seize(uint256)"],
+                    }),
+                },
+                23,
+            ),
         ];
 
         for (err, expected) in cases {
@@ -1427,6 +1544,7 @@ mod tests {
             EXIT_TOKEN_NOT_OWNED,
             EXIT_PURCHASE_UNCONFIRMED,
             EXIT_PRICE_ABOVE_POLICY,
+            EXIT_NOT_CANONICAL_CONTRACT,
         ];
         let mut sorted = codes.to_vec();
         sorted.sort_unstable();
@@ -1572,6 +1690,111 @@ mod tests {
             read.expect("a plain integer parses").max_token_amount,
             Some(alloy::primitives::U256::from(42u64)),
         );
+    }
+
+    // ── Pre-purchase attestation ─────────────────────────────────────────────
+
+    /// The refusal is legible to a human and parseable by an orchestrator, and
+    /// it names the function the pre-filter saw rather than saying only
+    /// "unrecognised code".
+    #[test]
+    fn a_non_canonical_contract_refusal_names_what_it_saw() {
+        let err = HeadlessError::NotCanonicalContract {
+            contract: "0x00000000000000000000000000000000000000ab".into(),
+            refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
+                code_len: 4096,
+                // `burn(address,uint256)` carries a comma of its own, which is
+                // the whole point: 10 of the 30 forbidden signatures do, so a
+                // comma-separated list is not recoverable by the orchestrator
+                // the detail line exists for.
+                exposed: vec!["seize(uint256)", "burn(address,uint256)", "pause()"],
+            }),
+        };
+
+        let message = err.to_string();
+        assert!(message.contains("seize(uint256)"), "{message}");
+        assert!(
+            message.contains("Nothing was signed"),
+            "the message must make it clear no money moved: {message}"
+        );
+
+        let detail = err
+            .machine_detail()
+            .expect("a refusal must carry a detail line");
+        assert!(detail.contains("code_bytes=4096"), "{detail}");
+
+        let exposed = detail
+            .split("exposed=")
+            .nth(1)
+            .expect("the detail line names the exposed list");
+        assert_eq!(
+            exposed.split('|').collect::<Vec<_>>(),
+            vec!["seize(uint256)", "burn(address,uint256)", "pause()"],
+            "splitting the field on its separator must recover the signatures \
+             whole, argument lists included: {detail}"
+        );
+    }
+
+    /// An empty pre-filter result is reported as `none` rather than as an empty
+    /// value, because `exposed=` reads like a truncated line and, worse, like a
+    /// clean bill of health. The scan proves nothing either way.
+    #[test]
+    fn a_refusal_with_nothing_to_name_still_reports_a_parseable_line() {
+        let err = HeadlessError::NotCanonicalContract {
+            contract: "0x00000000000000000000000000000000000000ab".into(),
+            refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
+                code_len: 0,
+                exposed: vec![],
+            }),
+        };
+        let detail = err.machine_detail().expect("still a detail line");
+        assert!(detail.contains("exposed=none"), "{detail}");
+        assert!(err.to_string().contains("no contract code"), "{err}");
+    }
+
+    /// Canonical code that sells nothing gets its own detail line: the operator
+    /// pointed the build at the factory, which is a different mistake from
+    /// pointing it at a modified copy, and the fix is different too.
+    #[test]
+    fn buying_from_the_factory_is_refused_as_the_wrong_address() {
+        let err = HeadlessError::NotCanonicalContract {
+            contract: "0x00000000000000000000000000000000000000ab".into(),
+            refusal: attest::Refusal::NotALicence {
+                contract: "Rub3Factory",
+                role: attest::Role::Factory,
+            },
+        };
+        assert_eq!(err.exit_code(), EXIT_NOT_CANONICAL_CONTRACT);
+        let detail = err.machine_detail().expect("a refusal carries a line");
+        assert!(detail.contains("canonical=Rub3Factory"), "{detail}");
+        assert!(detail.contains("sells_licences=false"), "{detail}");
+    }
+
+    /// Every classified exit code appears in the table the binary prints, so
+    /// `--help` and the code cannot drift apart.
+    #[test]
+    fn the_help_table_documents_every_classified_exit_code() {
+        for code in [
+            EXIT_SIGNER,
+            EXIT_INSUFFICIENT_FUNDS,
+            EXIT_SOLD_OUT,
+            EXIT_COOLDOWN_ACTIVE,
+            EXIT_ACTIVATION_FAILED,
+            EXIT_VERIFICATION_FAILED,
+            EXIT_RPC,
+            EXIT_PERSIST,
+            EXIT_HEADLESS_UNSUPPORTED,
+            EXIT_CHAIN_MISMATCH,
+            EXIT_TOKEN_NOT_OWNED,
+            EXIT_PURCHASE_UNCONFIRMED,
+            EXIT_PRICE_ABOVE_POLICY,
+            EXIT_NOT_CANONICAL_CONTRACT,
+        ] {
+            assert!(
+                EXIT_CODE_HELP.contains(&format!("  {code}  ")),
+                "exit code {code} is not documented in EXIT_CODE_HELP"
+            );
+        }
     }
 
     #[test]
