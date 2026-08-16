@@ -630,35 +630,9 @@ rub3-wrapper
 
 Key handling is contained rather than spread. Headless necessarily signs and broadcasts, which the interactive flows never do, so the capability lives behind one feature and one object-safe trait whose only primitive is "sign this 32-byte digest" - a KMS or enclave serves it without releasing a key. Exactly one type, `signer::LocalSigner`, ever holds raw key material. The launcher strips every `RUB3_AGENT_*` credential variable from the wrapped binary's environment - the key, the keystore path, and both password sources - so the licensed product is not handed the credential or its location. `agent_env::AGENT_ENV_VARS` is that list, and it is scoped to credentials rather than to the whole `RUB3_AGENT_*` family: `RUB3_AGENT_MAX_TOKEN_AMOUNT` is spend policy, not a secret, so it is deliberately not on it. The child still runs as the same UID, so this is containment, not a sandbox.
 
-#### Source layout (current)
+#### Source layout
 
-```
-crates/rub3-wrapper/
-├── src/
-│   ├── main.rs          - CLI entry point, app constants (APP_ID, CONTRACT, CHAIN_ID, RPC_URL, TIER)
-│   ├── lib.rs           - public module re-exports
-│   ├── license.rs       - tier 0 legacy proof schema + shared crypto helpers
-│   ├── session.rs       - session schema, message construction, signature verification
-│   ├── session_store.rs - session persistence ~/.rub3/sessions/
-│   ├── device.rs        - device keypair generation, storage, challenge-response (planned, tier 4)
-│   ├── decrypt.rs       - binary decryption, KEK derivation, in-memory exec (planned, tiers 3-4)
-│   ├── store.rs         - tier 0 proof persistence (~/.rub3/licenses/ or $RUB3_LICENSE_DIR)
-│   ├── activation.rs    - activation flow: fast paths, `ensure` (webview door), `ensure_headless` (agent door), exit codes
-│   ├── agent_env.rs     - names of the `RUB3_AGENT_*` credential vars, read by `signer` and stripped by `supervisor`
-│   ├── signer.rs        - `Signer` trait + `LocalSigner` (feature `headless`; the only holder of raw key material)
-│   ├── tx.rs            - EIP-1559 build/sign/broadcast for headless (feature `headless`)
-│   ├── rpc.rs           - on-chain queries (ownerOf, price, priceToken/priceAmount, cooldown, sessionId, chainId, receipt polling) + EIP-3009 authorization digests
-│   ├── supervisor.rs    - child process lifecycle, SIGTERM forwarding, strips `RUB3_AGENT_*` from the child
-│   └── webview.rs       - native activation window (wry/tao), JS↔Rust IPC (feature `webview`)
-├── assets/
-│   └── activation.html  - activation UI (connect, cooldown, tx-pending, sign, processing screens)
-└── tests/
-    ├── helpers/mod.rs   - test utilities (wallet gen, signing, license creation)
-    ├── integration.rs   - wrapper binary tests (exit codes, args, missing binary)
-    ├── license_e2e.rs   - static + dynamic license tests, SIGTERM forwarding
-    ├── session_onchain_e2e.rs - anvil-gated `verify_onchain` against a live chain
-    └── headless_e2e.rs  - anvil-gated agent path: fresh key → purchase → activate → persist → fast path
-```
+The per-module map lives in `README.md` → "Project structure", which is the single place it is maintained. It covers every module, including the two deferred scaffolds (`device.rs`, `decrypt.rs`) and everything `lib.rs` feature-gates.
 
 #### Dependencies
 

@@ -46,7 +46,9 @@ rub3/
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC message handling (feature `webview`)
 │       │   ├── supervisor.rs         # Child process lifecycle, SIGTERM forwarding, `RUB3_AGENT_*` stripped from the child
 │       │   ├── session.rs            # Session schema, message hash, verify_local, is_expired
-│       │   └── session_store.rs      # Session persistence, load_latest_session
+│       │   ├── session_store.rs      # Session persistence, load_latest_session
+│       │   ├── device.rs             # Device keypair scaffold (feature `device-key`, tier 4 - deferred)
+│       │   └── decrypt.rs            # Binary decryption scaffold (feature `binary-encryption` - deferred)
 │       ├── assets/
 │       │   └── activation.html       # Activation UI (address input, token select, signature)
 │       └── tests/
@@ -87,7 +89,8 @@ rub3/
 ├── architecture.md                   # System design, session model, security tiers
 ├── implementation.md                 # Phased development plan with status
 ├── ideation.md                       # Project vision and design principles
-└── testing.md                        # Manual testing guide
+├── testing.md                        # Test inventory and manual testing guide
+└── README.md                         # This file: orientation, build, test, run
 ```
 
 ## Rust dependencies

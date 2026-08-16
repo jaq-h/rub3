@@ -827,8 +827,11 @@ rub3/
 ├── architecture.md
 ├── implementation.md
 ├── ideation.md
-└── testing.md
+├── testing.md
+└── README.md
 ```
+
+The per-module map, including the deferred `device.rs` / `decrypt.rs` scaffolds, is in `README.md` → "Project structure".
 
 Planned (not yet created):
 
