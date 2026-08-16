@@ -1,5 +1,7 @@
 # Contract setup
 
+This file owns contract operations: the commands, environment variables, addresses, and runbooks for building, deploying, paying, migrating, and auditing rub3's contracts, including the mechanics of the protocol fee. Why the contracts are shaped this way is argued in [architecture.md](../architecture.md); what is built and what is planned is in [implementation.md](../implementation.md); the Solidity test inventory is in [testing.md](../testing.md).
+
 ## Prerequisites
 
 Install Foundry:
@@ -374,9 +376,11 @@ cast call <FACTORY> "isDeployed(address)(bool)" <LICENCE> --rpc-url $RPC
 
 The fee runs on-chain inside `purchase()` and `renew()`, on **both** payment rails, and it is the same rule on each: `feeBps` of *what arrived* to the treasury, the remainder to the developer.
 
-- **On the amount received, not the listed price.** Charging the listed price would leave the fee trivially avoidable: list at zero, publish a client that pays the real price as "overpayment", collect it all through `withdraw` and pay nothing. It also makes the arithmetic exact by construction - the two shares are the payment, with no rounding left over anywhere.
-- **Rounding favours the developer.** Integer division, so a fee that comes to less than one wei (or one of the token's smallest units) is zero and the whole payment is the developer's. Never the other way: a fee that rounded up could exceed the payment at the smallest amounts.
-- **Accrued, not pushed.** The fee is held in the contract and swept separately rather than transferred to the treasury inside the purchase. `treasury` is immutable, so a push on the money path would mean a recipient that reverts on receipt - or that one day costs more gas than a buyer sent - breaks every purchase on that contract forever, unfixably. Accruing keeps the buyer's path free of calls out; a collection failure is rub3's problem, not the buyer's.
+- **On the amount received, not the listed price.** ETH: `msg.value`. Stablecoin: the measured balance delta. A zero-price listing paid as "overpayment" is still charged.
+- **Rounding favours the developer.** Integer division, so a fee below one wei (or one of the token's smallest units) is zero and the whole payment is the developer's.
+- **Accrued, not pushed.** The fee is held in the contract and swept separately rather than transferred to the treasury inside the purchase, so nothing on the buyer's path calls out.
+
+Why each of those three is load-bearing rather than incidental is argued in `architecture.md` → "Why the fee split is shaped this way".
 
 The two balances are disjoint and neither side can reach the other's:
 
@@ -393,7 +397,7 @@ The two fee sweeps are permissionless because their destination is immutable: th
 
 So a developer knows exactly where they stand: **the fee is charged on value that arrives through the contract's payment functions** - `purchase`, `purchaseWithAuthorization`, `renew`, `renewWithAuthorization`. Value that reaches the contract any other way is never accrued against, and `withdraw` / `withdrawToken` release it in full to the developer. Concretely, that means a direct ERC-20 `transfer` to the licence contract, a `selfdestruct` beneficiary, and a coinbase payout: nothing was taken on them, so all of it is the developer's.
 
-This is a deliberate, reasoned position on where the fee's scope ends, not an implementation gap. The fee is an economic argument, not a technical lock. A developer who wants to route around it can already take payment entirely off-chain and list the licence at zero, so tightening the on-contract case would close nothing. What the fee is *intended* to buy is distribution, verification, and liquidity - see "The accepted position on fee-free deployment" below for what that row buys today versus what is still planned. Charging on unaccounted balance was considered and rejected: it would take a cut of mistaken transfers and airdrops, which are not revenue, and would quietly change what the fee means. `test_token_unaccruedBalanceSweepsEntirelyToTheDeveloper` pins the behaviour.
+This is a decided position on where the fee's scope ends, not an implementation gap: charging on unaccounted balance would take a cut of mistaken transfers and airdrops, which are not revenue. `test_token_unaccruedBalanceSweepsEntirelyToTheDeveloper` pins the behaviour. The argument for treating the fee as economic rather than technical is in `architecture.md` → "Why the fee split is shaped this way"; what the factory row buys today versus what is still planned is in "The accepted position on fee-free deployment" below.
 
 ```bash
 # Settle both halves of a sale.

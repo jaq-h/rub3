@@ -1,5 +1,7 @@
 # rub3 - Implementation Plan
 
+This file owns the roadmap and the build record: what exists, what is next, and what was decided or rejected along the way. Its `[complete]` / `[partial]` / `[not started]` tags are the authority on what is built. Design rationale lives in [architecture.md](architecture.md), contract operations and fee mechanics in [contracts/contracts.md](contracts/contracts.md), the per-suite test inventory in [testing.md](testing.md), positioning in [ideation.md](ideation.md), and orientation in [README.md](README.md).
+
 > **Plan revision - July 2026 (agent-first reorientation).**
 > Everything below Phase 1 has been resequenced around a single thesis: agents will do an increasing share of software development, deployment, and purchasing, and they need to buy, verify, run, and resell locally executed software - low cost, high speed, secure payments - with no human in the loop.
 >
@@ -10,7 +12,7 @@
 > - **The token is the invariant.** No proxies, no revocation surface, no pause on validation. Evolution only changes what is offered going forward, never what was granted (§2.4).
 > - **Distribution completes the loop.** `contentURI` on-chain + `rub3 fetch` + hash verification = discover → pay → fetch → verify → run (§3.1).
 > - **Seats, not devices.** Fleet concurrency is licensed as K on-chain seats per token (§3.4). Tier-4 device binding and binary encryption move to Deferred.
-> - **Human UX polish is demoted, not dropped.** WalletConnect tabs (§1.10), the Preact refactor, and the Tauri plugin move to Phase 5.
+> - **Human UX polish is demoted, not dropped.** WalletConnect tabs (§5.1), the Preact refactor, and the Tauri plugin move to Phase 5.
 >
 > Phase 1 sections below are the build record of what exists today. They are corrected in place when a later phase supersedes a fact, with the pointer to the section that superseded it; §2.4 carries the removal record for everything the ownership invariants took out.
 
@@ -39,7 +41,7 @@ Goal: A working wrapper that gates a Rust binary behind wallet ownership, using 
 - Screens: connect (address input) → token-select (when multiple tokens owned) → activate (message + signature input) → processing
 - Activate screen surfaces the exact `personal_sign` preimage (hex) so the user knows what to sign in their wallet
 - **Done:** manual wallet address input, `tokensOfOwner()` enumeration, multi-token selection UI, activation message display, manual signature paste, proof storage on success
-- **Not yet done:** WalletConnect integration - tracked as §1.10b (requires WC v2 JS SDK + developer-supplied project ID)
+- **Not yet done:** WalletConnect integration - tracked as §5.1b (requires WC v2 JS SDK + developer-supplied project ID)
 
 ### 1.4 - On-chain queries `[complete]`
 - `rpc.rs`: `ownerOf(tokenId)`, `price()`, `balanceOf(owner)`, `tokenOfOwnerByIndex(owner, index)` via alloy JSON-RPC with minimal ABI (`IRub3License`)
@@ -140,7 +142,7 @@ surfaces it to the user, and polls the receipt they paste back.
 
 **Deferred**
 - Refactor `activation.html` to Preact (vendored `preact.mjs` + `htm.mjs`, custom-protocol handler via `include_dir` - no Node/build step). Tracked as §5.2.
-- Replace the "paste your tx hash" box with auto-detect + WalletConnect tabs while keeping manual paste as the fallback floor. Tracked as §1.10.
+- Replace the "paste your tx hash" box with auto-detect + WalletConnect tabs while keeping manual paste as the fallback floor. Tracked as §5.1.
 
 **Verification**
 - `cargo test -p rub3-wrapper --lib` (default tier-2): 57 pass (up from 51)
@@ -186,7 +188,7 @@ function cooldownReady(uint256 tokenId)
 - ActivateTxSent handler: spawns a background polling thread (10 × 3s; 30s total timeout) calling `get_tx_receipt`; on confirmation asserts `receipt.to == contract` and `status == true`, reads `activeSessionId`, mints a `new_nonce()`, computes `expires_at` from `SESSION_TTL_SECS`, builds the session message, and emits `onTxConfirmed`
 - SessionSigned handler: assembles `Session` (tier-3 fields populated from echoed state), calls `verify_local`, sends `ActivationResult::SessionSuccess`
 - `activation.rs::ensure` - tries three paths in order: (1) tier-3 session fast path (`load_latest_session` → `verify_local`), (2) legacy proof fast path, (3) webview. Takes a new `session_ttl_secs` param threaded through from `main.rs` (`SESSION_TTL_SECS = 7 days`). On `SessionSuccess` persists via `session_store::save_session`.
-- `assets/activation.html` new screens: `cooldown` (shows calldata + tx-hash input with per-block-remaining banner when cooldown is active), `sign-session` (shows tx hash / block / session id / session message, captures signature). JS tracks `pendingSessionCtx` across the cooldown → tx-confirm → sign-session flow and echoes it back in `session_signed`. The tx-hash input is the "manual paste" path today; the richer auto-detect and WalletConnect tabs layered on top are tracked as §1.10.
+- `assets/activation.html` new screens: `cooldown` (shows calldata + tx-hash input with per-block-remaining banner when cooldown is active), `sign-session` (shows tx hash / block / session id / session message, captures signature). JS tracks `pendingSessionCtx` across the cooldown → tx-confirm → sign-session flow and echoes it back in `session_signed`. The tx-hash input is the "manual paste" path today; the richer auto-detect and WalletConnect tabs layered on top are tracked as §5.1.
 
 **Phase C - verification hardening `[complete]`**
 - `session::verify_onchain(session, rpc_url)` (gated on `cooldown`) - fetches the activation tx receipt and confirms `status == true`, `receipt.to` matches `session.contract`, `receipt.block_hash` matches `session.activation_block_hash`. Each failure mode has a dedicated `VerifyError` variant (`MissingTxHash`, `MissingBlockHash`, `Rpc`, `ReceiptNotFound`, `TxReverted`, `ContractMismatch`, `BlockHashMismatch`)
@@ -233,71 +235,6 @@ Branch: `feature/tier-scaffold`. The wrapper is a single crate with Cargo featur
 - `decrypt.rs` - gated on `binary-encryption`; KEK derivation, AEK unwrap, AES-256-GCM decrypt, in-memory exec (`memfd_create`/`fexecve` on Linux, `$TMPDIR` 0700 + unlink on macOS, `CreateFileMapping` on Windows)
 
 All five tier bundles + `binary-encryption` composition compile clean. The 15 existing lib tests pass under default features. The scaffold establishes the wiring; tier 3 behavior is implemented in §1.8, tier 4 and binary encryption in later phases.
-
-### 1.10 - Frictionless tx confirmation `[not started - demoted to Phase 5]`
-
-> **Plan revision:** this work now lands as §5.1, after the agent-native core. The manual-paste floor already works and stays reachable forever; richer confirmation modes are human-surface polish. The specs below (§1.10, §1.10a, §1.10b) apply unchanged when picked up.
-
-The purchase (§1.7) and activate (§1.8) flows currently ask the user to paste a transaction hash back into the webview after sending from their wallet. That manual-paste path is our robust fallback - it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
-
-**Three modes, in order of preference:**
-
-| Mode | Project ID | JS bundle | Offline tolerant | Relies on |
-|---|---|---|---|---|
-| `wallet-connect` | required (dev-supplied) | ~255 KB vendored | no | Reown relay + chain RPC |
-| `auto-detect` | none | none | no | chain RPC only |
-| `manual` (§1.7, §1.8) | none | none | yes (paste later) | user copy/paste |
-
-The three modes surface as three tabs on the cooldown / purchase screens. The default tab at render time is the highest-capability one available for the current build:
-- WalletConnect tab visible when the `wallet-connect` feature is compiled in **and** the developer supplied a non-placeholder `wc_project_id`
-- Auto-detect tab visible when `onchain-write` is on (always true for tier 3+, which is the only tier that reaches these screens)
-- Manual tab always visible
-
-Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate_tx_sent`) - the downstream poller/finalize path from §1.7 and §1.8 Phase B is untouched. This keeps auto-detect and WalletConnect as pure front-door improvements rather than new branches in the session pipeline.
-
-### 1.10a - RPC auto-detect `[not started]`
-
-**Rationale.** Many embedded-app developers will never configure WalletConnect - they may not want the relay dependency, may not want to register with Reown, or may be shipping internal / CLI-adjacent tools. Auto-detect gives those deployments a one-click confirm path without adding any JS or external service.
-
-**How it works.**
-- Purchase: poll `eth_getLogs` for the ERC-721 `Transfer(0x0, wallet, *)` topic signature (already constant in `rpc.rs` as `ERC721_TRANSFER_SIG`) filtered by `address == contract`, starting from the block the user opened the screen. First match wins → its tx hash feeds the same `purchase_tx_sent` handler as manual.
-- Activate: poll `lastActivationBlock(tokenId)` (already in `rpc.rs`); when it advances past the starting block, resolve the block's receipts and pick the one whose `to == contract && from == wallet`. That receipt's tx hash feeds `activate_tx_sent`.
-- Poll cadence: 3 s, same as `spawn_tx_poller` / `spawn_purchase_poller`. Total budget configurable, default 120 s (longer than manual because the user is broadcasting the tx in-wallet during this window). Falls back to the Manual tab (pre-populated with helpful copy) on timeout or repeated RPC error.
-
-**Rust additions (`rpc.rs`)**
-- `pub fn watch_for_mint(rpc_url, contract, recipient, from_block, deadline) -> Result<String, RpcError>` - polls `eth_getLogs` with the `Transfer(0x0, recipient, *)` filter; returns the tx hash.
-- `pub fn watch_for_activate(rpc_url, contract, token_id, from_block, deadline) -> Result<String, RpcError>` - polls `lastActivationBlock`; on delta, resolves the tx hash via `eth_getBlockByNumber` + receipt scan.
-
-**Webview wiring**
-- New IPC variants (gated on `onchain-write`): `AutoWatchStart { kind: "mint" | "activate", … }`, `AutoWatchCancel`. `webview.rs` spawns a `thread::spawn` running the watcher; on success the watcher routes its hash through the same internal dispatch as `purchase_tx_sent` / `activate_tx_sent` - no JS round-trip, no duplicated handlers.
-- Existing purchase / cooldown / session handlers unchanged.
-
-**HTML**
-- Tabs in `#screen-purchase` and `#screen-cooldown`: `[WalletConnect] [Auto-detect] [Manual]`. The auto-detect body is a spinner + "Waiting for your wallet to broadcast the tx…" copy and a "Switch to manual" link.
-
-**Gating.** `onchain-write` (already required by §1.7 / §1.8). No new Cargo feature. Pure additive - tier 3+ builds pick it up automatically.
-
-### 1.10b - WalletConnect v2 `[not started]`
-
-**Scope.** The developer opts in per deployment by supplying a `wc_project_id` (obtained from cloud.reown.com). No single rub3-wide project ID - project IDs are the abuse / rate-limit boundary, and branding (the wallet QR prompt shows the dApp name) should reflect the embedded app, not rub3.
-
-**Rust additions**
-- `ActivationContext` (the `main.rs` constants struct) gains `wc_project_id: Option<&'static str>`. Missing or placeholder → WC tab is hidden. Default in the wrapper's own dev builds is `None`, not a shared project ID - `rub3 pack` (§2.5) rejects a distributable that inherits a placeholder value.
-- Feature flag `wallet-connect` on the wrapper crate - opt-in because of the vendored JS weight. Composes with `onchain-write`; does not change tier bundle definitions (developer picks `tier-3,wallet-connect` at pack time).
-- `webview.rs::show_purchase` / `show_cooldown` include the project id in the `onShowPurchase` / `onShowCooldown` payload when the feature is compiled in; JS decides whether to render the tab based on its presence.
-
-**Assets (`assets/vendor/`)**
-- `walletconnect-sign-client.mjs` - Reown SignClient v2 bundle (~250 KB).
-- `qrcode.mjs` - ~5 KB QR-from-URI renderer.
-- Both served by the same `include_dir!` custom-protocol handler introduced in §5.2 (Preact refactor); if §5.2 has not landed yet, this section creates that handler.
-
-**Assets (`assets/app/`)**
-- New `wc.js` - init `SignClient`, open a session via `chains: ["eip155:<chain_id>"]`, render the pairing URI as an inline QR, call `client.request({ method: "eth_sendTransaction", params: [{ to, data, value }] })` to dispatch either the purchase or activate tx. Returns the tx hash through the existing `purchase_tx_sent` / `activate_tx_sent` IPC message - reusing the rest of the pipeline.
-
-**HTML**
-- WC tab body: the vendored QR canvas, a "copy pairing URI" fallback, and error copy that suggests falling back to Auto-detect or Manual.
-
-**Gating recap.** `wallet-connect` Cargo feature + developer-supplied project id. Both must be present for the tab to render; either absent → the tab is silently omitted and the user sees a 2-tab (or 1-tab) screen.
 
 **Phase 1 deliverable:** A wrapped binary that requires wallet ownership + session signature to run, with session caching, on-chain cooldown enforcement (tier 3), and automatic re-activation on expiry.
 
@@ -393,22 +330,15 @@ without `activate()` + cooldown + purchase), so `--features headless` and
 | 21 | purchase broadcast but not confirmed (timeout or receipt-poll transport failure) - terminal, `tx_hash=0x...` on stderr |
 | 22 | the listed price is above the configured spend ceiling - terminal, `rail=... listed=... maximum=... token=0x...` on stderr (§2.2) |
 
-**Tests**
-- `signer.rs`: 20 tests - hex accepted bare/prefixed/whitespace-padded, rejected for wrong length, non-hex, and out-of-range scalars (zero and above the curve order); `Debug` redaction and error messages asserted **not** to echo the input; `personal_sign` round-trips through `license::recover_address`; `sign_prehash` recovers the signer address; RFC-6979 determinism; env-over-keystore precedence; no fall-through on a malformed env key; keystore decrypt via a keystore written in-test; password-file preferred over the inline var, trailing newline stripped; wrong password opaque and not echoed; missing file/password reported
-- `tx.rs`: 7 tests - invalid-URL transport error, the `insufficient funds` classifier (match, case-insensitive, pass-through, and carrying no amounts because it only matched a string), and the amounts appearing in the message when they are known, plus the price-only shortfall stating that it excludes gas
-- `activation.rs`: 18 tests - the full exit-code table asserted value-by-value, all classified codes distinct and disjoint from 0/1/2, `machine_detail` contents for cooldown/funds/sold-out, no detail line for unclassified failures or for a node-reported shortfall with unknown amounts, a price-only shortfall labelled as excluding gas on both surfaces, a malformed contract classified as terminal rather than retryable, `lowest_token` picking the minimum of an unsorted owned set, the token-scoped fast path reusing the requested token's own session when another token's is newer and rejecting one whose signed token id disagrees with the file it came from, each wallet reusing its own cached session when a different key activated more recently while a key with none cached still misses, an unconfirmed purchase mapping to the terminal code 21 with its tx hash on the detail line for **both** receipt-wait outcomes (timeout and transport failure) with the transport reason surfaced in the message, and `TxError → HeadlessError` code mapping
-- `rpc.rs`: 7 new tests - a transport-error test for `chain_id()`, plus the receipt poll loop driven over scripted answers (a transient failure does not end the wait, a failure that outlasts the budget is reported as `Transport`, a poll that recovers ends as `Timeout`, a request that can never succeed is reported at once rather than consuming the budget, `wait_for_receipt` itself returns on an unparseable hash without waiting, and both outcomes report real wall-clock waiting time rather than the nominal `attempts x interval` budget). `RpcError` gained `InvalidInput` plus `is_retryable()`, so a malformed argument is classified apart from a network failure instead of being labelled `Transport`
-- `supervisor.rs`: 3 tests - the wrapped binary's own reported environment carries none of the `RUB3_AGENT_*` credential variables, for the raw-key source, the keystore-plus-password-file source, and all sources set at once
-- `tests/headless_e2e.rs` (new, anvil-gated, `#[ignore]`, zero webview involvement - the test binary links neither `wry` nor `tao`): 7 tests, each on a **freshly generated key** resolved through the real `RUB3_AGENT_KEY` path with an isolated `RUB3_SESSION_DIR`. Happy path funds the key, purchases at a non-zero price (0.01 ETH, so the value-transfer and balance paths are actually exercised), activates, and asserts ownership, `nextTokenId`, every session field, `verify_local`, `verify_onchain`, on-disk persistence, then **relaunches and asserts `Reused` with no new mint**. Plus: insufficient funds (11), sold out against a supply cap of 1 (12), cooldown active reporting `blocks_remaining` then succeeding after `anvil_mine` with `session_id` bumped to 2 (13), explicit `--token-id` not owned minting nothing (20), explicit `--token-id` refusing to reuse a cached session minted for a different token (20), and chain-id mismatch refused before signing (19). Skips gracefully when Foundry is absent, matching `session_onchain_e2e.rs`. Runs on port 8549 so both suites can run side by side, and serialises its own tests through a file-level mutex covering the port and the process-global env vars, so no `--test-threads=1` is required; `session_onchain_e2e.rs` was not modified
+**Tests** - lib tests 62 under the default bundle (up from 58), 72 under tier-3 (up from 62), 117 under `tier-3,headless`; wrapper e2e 7, all new. New unit coverage: `signer.rs` 20, `activation.rs` 18, `tx.rs` 7, `rpc.rs` 7 receipt-poll tests, `supervisor.rs` 3. `tests/headless_e2e.rs` is new (anvil-gated, `#[ignore]`, zero webview involvement - the test binary links neither `wry` nor `tao`), on port 8549 so it runs alongside `session_onchain_e2e.rs`, self-serialising through a file-level mutex so no `--test-threads=1` is required. Per-test inventory: `testing.md` → "Unit tests (in `src/`)" and "Headless (agent) E2E (`tests/headless_e2e.rs`)".
+
+`RpcError` gained `InvalidInput` plus `is_retryable()` in the same pass, so a malformed argument is classified apart from a network failure instead of being labelled `Transport`.
 
 **Verification**
-- `cargo test -p rub3-wrapper --lib` (default tier-2 + webview): 62 tests, up from 58 (61 pass, 1 ignored network test)
-- `cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib`: 72 tests, up from 62 (71 pass, 1 ignored)
-- `cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib`: 117 tests (116 pass, 1 ignored)
-- All five tier bundles (`tier-0`/`1`/`2`/`3`/`4`) compile clean, plus `headless` alone, `tier-3,headless` and `tier-2,webview`. CI's matrix covers both front doors: `tier-3,headless` and `tier-2,webview` are blocking jobs, so neither door can break green
+- All five tier bundles (`tier-0`/`1`/`2`/`3`/`4`) compile clean, plus `headless` alone, `tier-3,headless` and `tier-2,webview`. CI's matrix covers both front doors as blocking jobs, so neither door can break green
 - **No GUI in a headless build**: `cargo tree --no-default-features --features tier-3,headless` contains neither `wry` nor `tao`, nor any of the 20 GUI crates the webview build pulls (`cocoa`, `core-graphics`, `objc`, `dpi`, `raw-window-handle`, …). On macOS the release binary links no WebKit, AppKit, QuartzCore, or `libobjc` - only `Security`, `CoreFoundation`, `libiconv`, `libSystem`
-- Anvil-gated headless e2e: 7 pass, run without `--test-threads=1`, and now run in CI as a second step of the existing `onchain-e2e` job. Existing `session_verify_onchain_e2e` still passes untouched
-- `cargo clippy -p rub3-wrapper --all-targets -- -D warnings`: exit 0 under the default bundle and under `tier-0`/`1`/`2`/`3`/`4`, `tier-3,binary-encryption`, `tier-2,webview` and `tier-3,headless`. The six warnings `main` carried are fixed at the root, so CI's lint job now runs clippy as a blocking gate. `cargo fmt --all -- --check` is clean on every file except `tests/session_onchain_e2e.rs`, which §2.4 owns and is reformatting, so that step stays advisory until §2.4 lands
+- Anvil-gated headless e2e: 7 pass without `--test-threads=1`, and now run in CI as a second step of the existing `onchain-e2e` job. Existing `session_verify_onchain_e2e` still passes untouched
+- `cargo clippy -p rub3-wrapper --all-targets -- -D warnings`: exit 0 on all eight bundles. The six warnings `main` carried are fixed at the root, so CI's lint job now runs clippy as a blocking gate
 
 **Deferred to §2.2**
 - USDC via EIP-3009. The headless purchase path shipped here ETH-only; §2.2 below, now complete, adds `purchaseWithAuthorization` and has headless prefer it when the contract advertises it
@@ -501,12 +431,10 @@ The same two extra values pushed `Deploy.run()` itself over the stack limit, so 
 
 **Tests** - 131 forge tests, up from 90; wrapper e2e 18, up from 7
 
-- `test/Rub3TokenPurchase.t.sol` (new): 41 tests. The buyer is funded with stablecoin and left at a zero ETH balance in every one of them, and a separate submitter sends every transaction. Replay of a used authorization; the same salt against a different recipient; a front-runner trying to divert the mint, then trying to strip it by calling the token directly, then trying `receiveWithAuthorization` itself; an authorization submitted at the wrong contract, as the wrong intent (purchase-as-renewal), and against the wrong token id; expired, not-yet-valid, and cancelled windows; a price move after signing rejecting rather than overcharging; the silent token proving the balance-delta check; the constructor probes; both rails minting identically on both contracts; supply cap on the new rail; recipient defaulting to the buyer and not the submitter; a gift purchase; subscription snapshots frozen on both rails across a repricing; a token minted before the rail existed renewing in ETH only; §2.4's mint-ordering guarantee re-checked from inside `onERC721Received` on the new path; an EIP-1271 smart-contract wallet buying a licence and renewing a subscription out of its own token balance with no key of its own, and the negative - a signature that wallet rejects mints nothing and moves nothing; and a conforming split-signature-only EIP-3009 token deploying onto a licence contract and then being unspendable, proven to be about the missing overload and nothing else: the authorization is signed against that token's own EIP-712 domain, the revert carries no data rather than a rejected signature, the very same signed fields then spend successfully through the split form the token does implement, and the identical authorization shape mints against the mock, with the ETH rail on that same contract still selling
-- `rpc.rs`: 5 new unit tests for the authorization digest and calldata - the typehash against its literal preimage, the digest against a vector computed independently with `cast`, every signed field proving it changes the digest, the calldata selector, and the signature reaching the calldata verbatim at 65 bytes and at 200, which is what lets an EIP-1271 signature of any length through the same entry point
-- `tests/headless_e2e.rs`: 11 new anvil tests - a purchase on the stablecoin rail (asserting exactly `priceAmount` left the wallet in USDC, that it arrived at the contract, and that the ETH spent is gas only, orders of magnitude under the listed ETH price); ETH when the agent holds no USDC; ETH when no spend ceiling is configured (funded agent, advertised rail, nothing but the missing configuration selects ETH); a price above the ceiling refused with exit 22 having minted nothing and left the agent's ETH balance untouched, so the refusal cannot have become an ETH purchase; **the same refusal driven through a `Signer` delegate that counts `sign_prehash` calls, asserting exactly zero** - the exit code alone cannot tell a refusal that signed nothing from one that signed and disclosed a spendable authorization first, which is the regression that assertion pins; **the same contract and the same ceiling with a wallet holding none of the token, which must succeed on `PaymentRail::Eth`** - the pair that proves the ceiling only refuses a purchase that would otherwise have happened, and the pair a future reordering is most likely to collapse into one; ETH against a payment token that passes the constructor probe but exposes no `DOMAIN_SEPARATOR()` (fixture: `NoDomainSeparatorEIP3009Token`); ETH against a conforming EIP-3009 token that implements only the split-signature form, priced exactly at the ceiling so it clears policy and only the pre-flight catches it (fixture: `NoSignatureOverloadEIP3009Token`); an unreachable endpoint, which also asserts directly that `erc20_balance_of` and `token_domain_separator` classify a dead socket as transport; and two runs through a proxy that relays every call to anvil except one - the payment token's `balanceOf`, then its `DOMAIN_SEPARATOR()` - whose connection it closes unanswered. Those two are what actually exercise the "a blinking node must never silently change the currency" branch: delete either `is_transport` arm from `choose_rail` and the run selects ETH and succeeds, so the test fails. Balances are read with `cast`, not through the code under test
-- `rpc.rs`: 8 further unit tests for the rail-detection classifier, driving `stablecoin_rail` and `preflight_purchase_with_authorization` against a local stub endpoint, one fixed response body each. A JSON-RPC error body (rate limit, execution timeout) and an undeserializable body are node failures and propagate; a revert (code 3, and -32000 with revert wording) and empty return data are settled answers meaning "ETH only". The classification lives in one `classify_call_error` used by all three token-side reads, because it is what now decides fall-back versus hard-error for each of them
-- `activation.rs`: 6 new unit tests for `SpendPolicy` - an unset ceiling yielding `NoCeiling` rather than unlimited, the ceiling being inclusive at the boundary, the refusal carrying listed/maximum/token on both surfaces, zero being a real ceiling rather than "unset", every malformed value (`abc`, `-1`, `5.0`, `1e6`, blank, `5000000usdc`) a hard `Config` error naming the variable, and `from_env` reading the documented variable
+- `test/Rub3TokenPurchase.t.sol` (new): 41 tests on the stablecoin rail, every one of them with the buyer holding stablecoin at a zero ETH balance and a separate submitter sending the transaction
+- Wrapper side: 5 new `rpc` tests for the authorization typehash, digest and calldata; 8 `rpc::stub_node_tests` for the rail-detection classifier, driven against a local stub endpoint; 6 `activation` tests for `SpendPolicy`; 11 new anvil tests in `tests/headless_e2e.rs`, two of which relay every call to anvil except one token read whose connection they close unanswered, which is what actually exercises "a blinking node must never silently change the currency"
 - All 90 pre-§2.2 forge tests pass with their bodies unchanged; only constructor fixtures moved, to the `SaleTerms` tuple
+- Per-test inventory: `testing.md` → "Solidity suite" and "Headless (agent) E2E (`tests/headless_e2e.rs`)"
 
 **Verification**
 - `forge test`: 131 pass, 0 failed
@@ -538,7 +466,7 @@ Validation splits by who is being protected. `Rub3License` rejects `feeBps > 100
 
 `_accrueFee(token, amount)` is called from `_payEth` and `_payWithAuthorization`, the two functions §2.2 shaped for exactly this, and from nowhere else. §2.2's prediction held: no entry point, no mint path, and no test fixture had to be restructured a second time.
 
-Charging the *listed* price instead would have left the fee trivially avoidable - list at zero, publish a client that pays the real price as "overpayment", collect it through `withdraw`, pay nothing - so the fee is taken on `msg.value` on the ETH rail and on the measured balance delta on the stablecoin rail. That also makes the arithmetic exact by construction rather than by argument: the two shares *are* the payment. Rounding is integer division and therefore favours the developer; a fee that rounded up could exceed the payment at the smallest amounts.
+Charging the *listed* price was the alternative and it is trivially avoidable, so the fee is taken on `msg.value` on the ETH rail and on the measured balance delta on the stablecoin rail, with rounding by integer division in the developer's favour. Why those two properties are load-bearing: `architecture.md` → "Why the fee split is shaped this way".
 
 **Accrued, not pushed** - `Rub3License.sol`
 
@@ -546,18 +474,13 @@ Charging the *listed* price instead would have left the fee trivially avoidable 
 
 Transferring the fee inside `purchase()` was the obvious alternative and it is unfixably fragile: `treasury` is immutable, so a recipient that reverts on receipt - or that one day costs more gas than a buyer sent - would break every purchase on that contract forever. Accruing keeps the buyer's money path free of calls out, and a collection failure becomes rub3's problem rather than the buyer's. `test_accrual_rejectingTreasuryCannotBlockPurchases` is that scenario end to end: buyers still buy, the developer is still paid in full, and only rub3's own sweep fails.
 
-The sweeps are permissionless because their destination is immutable - the caller decides nothing but the timing, and rub3 collecting should not require rub3 to send a transaction on every contract that ever sold a licence. On a fee-free contract they revert `NoFeeConfigured` rather than burning the balance to `address(0)`.
-
 **`Rub3Factory`, and why it deploys through two helper contracts** - `Rub3Factory.sol` (new)
 
 `deployAccess(Rub3LicenseParams)` and `deploySubscription(Rub3LicenseParams, uint256 period)`, both recording `isDeployed[license] = true` plus an insertion-ordered `deployments()` list, so the registry (§3.2) and marketplace (§4.3) can enumerate the canonical set without replaying logs. `MIN_FEE_BPS` / `MAX_FEE_BPS` are `constant` (200 / 300) and `feeBps` / `treasury` `immutable`. The factory has no owner, no admin, and no way to touch or un-record anything it deployed - a listing that could be withdrawn would be a revocation surface pointed at the registry.
 
-A single factory **cannot** `new` both licence contracts: a contract's runtime code carries the creation code of everything it deploys, and the two are 16.7 KB + 18.4 KB against a 24,576-byte runtime limit. A `new` reached only from a *constructor* lands in the creation code, which is discarded after deployment, so the factory builds one `Rub3AccessDeployer` and one `Rub3SubscriptionDeployer` in its own constructor and holds their addresses as immutables. Its runtime is then 3.3 KB. Three consequences, all documented rather than hidden:
+A single factory **cannot** `new` both licence contracts: a contract's runtime code carries the creation code of everything it deploys, and the two are 16.7 KB + 18.4 KB against a 24,576-byte runtime limit. A `new` reached only from a *constructor* lands in the creation code, which is discarded after deployment, so the factory builds one `Rub3AccessDeployer` and one `Rub3SubscriptionDeployer` in its own constructor and holds their addresses as immutables. Its runtime is then 3.3 KB. Its initcode is 42.0 KB against EIP-3860's 49,152, and `test_factory_initcodeFitsUnderEip3860` guards that margin because the first sign of trouble would otherwise be an undeployable factory on mainnet. The three consequences for auditors and callers are set out in `contracts/contracts.md` → "Why the factory deploys through two helper contracts".
 
-- **The factory's fingerprint does not pin the implementations.** Verifying a factory means also fetching the code at `accessDeployer()` / `subscriptionDeployer()` and comparing those against the canonical manifest, where they now appear
-- **The deployers are callable by anyone**, and that is not a hole: calling one directly yields a licence contract no factory recorded, which is what deploying the template directly already gets you. Trust comes from `isDeployed`, never from who created the contract
-- **The factory's initcode is 42.0 KB against EIP-3860's 49,152**, so growing the licence contracts eats into it. `test_factory_initcodeFitsUnderEip3860` guards the margin, because the first sign of trouble would otherwise be an undeployable factory on mainnet
-- **A factory deploy may only succeed a canonical predecessor.** `deployAccess` / `deploySubscription` revert `PredecessorNotCanonical(address)` unless `params.predecessor` is `address(0)`, this factory's own deployment, or one recorded by a factory reachable through the immutable `previousFactory` chain (bounded at `MAX_PREDECESSOR_FACTORY_HOPS`, 8). Without it, `claimFromPredecessor` being free - as it must be - lets a whole fee-free sale be laundered onto a registry-listed contract. Direct deploys and the deployer helpers are untouched, because neither grants an `isDeployed` row. Full statement, including what a pre-factory contract can and cannot do, in `contracts/contracts.md` -> "A factory deploy may only succeed a canonical predecessor"
+**A factory deploy may only succeed a canonical predecessor.** `deployAccess` / `deploySubscription` revert `PredecessorNotCanonical(address)` unless `params.predecessor` is `address(0)`, this factory's own deployment, or one recorded by a factory reachable through the immutable `previousFactory` chain (bounded at `MAX_PREDECESSOR_FACTORY_HOPS`, 8). Without it, `claimFromPredecessor` being free - as it must be - lets a whole fee-free sale be laundered onto a registry-listed contract. Direct deploys and the deployer helpers are untouched, because neither grants an `isDeployed` row. Full statement, including what a pre-factory contract can and cannot do, in `contracts/contracts.md` -> "A factory deploy may only succeed a canonical predecessor".
 
 **Constructor: `IdentityTerms`, forced by the stack** - both concrete contracts
 
@@ -579,10 +502,11 @@ Threaded through `script/Deploy.s.sol`, all four Foundry fixtures, and both wrap
 
 **Tests** - 174 forge tests, up from 131; wrapper e2e 21, up from 18
 
-- `test/Rub3Factory.t.sol` (new): 43 tests in seven groups. The factory (terms stamped on both models, `isDeployed` + ordered enumeration, owner defaulting to the caller and an explicit owner honored, the `LicenseDeployed` log carrying the terms that deploy is frozen at, both ends of the fee range accepted and either side of it rejected, zero treasury rejected, and the two size limits); immutability (a *newer factory at a different rate* leaving an older deploy's terms and money untouched, the two factories' registries disjoint, and the contract owner running every power it has - reprice both rails, add a hash, repoint the successor, hand ownership to an attacker who then renounces - with the fee unmoved and still splitting afterwards); ETH arithmetic (exact split, either withdrawal order, no double-sweep, accumulation, the boundaries: 1 wei, the 39/40 wei rounding edge at 250 bps, a deliberately indivisible amount, 1,000,000 ether, and a 256-run fuzz over amount x rate asserting the shares sum to the payment and strand nothing); stablecoin arithmetic (the same set, plus unaccrued balance sweeping whole to the developer); **`test_bothRails_chargeIdenticallyForTheSameAmount`**, which prices one contract at the same *number* in wei and in the token's smallest unit and asserts `feesAccrued() == tokenFeesAccrued(usdc)` - the one-rule-two-rails claim as an equation; direct deployment (works, no fee, unrecorded, `NoFeeConfigured` on both sweeps, unpenalised on both rails); constructor validation; and the accrual rationale, including the rejecting treasury
-- Fee-evasion has its own test either side of the design choice: `test_eth_feeIsChargedOnWhatArrivedNotOnTheListedPrice` and `test_eth_zeroPriceListingCannotAvoidTheFee`
-- `tests/headless_e2e.rs`: 3 new anvil tests - a factory-deployed contract completing a real purchase on the **ETH rail** and on the **stablecoin rail**, each asserting the terms were stamped, the factory recorded the contract, the accrual matches the rate, and that after both sweeps the treasury and the developer between them hold the whole payment with nothing left in the contract; plus the counterweight, a direct deploy selling identically, accruing nothing, and reporting `isDeployed == false`. Balances are read with `cast`, not through the code under test
+- `test/Rub3Factory.t.sol` (new): 43 tests in seven groups - the factory itself, immutability across factory versions, exact ETH arithmetic at the boundaries including a 256-run fuzz over amount x rate, the same on the stablecoin rail, `test_bothRails_chargeIdenticallyForTheSameAmount` (the one-rule-two-rails claim as an equation), direct deployment, constructor validation, and the accrual rationale
+- Fee evasion is pinned from both sides: `test_eth_feeIsChargedOnWhatArrivedNotOnTheListedPrice` and `test_eth_zeroPriceListingCannotAvoidTheFee`
+- `tests/headless_e2e.rs`: 3 new anvil tests - a factory-deployed contract completing a real purchase on each rail with the split settled and nothing stranded, plus the counterweight of a direct deploy selling identically and reporting `isDeployed == false`
 - All 131 pre-§2.3 forge tests pass with their bodies unchanged; only constructor fixtures moved, to the `IdentityTerms` and `FeeTerms` tuples
+- Per-test inventory: `testing.md` → "Solidity suite" and "Headless (agent) E2E (`tests/headless_e2e.rs`)"
 
 **Verification**
 - `forge test`: 174 pass, 0 failed
@@ -597,7 +521,8 @@ Threaded through `script/Deploy.s.sol`, all four Foundry fixtures, and both wrap
 - No un-record, no delist, no owner on the factory. A listing that could be withdrawn is a revocation surface pointed at the registry, and the factory holding privilege over its deploys would undo the thing the fee's immutability is for
 - No fee on secondary transfers. The marketplace (§4.3) is its own mechanism with its own fee; ERC-721 transfer stays untouched, because a royalty hook on `_update` would be a call the holder cannot avoid on a token they already own
 - No discount, override, or exemption path. One rate per factory, applied to everything it deploys - anything else is a mutable fee wearing a different name
-- **No charge on value that did not arrive through a payment function.** A direct ERC-20 transfer, a `selfdestruct` beneficiary, or a coinbase payout is never accrued against, and `withdraw` / `withdrawToken` release it whole to the developer - so a developer who lists at zero and takes payment out of band pays no fee. Accepted on the economics, not left open by accident: the fee is an economic argument rather than a technical lock, a developer can already sell entirely off-chain and list the licence at zero, and charging on unaccounted balance would take a cut of mistaken transfers and airdrops, which are not revenue. Note what the zero-price route actually costs the developer, because it is what defends it: the shipped contracts have **no owner-mint and no airdrop**. `purchase` is the only non-claim mint path and it is permissionless, so a price of zero makes the licence free for *everyone*, not just for the developer's paying customers. What the fee is intended to buy is distribution, verification, and liquidity; the registry (§3.2) and marketplace (§4.3) that would supply those are not built yet, so today the factory row is a durable canonical record and nothing more. The fee does not go live ahead of them: the contracts are not deployed to mainnet or declared ready for use until the registry is ready, and the factory and the registry launch together. Documented in `contracts/contracts.md` → "The protocol fee" and `architecture.md` → "Rub3Factory", pinned by `test_token_unaccruedBalanceSweepsEntirelyToTheDeveloper`
+- **No charge on value that did not arrive through a payment function.** A direct ERC-20 transfer, a `selfdestruct` beneficiary, or a coinbase payout is never accrued against, and `withdraw` / `withdrawToken` release it whole to the developer. Accepted on the economics, not left open by accident; the argument is in `architecture.md` → "Why the fee split is shaped this way" and the scope statement in `contracts/contracts.md` → "What the fee covers, and what it does not", pinned by `test_token_unaccruedBalanceSweepsEntirelyToTheDeveloper`
+- **The fee does not go live ahead of the registry.** The registry (§3.2) and marketplace (§4.3) the fee is intended to buy are not built, so today the factory row is a durable canonical record and nothing more. The contracts are not deployed to mainnet or declared ready for use until the registry is ready: the factory and the registry launch together
 
 ### 2.4 - Ownership invariants `[complete]`
 
@@ -644,9 +569,11 @@ Threaded through `script/Deploy.s.sol`, all four Foundry fixtures, and both wrap
 - Behavioural companions: the contract owner cannot `transferFrom` / `safeTransferFrom` / `approve` a token it does not hold; and an "owner does its worst" test runs every owner-only function that exists (max out the price, add a hash, revoke every hash, repoint the successor, drain the balance, hand ownership to an attacker, who repeats it and then renounces) and asserts `ownerOf`, `isValid`, `activate`, `renewPrice`, and transfer all survive
 
 **Tests** - 90 forge tests, up from 33
-- `test/Rub3Invariants.t.sol` (new): 50 tests - 18 on the hash set (constructor seeding, zero/duplicate rejection, empty set, older releases staying valid, revocation status + reason + events, revoked hashes not resurrectable, owner gating), 16 on succession (the three guarantees plus opt-in on both sides, one-claim-per-token, claim following the current holder, survival of renounced ownership, frozen subscription terms carried across, a successor declaring a *different* `period` so the carried price provably buys the successor's period while the original token keeps its own terms on v1, the trust rule and its survival of a successor repoint), 5 on the no-revocation audit, and 11 on mint ordering and predecessor typing (a `MintCallbackProbe` recipient reads the token from inside `onERC721Received` on both the purchase and the claim path and finds its terms already frozen; `IncompatiblePredecessor` from the base probe on a codeless predecessor and on a contract that is not a license contract, from the subscription probe on a `Rub3Access` predecessor and a codeless one, from the access probe on a `Rub3Subscription` predecessor, and from each getter of the subscription slice via stub predecessors that answer the earlier layers but stop short of `expiresAt` or `renewPrice`; a well-typed access predecessor and a well-typed subscription predecessor each deploying and claiming end to end)
-- `test/Rub3Subscription.t.sol`: 7 new - snapshot at mint, owner cannot reprice a held token, a price cut does not reprice either (proved from the reverse: paying the new lower price reverts against the frozen one), per-token independence across a price change, snapshot tracks listed price not amount paid, both event shapes
-- `test/Rub3Access.t.sol`: 2 rewritten in place - `test_setWrapperHash_onlyOwner` → `test_addWrapperHash_onlyOwner` (same owner-gating intent, plus "appended, not replaced"), and `test_metadata` now asserts hash-set status/count/order. The other 24 unchanged; all 26 still pass
+
+- `test/Rub3Invariants.t.sol` (new): 50 tests in four groups - 18 on the hash set, 16 on succession, 11 on mint ordering and predecessor typing, 5 on the no-revocation audit
+- `test/Rub3Subscription.t.sol`: 7 new on the per-token `renewPrice` snapshot, including the reverse proof that a price cut does not reprice a held token
+- `test/Rub3Access.t.sol`: 2 rewritten in place - `test_setWrapperHash_onlyOwner` → `test_addWrapperHash_onlyOwner` (same owner-gating intent, plus "appended, not replaced"), and `test_metadata` now asserting hash-set status, count and order. The other 24 unchanged
+- Per-test inventory: `testing.md` → "Solidity suite (`contracts/`, run with `forge test` from `contracts/`)"
 
 **Verification**
 - `forge test`: 90 pass (26 Access + 14 Subscription + 50 Invariants), 0 failed
@@ -764,8 +691,70 @@ Goal: the payment flows only rub3 can host.
 
 The interactive path stays fully supported - manual tx-hash paste is the floor today and remains reachable forever. Polish lands after the agent path.
 
-### 5.1 - Frictionless tx confirmation `[not started]` *(spec in §1.10 / §1.10a / §1.10b)*
-- Auto-detect and WalletConnect tabs on the purchase/cooldown screens, manual paste as the always-available floor. The detailed specs in §1.10a/§1.10b apply unchanged.
+### 5.1 - Frictionless tx confirmation `[not started]`
+
+Demoted from Phase 1, where it was specified as §1.10 before the agent-first revision; the spec below applies unchanged when picked up. The manual-paste floor already works and stays reachable forever, so richer confirmation modes are human-surface polish rather than a gap.
+
+The purchase (§1.7) and activate (§1.8) flows currently ask the user to paste a transaction hash back into the webview after sending from their wallet. That manual-paste path is our robust fallback - it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
+
+**Three modes, in order of preference:**
+
+| Mode | Project ID | JS bundle | Offline tolerant | Relies on |
+|---|---|---|---|---|
+| `wallet-connect` | required (dev-supplied) | ~255 KB vendored | no | Reown relay + chain RPC |
+| `auto-detect` | none | none | no | chain RPC only |
+| `manual` (§1.7, §1.8) | none | none | yes (paste later) | user copy/paste |
+
+The three modes surface as three tabs on the cooldown / purchase screens. The default tab at render time is the highest-capability one available for the current build:
+- WalletConnect tab visible when the `wallet-connect` feature is compiled in **and** the developer supplied a non-placeholder `wc_project_id`
+- Auto-detect tab visible when `onchain-write` is on (always true for tier 3+, which is the only tier that reaches these screens)
+- Manual tab always visible
+
+Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate_tx_sent`) - the downstream poller/finalize path from §1.7 and §1.8 Phase B is untouched. This keeps auto-detect and WalletConnect as pure front-door improvements rather than new branches in the session pipeline.
+
+#### 5.1a - RPC auto-detect `[not started]`
+
+**Rationale.** Many embedded-app developers will never configure WalletConnect - they may not want the relay dependency, may not want to register with Reown, or may be shipping internal / CLI-adjacent tools. Auto-detect gives those deployments a one-click confirm path without adding any JS or external service.
+
+**How it works.**
+- Purchase: poll `eth_getLogs` for the ERC-721 `Transfer(0x0, wallet, *)` topic signature (already constant in `rpc.rs` as `ERC721_TRANSFER_SIG`) filtered by `address == contract`, starting from the block the user opened the screen. First match wins → its tx hash feeds the same `purchase_tx_sent` handler as manual.
+- Activate: poll `lastActivationBlock(tokenId)` (already in `rpc.rs`); when it advances past the starting block, resolve the block's receipts and pick the one whose `to == contract && from == wallet`. That receipt's tx hash feeds `activate_tx_sent`.
+- Poll cadence: 3 s, same as `spawn_tx_poller` / `spawn_purchase_poller`. Total budget configurable, default 120 s (longer than manual because the user is broadcasting the tx in-wallet during this window). Falls back to the Manual tab (pre-populated with helpful copy) on timeout or repeated RPC error.
+
+**Rust additions (`rpc.rs`)**
+- `pub fn watch_for_mint(rpc_url, contract, recipient, from_block, deadline) -> Result<String, RpcError>` - polls `eth_getLogs` with the `Transfer(0x0, recipient, *)` filter; returns the tx hash.
+- `pub fn watch_for_activate(rpc_url, contract, token_id, from_block, deadline) -> Result<String, RpcError>` - polls `lastActivationBlock`; on delta, resolves the tx hash via `eth_getBlockByNumber` + receipt scan.
+
+**Webview wiring**
+- New IPC variants (gated on `onchain-write`): `AutoWatchStart { kind: "mint" | "activate", … }`, `AutoWatchCancel`. `webview.rs` spawns a `thread::spawn` running the watcher; on success the watcher routes its hash through the same internal dispatch as `purchase_tx_sent` / `activate_tx_sent` - no JS round-trip, no duplicated handlers.
+- Existing purchase / cooldown / session handlers unchanged.
+
+**HTML**
+- Tabs in `#screen-purchase` and `#screen-cooldown`: `[WalletConnect] [Auto-detect] [Manual]`. The auto-detect body is a spinner + "Waiting for your wallet to broadcast the tx…" copy and a "Switch to manual" link.
+
+**Gating.** `onchain-write` (already required by §1.7 / §1.8). No new Cargo feature. Pure additive - tier 3+ builds pick it up automatically.
+
+#### 5.1b - WalletConnect v2 `[not started]`
+
+**Scope.** The developer opts in per deployment by supplying a `wc_project_id` (obtained from cloud.reown.com). No single rub3-wide project ID - project IDs are the abuse / rate-limit boundary, and branding (the wallet QR prompt shows the dApp name) should reflect the embedded app, not rub3.
+
+**Rust additions**
+- `ActivationContext` (the `main.rs` constants struct) gains `wc_project_id: Option<&'static str>`. Missing or placeholder → WC tab is hidden. Default in the wrapper's own dev builds is `None`, not a shared project ID - `rub3 pack` (§2.5) rejects a distributable that inherits a placeholder value.
+- Feature flag `wallet-connect` on the wrapper crate - opt-in because of the vendored JS weight. Composes with `onchain-write`; does not change tier bundle definitions (developer picks `tier-3,wallet-connect` at pack time).
+- `webview.rs::show_purchase` / `show_cooldown` include the project id in the `onShowPurchase` / `onShowCooldown` payload when the feature is compiled in; JS decides whether to render the tab based on its presence.
+
+**Assets (`assets/vendor/`)**
+- `walletconnect-sign-client.mjs` - Reown SignClient v2 bundle (~250 KB).
+- `qrcode.mjs` - ~5 KB QR-from-URI renderer.
+- Both served by the same `include_dir!` custom-protocol handler introduced in §5.2 (Preact refactor); if §5.2 has not landed yet, this section creates that handler.
+
+**Assets (`assets/app/`)**
+- New `wc.js` - init `SignClient`, open a session via `chains: ["eip155:<chain_id>"]`, render the pairing URI as an inline QR, call `client.request({ method: "eth_sendTransaction", params: [{ to, data, value }] })` to dispatch either the purchase or activate tx. Returns the tx hash through the existing `purchase_tx_sent` / `activate_tx_sent` IPC message - reusing the rest of the pipeline.
+
+**HTML**
+- WC tab body: the vendored QR canvas, a "copy pairing URI" fallback, and error copy that suggests falling back to Auto-detect or Manual.
+
+**Gating recap.** `wallet-connect` Cargo feature + developer-supplied project id. Both must be present for the tab to render; either absent → the tab is silently omitted and the user sees a 2-tab (or 1-tab) screen.
 
 ### 5.2 - Activation UI refactor to Preact `[not started]` *(was old §2.5)*
 - Single reducer over `(phase, ctx)`; vendored `preact.mjs` + `htm.mjs` under `assets/vendor/`; `include_dir!` custom-protocol handler; no Node/bundler. No behavioral changes.
@@ -814,8 +803,8 @@ Cut from the active roadmap with rationale; scaffolds are retained.
 ## Directory Structure
 
 Current (implemented). The per-module map is not repeated here: README.md →
-"Project structure" names every wrapper module, and architecture.md → "Source
-layout (current)" adds the deferred `device.rs` / `decrypt.rs` scaffolds.
+"Project structure" names every wrapper module, including the deferred
+`device.rs` / `decrypt.rs` scaffolds.
 
 ```
 rub3/
@@ -835,7 +824,8 @@ rub3/
 ├── architecture.md
 ├── implementation.md
 ├── ideation.md
-└── testing.md
+├── testing.md
+└── README.md
 ```
 
 Planned (not yet created):
