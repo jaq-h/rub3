@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 use alloy::primitives::{Address, B256};
 use rub3_wrapper::activation::{
     ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome, PaymentRail,
-    ENV_MAX_TOKEN_AMOUNT, EXIT_PRICE_ABOVE_POLICY,
+    DEFAULT_MAX_ETH_WEI, ENV_MAX_ETH_WEI, ENV_MAX_TOKEN_AMOUNT, EXIT_PRICE_ABOVE_POLICY,
 };
 use rub3_wrapper::rpc;
 use rub3_wrapper::signer::{resolve_signer, Signer, SignerError, ENV_AGENT_KEY};
@@ -567,10 +567,13 @@ impl Agent {
         let session_dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var(ENV_AGENT_KEY, &key_hex);
         std::env::set_var("RUB3_SESSION_DIR", session_dir.path());
-        // The spend ceiling is process-global like the key. Cleared here rather
-        // than only on drop, so a test that means to run without one cannot
-        // inherit a previous test's.
+        // The spend ceilings are process-global like the key. Cleared here
+        // rather than only on drop, so a test that means to run without one
+        // cannot inherit a previous test's. Clearing the ETH one restores the
+        // built-in default rather than removing the ceiling: that rail always
+        // has one.
         std::env::remove_var(ENV_MAX_TOKEN_AMOUNT);
+        std::env::remove_var(ENV_MAX_ETH_WEI);
 
         // Resolve through the production path so the test exercises the real
         // env-var source, not a test-only constructor.
@@ -591,6 +594,7 @@ impl Drop for Agent {
         std::env::remove_var(ENV_AGENT_KEY);
         std::env::remove_var("RUB3_SESSION_DIR");
         std::env::remove_var(ENV_MAX_TOKEN_AMOUNT);
+        std::env::remove_var(ENV_MAX_ETH_WEI);
     }
 }
 
@@ -643,6 +647,16 @@ impl Signer for CountingSigner<'_> {
 /// and decimals differ between tokens. Cleared by [`Agent`]'s drop.
 fn set_spend_ceiling(amount: &str) {
     std::env::set_var(ENV_MAX_TOKEN_AMOUNT, amount);
+}
+
+/// Sets the operator's ETH spend ceiling, in wei, for the current test.
+///
+/// Never required to make the ETH rail work: unlike the stablecoin ceiling
+/// this one has a built-in default, so every other test in this file buys in
+/// ETH under [`DEFAULT_MAX_ETH_WEI`] without calling this. Cleared by
+/// [`Agent`]'s drop.
+fn set_eth_spend_ceiling(wei: &str) {
+    std::env::set_var(ENV_MAX_ETH_WEI, wei);
 }
 
 fn ctx(contract: &str, token_id: Option<u64>) -> HeadlessContext {
@@ -1635,6 +1649,153 @@ fn headless_refuses_a_price_above_the_spend_ceiling_e2e() {
         eth_balance(agent.address()),
         eth_before,
         "a refusal must not fall back to the ETH rail",
+    );
+}
+
+/// An ETH price above the ceiling is refused locally, before the transaction
+/// exists.
+///
+/// This is the ETH rail's half of the same guarantee, and the ordering is what
+/// it asserts. The contract requires exact payment, so a listing this agent
+/// will not pay for would revert on-chain anyway - but reverting costs gas and
+/// arrives as a chain error, while a ceiling weighed before `tx::send` costs
+/// nothing and arrives as a policy answer. Four independent witnesses that
+/// nothing was broadcast: the signer was never asked (so no transaction was
+/// ever signed), the nonce did not move, the balance did not move, and nothing
+/// was minted.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_refuses_an_eth_price_above_the_spend_ceiling_before_sending_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    // ETH only: no stablecoin rail is advertised, so the ETH ceiling is the
+    // only thing that can stop this purchase.
+    let contract = deploy_access(PRICE_WEI, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    // One wei under the listed price: the agent is funded, the contract is
+    // canonical, and supply is open, so price is the only refusal available.
+    let ceiling = PRICE_WEI.parse::<u128>().unwrap() - 1;
+    set_eth_spend_ceiling(&ceiling.to_string());
+
+    let nonce_before = tx_count(agent.address());
+    let balance_before = eth_balance(agent.address());
+
+    let counting = CountingSigner::wrapping(agent.signer.as_ref());
+    let err = ensure_headless(&counting, &ctx(&contract, None))
+        .expect_err("an ETH price above the ceiling must refuse");
+
+    assert!(
+        matches!(err, HeadlessError::PriceAbovePolicy { .. }),
+        "got {err:?}",
+    );
+    assert_eq!(err.exit_code(), EXIT_PRICE_ABOVE_POLICY, "{err}");
+
+    let detail = err
+        .machine_detail()
+        .expect("a policy refusal must be machine-readable");
+    assert_eq!(
+        detail,
+        format!("rail=eth listed={PRICE_WEI} maximum={ceiling}"),
+        "the ETH refusal names its rail and its amounts, and has no payment token",
+    );
+    assert!(
+        err.to_string().contains(ENV_MAX_ETH_WEI),
+        "the message must name the variable that raises this rail's ceiling: {err}",
+    );
+
+    assert_eq!(
+        counting.calls(),
+        0,
+        "the refusal must come before anything is signed, so no transaction was built",
+    );
+    assert_eq!(
+        tx_count(agent.address()),
+        nonce_before,
+        "a refusal must not send a transaction",
+    );
+    assert_eq!(
+        eth_balance(agent.address()),
+        balance_before,
+        "a refusal must cost no gas",
+    );
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "a refusal must mint nothing",
+    );
+}
+
+/// A price at exactly the ETH ceiling buys, and one under it buys under the
+/// built-in default with nothing configured at all.
+///
+/// The boundary is inclusive, and it is checked here against a real chain
+/// rather than only in the unit test, because an off-by-one in the wrong
+/// direction would make a correctly configured agent refuse the price it was
+/// configured for. The second half is the property that keeps the default from
+/// being a breaking change: an operator who sets nothing still buys.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_buys_at_exactly_the_eth_ceiling_and_under_the_default_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let contract = deploy_access(PRICE_WEI, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    set_eth_spend_ceiling(PRICE_WEI);
+
+    let (_, outcome) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a price at exactly the ceiling is within policy");
+    match outcome {
+        HeadlessOutcome::PurchasedAndActivated {
+            paid: PaymentRail::Eth { price_wei },
+            ..
+        } => assert_eq!(price_wei, PRICE_WEI, "the listed price is what was paid"),
+        other => panic!("expected an ETH purchase, got {other:?}"),
+    }
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 0).unwrap(),
+        agent.address(),
+        "the licence was obtained",
+    );
+
+    // And with nothing configured: a second agent, no ceiling variable set,
+    // buying the same listing under the built-in default.
+    assert!(
+        rpc::eth_price(&rpc_url(), contract_addr).unwrap() <= DEFAULT_MAX_ETH_WEI,
+        "the fixture price must sit under the default, or this proves nothing",
+    );
+    let unconfigured = Agent::new();
+    fund(unconfigured.address(), FUNDING_ETH);
+
+    let (_, outcome) = ensure_headless(unconfigured.signer.as_ref(), &ctx(&contract, None))
+        .expect("an unset ETH ceiling means the default, not a refusal");
+    assert!(
+        matches!(
+            outcome,
+            HeadlessOutcome::PurchasedAndActivated {
+                paid: PaymentRail::Eth { .. },
+                ..
+            }
+        ),
+        "got {outcome:?}",
+    );
+    assert_eq!(
+        rpc::owner_of(&rpc_url(), contract_addr, 1).unwrap(),
+        unconfigured.address(),
+        "the unconfigured agent bought too",
     );
 }
 
