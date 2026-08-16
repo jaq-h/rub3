@@ -718,7 +718,7 @@ Goal: the payment flows only rub3 can host.
 ### 4.3 - License marketplace `[not started]` *(trigger-gated: do not build speculatively)*
 
 - **Do not build speculatively.** Trigger: organic `Transfer` volume on factory contracts (all on-chain - query for the moment resale behavior emerges).
-- Purpose-built venue for license resale: queryable by agents, filtered to registry-verified contracts, priced in USDC. 1–2% marketplace fee + ERC-2981-style royalty split with the developer, sourced from the registry entry and honoured by this venue on a sale it settles - not token-side. No contract under `contracts/src/` exposes `royaltyInfo`, and the licence contracts are immutable, so a deployed token can never advertise a royalty to a third-party marketplace.
+- Purpose-built venue for license resale: queryable by agents, filtered to registry-verified contracts, priced in USDC. 1–2% marketplace fee + ERC-2981-style royalty split with the developer, venue-side: honoured by this marketplace on a sale it settles, not levied by the token. No contract under `contracts/src/` exposes `royaltyInfo`, and the licence contracts are immutable, so a deployed token can never advertise a royalty to a third-party marketplace.
 - This is what makes "licenses as liquid capital assets" real: agents buy for a workload, resell when the job ends.
 
 **Phase 4 deliverable:** revenue flows from all three billing models plus secondary trades, entirely on-chain, with no invoicing and no accounts receivable.
