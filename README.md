@@ -221,9 +221,9 @@ rub3-wrapper --headless --token-id 3 --binary /path/to/your/app
 
 **`rub3-wrapper --help` owns the exit-code and signer-source contract.** The
 binary prints both tables below, with the reasoning that matters at the call
-site: why the spend ceiling starts unavailable rather than unlimited, and why
-code 21 is deliberately not code 14. The tables are reproduced here for
-discoverability.
+site: why the stablecoin spend ceiling starts unavailable rather than unlimited
+while the ETH one has a default, and why code 21 is deliberately not code 14.
+The tables are reproduced here for discoverability.
 
 Two properties to know before reading them. Every `RUB3_AGENT_*` credential
 variable is removed from the wrapped binary's environment before launch -
@@ -396,6 +396,7 @@ the authority on what each covers, what it cost, and what comes next.
 - **Ownership invariants (§2.4)** - append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor`, the contract-side `honorsContract` trust rule, per-token renewal snapshots, and a no-revocation bytecode audit over four deployed contracts
 - **Reproducible builds** - canonical bytecode fingerprints for five contracts, gated in CI
 - **Pre-purchase contract attestation (§2.6)** - before an agent spends, the wrapper compares the contract's masked code hash against fingerprints pinned in the binary and refuses on a miss (exit 23), catching a modified copy that a selector-name scan passes in silence. It gates purchases only, never launches
+- **Spend ceilings (§2.2, §2.7)** - one operator policy bounds both rails before anything is spent: `RUB3_AGENT_MAX_TOKEN_AMOUNT` gates the stablecoin rail before an authorization is signed, `RUB3_AGENT_MAX_ETH_WEI` gates the ETH rail before the transaction is sent, and the ETH one defaults to 0.1 ETH so neither rail is ever unbounded (exit 22)
 - **Deploy scripts** - `forge script` deploys either licence contract to any EVM chain from env vars, directly or through a factory; `DeployFactory.s.sol` deploys the factory itself
 
 **Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
