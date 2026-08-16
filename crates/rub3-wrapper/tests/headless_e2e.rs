@@ -919,7 +919,17 @@ fn headless_refuses_a_contract_whose_code_is_not_canonical_e2e() {
 /// Constructing that needs a licence contract whose code is deliberately not
 /// canonical, which means a Solidity change, and `contracts/` is off limits in
 /// this change because a separate lane is editing it. Recorded as follow-up
-/// work in `implementation.md` §2.6 under "Deliberately not built here".
+/// work in `implementation.md` §2.6 under "Deliberately not built here". Nor
+/// can it separate "the launch path never runs the gate" from "it runs it and
+/// passes", since the fixture contract is canonical either way; that half is
+/// what `attest`'s reachability unit test covers.
+///
+/// It knowingly repeats the setup of the second half of
+/// [`headless_cooldown_active_then_ready_e2e`] - the overlap is the setup, not
+/// the assertions, which are the two `nextTokenId` reads. Kept separate on
+/// purpose: the fail-open property deserves its own name and its own failure,
+/// so it cannot be dropped silently when someone edits the cooldown test for an
+/// unrelated reason. The extra anvil spin-up is the accepted cost.
 #[test]
 #[ignore = "requires anvil + forge + cast on PATH"]
 fn headless_launch_of_a_held_licence_never_enters_the_purchase_path_e2e() {

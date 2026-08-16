@@ -1020,7 +1020,7 @@ mod tests {
         })
     }
 
-    /// Nothing in the crate reaches this module except the purchase path.
+    /// Nothing in the crate reaches this module except a purchase path.
     ///
     /// This is the subtlest property in the module and the one a later change
     /// is most likely to break by accident, because adding "verify the contract
@@ -1028,7 +1028,13 @@ mod tests {
     /// a program the user has already paid for, and a check that can refuse to
     /// start it is a revocation surface wearing an integrity check's clothes.
     /// The posture is structural - there is no shared helper and no flag - so
-    /// what has to be guarded is the absence of a second caller.
+    /// what has to be guarded is the absence of a caller outside the paths that
+    /// spend money.
+    ///
+    /// Two assertions, because a closed set alone is not enough: the set of
+    /// referencing modules is a subset of the purchase-path allowlist, *and*
+    /// `activation.rs` holds exactly one gate call site, so the gate cannot be
+    /// quietly dropped or duplicated while the subset stays satisfied.
     ///
     /// **It guards source structure, not runtime wiring.** It reads the crate's
     /// own `src/` at test time, so it says exactly the same thing under
@@ -1045,6 +1051,16 @@ mod tests {
     /// surface.
     #[test]
     fn the_attest_module_is_reachable_only_from_the_purchase_path() {
+        // The paths that spend money, and the only modules that may reach this
+        // one.
+        //
+        // `webview.rs` is on the list although it references nothing here
+        // today: `show_purchase` reads price and supply and hands
+        // `purchase(recipient)` calldata to a human wallet with no code
+        // attestation at all, so gating it is outstanding work, and naming it
+        // here means that work does not have to argue with a test first.
+        const PURCHASE_PATHS: &[&str] = &["activation.rs", "webview.rs"];
+
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let modules = rust_sources(&src);
         assert!(
@@ -1061,21 +1077,27 @@ mod tests {
             .collect();
         referencing.sort();
 
-        assert_eq!(
-            referencing,
-            vec!["activation.rs"],
-            "the attest module must be reached from the purchase path in activation.rs and from \
-             nowhere else in the crate.\n\n\
+        let outside: Vec<&str> = referencing
+            .iter()
+            .copied()
+            .filter(|name| !PURCHASE_PATHS.contains(name))
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "{outside:?} reference the attest module and are not purchase paths.\n\n\
              If this failed because a launch path now names it - through verify_before_purchase, \
              classify, decide, Verdict or any other item - that is the one thing this module \
              must not do. Refusing to start an already-paid-for licence because an integrity \
              check could not complete is a de-facto revocation surface, which this project has \
-             ruled out. Fail closed on purchase, fail open on launch."
+             ruled out. Fail closed on purchase, fail open on launch.\n\n\
+             If instead you are adding attestation to a NEW path that spends money, that is \
+             legitimate and welcome: add that module to PURCHASE_PATHS above, deliberately, as \
+             its own decision. Do not relax this test to let it through."
         );
 
         let gate_calls: usize = modules
             .iter()
-            .filter(|(name, _)| name != "attest.rs")
+            .filter(|(name, _)| name == "activation.rs")
             .map(|(_, body)| {
                 strip_line_comments(body)
                     .matches("verify_before_purchase")
@@ -1084,8 +1106,9 @@ mod tests {
             .sum();
         assert_eq!(
             gate_calls, 1,
-            "the gate must have exactly one call site in the crate, and it is the one in \
-             activation.rs::headless::purchase"
+            "activation.rs::headless::purchase must call the gate exactly once. A subset of the \
+             allowlist is satisfied by calling it nowhere at all, so this is what keeps the gate \
+             from being dropped or duplicated."
         );
     }
 
