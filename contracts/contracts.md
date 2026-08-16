@@ -18,7 +18,7 @@ anvil --version
 
 ## Local testing with Anvil
 
-No `.env` file needed. Forge tests use Foundry's built-in VM — they run against an in-process EVM with no network.
+No `.env` file needed. Forge tests use Foundry's built-in VM - they run against an in-process EVM with no network.
 
 ```bash
 cd contracts
@@ -498,13 +498,13 @@ Nobody else can do step 3 - not the old contract's owner, not the new one's. The
 
 Because this is a snapshot-claim rather than burn-to-mint, **migration can duplicate a seat**, and that is accepted rather than fixed. The holder can claim onto v2, sell the v1 token, and both stay honored via `honorsContract`, so the number of concurrently honored seats is not bounded by either contract's `supplyCap`. Burn-to-mint would bound it, but only by making the predecessor expose a burn - the revocation surface that must not exist - so the no-revocation guarantee takes priority and nothing in the contracts bounds, tracks, or invalidates the duplicate. Size a successor's `SUPPLY_CAP` with that in mind, or deploy v2 with no `PREDECESSOR` at all (a paid major version), which accepts no claims.
 
-The wrapper's trust rule - "contract X, or X's successor holding a token claimed from X" - is one call:
+The trust rule a wrapper is meant to use - "contract X, or X's successor holding a token claimed from X" - is one call. It is a contract capability today: no shipped wrapper calls it (see `architecture.md` -> "Successor pattern"), so for now it is a check you run yourself:
 
 ```bash
 cast call <NEW_CONTRACT> "honorsContract(address,uint256)(bool)" <OLD_CONTRACT> <NEW_TOKEN_ID> --rpc-url $RPC
 ```
 
-It spans exactly one hop, by construction: each contract compares the address you pass against its own immutable `predecessor` and looks no further back. After a second migration (v1 -> v2 -> v3), `v3.honorsContract(v1, <V3_TOKEN_ID>)` is false, so a wrapper still pinned to v1 does not honor the v3 token. Nobody is stranded by that - no token is ever burned, so the holder's v1 token (and their v2 token, if they claimed one) keeps validating forever on its own contract, which is exactly what a v1-pinned wrapper checks.
+It spans exactly one hop, by construction: each contract compares the address you pass against its own immutable `predecessor` and looks no further back. After a second migration (v1 -> v2 -> v3), `v3.honorsContract(v1, <V3_TOKEN_ID>)` is false, so a caller still pinned to v1 does not honor the v3 token. Nobody is stranded by that - no token is ever burned, so the holder's v1 token (and their v2 token, if they claimed one) keeps validating forever on its own contract, which is exactly what a v1-pinned wrapper checks.
 
 ## Reproducible builds and canonical fingerprints
 
@@ -644,9 +644,9 @@ Sanity-check the method itself against a selector that *is* there - `cast sig "a
 
 The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot), the §2.2 stablecoin rail, and the §2.3 factory and protocol fee, all of which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
 
-- **`contentURI`** (§3.1) — content-addressed binary location on-chain, making the contract a complete distribution record
-- **Concurrent seats** (§3.4) — `maxConcurrentSessions[tokenId] = K` generalizing `activeSessionId` for agent fleets
-- **`Rub3Metered`** (§4.1) — per-launch / per-session micropayment billing
-- **`Rub3Registry`** (§3.2) — discovery and verification, never validity; entries double as ERC-8004-style agent cards
+- **`contentURI`** (§3.1) - content-addressed binary location on-chain, making the contract a complete distribution record
+- **Concurrent seats** (§3.4) - `maxConcurrentSessions[tokenId] = K` generalizing `activeSessionId` for agent fleets
+- **`Rub3Metered`** (§4.1) - per-launch / per-session micropayment billing
+- **`Rub3Registry`** (§3.2) - discovery and verification, never validity; entries double as ERC-8004-style agent cards
 
 Invariants for every license contract, present and future: no burn, no admin transfer, no pause on validation reads, no proxies. Evolution changes what is offered going forward, never what was granted.

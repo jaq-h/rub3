@@ -1,15 +1,15 @@
 # rub3
 
-Wallet-native software licensing for the machine economy. NFT-gated access for locally executed software — CLI tools, MCP servers, desktop apps — without a browser or a backend.
+Wallet-native software licensing for the machine economy. NFT-gated access for locally executed software - CLI tools, MCP servers, desktop apps - without a browser or a backend.
 
-rub3 lets machines (and humans) buy, verify, run, and resell software without asking anyone's permission. The NFT is the access credential — owned by a wallet, verifiable on-chain, transferrable, composable — which also makes it a liquid asset: buy a license for a workload, resell it when the job ends. The wrapper is the runtime that enforces this on the machine where the software runs.
+rub3 lets machines (and humans) buy, verify, run, and resell software without asking anyone's permission. The NFT is the access credential - owned by a wallet, verifiable on-chain, transferrable, composable - which also makes it a liquid asset: buy a license for a workload, resell it when the job ends. The wrapper is the runtime that enforces this on the machine where the software runs.
 
 
 ## How it works
 
 1. Developer packages their binary inside the rub3 wrapper
 2. Developer deploys an ERC-721 license contract on Base (`Rub3Access` or `Rub3Subscription`)
-3. User launches the wrapped app — the wrapper checks for a valid cached session
+3. User launches the wrapped app - the wrapper checks for a valid cached session
 4. If no session (or session expired): the wrapper opens a native activation window, verifies on-chain ownership, and requests a wallet signature
 5. On success: session is cached locally, wrapped binary launches
 6. On subsequent launches within TTL: session is verified locally, binary launches immediately
@@ -53,7 +53,7 @@ rub3/
 │           ├── license_e2e.rs        # License verification tests (static + dynamic wallets, SIGTERM)
 │           ├── session_onchain_e2e.rs # Anvil-gated: verify_onchain against a live chain
 │           └── headless_e2e.rs       # Anvil-gated: fresh key → purchase → activate → persist → fast path
-├── contracts/                        # Foundry project — ERC-721 license contracts
+├── contracts/                        # Foundry project - ERC-721 license contracts
 │   ├── src/
 │   │   ├── Rub3License.sol           # Abstract base (ERC-721 + Enumerable + Ownable)
 │   │   ├── Rub3Access.sol            # One-time purchase license
@@ -345,28 +345,28 @@ See [implementation.md](implementation.md) for the full roadmap.
 - Identity models: `identityModel` + `tbaImplementation` on-chain, local ERC-6551 TBA derivation (`identity.rs`), identity fields signed into the session preimage
 - Purchase UI: in-wrapper purchase flow for tier 3+ (price/supply reads, calldata encoding, receipt polling, minted-token recovery)
 - Smart contracts: `Rub3Access` + `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 174 forge tests
-- Ownership invariants (§2.4): append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor` and the `honorsContract` trust rule, per-token `renewPrice` snapshot, and a no-revocation bytecode audit
+- Ownership invariants (§2.4): append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor`, the contract-side `honorsContract` trust rule, per-token `renewPrice` snapshot, and a no-revocation bytecode audit
 - **USDC purchases via EIP-3009 (§2.2):** `purchaseWithAuthorization` / `renewWithAuthorization` alongside the ETH path, taking a payment authorization the buyer signs off-chain that anyone may submit - so an agent holding only stablecoins can obtain a licence without ever owning ETH. Uses `receiveWithAuthorization` (payee-only) so the authorization cannot be spent outside the licence contract, and binds the mint recipient into the derived nonce so a submitter cannot redirect it. Both rails reach one mint; subscriptions freeze both per token. The authorization carries an opaque `bytes signature`, so an EIP-1271 smart-contract wallet buys on the same entry point as an EOA - which requires a payment token exposing Circle's FiatTokenV2_2-style `bytes` overload of `receiveWithAuthorization`; a token implementing only EIP-3009's `(v, r, s)` form is not supported. The wrapper's headless path prefers the stablecoin rail whenever the contract advertises one, the wallet can cover it, and the operator's `RUB3_AGENT_MAX_TOKEN_AMOUNT` ceiling covers the listed amount - see [Spend policy](#spend-policy)
-- **`Rub3Factory` + protocol fee (§2.3):** the canonical deployment path. `deployAccess` / `deploySubscription` stamp an immutable protocol fee (`feeBps`, `treasury`) into every contract they deploy and record it in `isDeployed`, which is the registry's and marketplace's whole trust rule. The split runs on-chain inside `purchase()` / `renew()` on **both** payment rails, charged on the amount received so a zero-price listing cannot route around it, and accrued in the contract rather than pushed - so an immutable treasury that cannot receive can never block a purchase. Both fee terms are `immutable` on the licence contract *and* the factory, with no setter on either, so a developer's economics can never change after deploy; rub3 changes its take only by deploying a new factory. Direct deployment stays possible, carries no fee, and is simply unrecorded. Nothing is charged on deploys, the CLI, the SDK, or the wrapper, and there is no token
+- **`Rub3Factory` + protocol fee (§2.3):** the canonical deployment path. `deployAccess` / `deploySubscription` stamp an immutable protocol fee (`feeBps`, `treasury`) into every contract they deploy and record it in `isDeployed`, which is the whole trust rule the planned registry and marketplace will read. The split runs on-chain inside `purchase()` / `renew()` on **both** payment rails, charged on the amount received so a zero-price listing cannot route around it, and accrued in the contract rather than pushed - so an immutable treasury that cannot receive can never block a purchase. Both fee terms are `immutable` on the licence contract *and* the factory, with no setter on either, so a developer's economics can never change after deploy; rub3 changes its take only by deploying a new factory. Direct deployment stays possible, carries no fee, and is unrecorded by design. Neither the registry nor the marketplace is built yet, and the factory and the registry launch together: nothing is deployed to mainnet or declared ready for use before then. Nothing is charged on deploys, the CLI, the SDK, or the wrapper, and there is no token
 - Deploy script: `forge script` deploys either contract to any EVM chain from env vars, directly or through a factory (`FACTORY`); `script/DeployFactory.s.sol` deploys the factory itself
 - **Headless activation (the agent front door):** `activation::ensure_headless(signer, ctx)` runs `tokensOfOwner` → purchase if empty → cooldown check → `activate()` → local session signature → `verify_local` → persist, in one call. A `Signer` trait (env key / encrypted keystore / KMS-backed impl) keeps raw key handling in a single auditable type; `webview` and `headless` are independent Cargo features, and a headless build links no GUI dependency at all. `--headless [--token-id N]` with documented exit codes, covered by an anvil-gated E2E
 
-**Not yet implemented (agent-first roadmap):** CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
+**Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
 
 ## Direction
 
-The plan is agent-first (July 2026 revision — see [implementation.md](implementation.md)):
+The plan is agent-first (July 2026 revision - see [implementation.md](implementation.md)):
 
 - **Let machines buy, verify, and resell software without asking anyone's permission.** The adoption unit is one closed loop an agent completes end to end: discover → pay → fetch → verify → run → resell.
-- **Open-source the rails; own the factory, registry, and marketplace.** Revenue is a 2–3% fee on a payment flow only the wrapper can meter — priced low enough that no agent bothers to route around it. No token.
+- **Open-source the rails; own the factory, registry, and marketplace.** Revenue is intended to be a 2–3% fee on a payment flow only the wrapper can meter, priced low enough that routing around it is not worth the trouble. Only the factory and its on-chain fee split are built; the registry and marketplace are not, and the contracts are not deployed to mainnet or declared ready for use until the registry is ready. No token.
 - **The token is the invariant; everything else is versioned.** Evolution only ever changes what is offered going forward (price, successor contracts, registry listings), never what was granted (held tokens, their validation, their renewal terms). No proxies, no revocation surface - structurally, not by promise.
 
-First target market: wallet-gated MCP servers — paid MCP servers have no licensing primitive today, and agents are their natural customers.
+First target market: wallet-gated MCP servers - paid MCP servers have no licensing primitive today, and agents are their natural customers.
 
 ## Design documents
 
-- [ideation.md](ideation.md) — project vision, design principles, what rub3 is and isn't
-- [architecture.md](architecture.md) — system design, session model, security tiers, components
-- [implementation.md](implementation.md) — phased development plan with current status
-- [contracts/contracts.md](contracts/contracts.md) — contract setup, local testing, deployment
-- [testing.md](testing.md) — manual testing guide
+- [ideation.md](ideation.md) - project vision, design principles, what rub3 is and isn't
+- [architecture.md](architecture.md) - system design, session model, security tiers, components
+- [implementation.md](implementation.md) - phased development plan with current status
+- [contracts/contracts.md](contracts/contracts.md) - contract setup, local testing, deployment
+- [testing.md](testing.md) - manual testing guide

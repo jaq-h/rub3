@@ -12,7 +12,7 @@
 cargo test -p rub3-wrapper
 ```
 
-This runs all unit tests, integration tests, and license e2e tests. No external tools required — wallet generation and signing are done natively in Rust via `k256`.
+This runs all unit tests, integration tests, and license e2e tests. No external tools required - wallet generation and signing are done natively in Rust via `k256`.
 
 The default bundle is `tier-2` + `webview`, so it compiles neither the tier-3
 capabilities nor the headless front door. Cargo features are additive, so
@@ -47,10 +47,10 @@ scripts/test-e2e.sh
 
 ### Unit tests (in `src/`)
 
-- **`license::tests`** — activation message hashing, personal_sign prefix, proof serialization round-trips
-- **`store::tests`** — proof save/load, directory creation, overwrite, missing file handling
+- **`license::tests`** - activation message hashing, personal_sign prefix, proof serialization round-trips
+- **`store::tests`** - proof save/load, directory creation, overwrite, missing file handling
 - **`rpc::tests`** - provider construction, contract call error paths, `encode_activate_calldata` selector + layout, `get_tx_receipt` / `get_block_number` error paths, ENS stub; and for the EIP-3009 rail (§2.2) the `ReceiveWithAuthorization` typehash against its literal preimage, the signing digest against a vector computed independently with `cast`, every signed field proving it changes that digest, and the `purchaseWithAuthorization` calldata selector
-- **`session::tests`** (requires `session` feature) — message determinism, tier-diffing, expiry edge cases, sign/verify round-trip, wrong-wallet failure; with `cooldown` adds: `verify_onchain` missing-field + bad-URL paths, `should_reverify` distribution sanity
+- **`session::tests`** (requires `session` feature) - message determinism, tier-diffing, expiry edge cases, sign/verify round-trip, wrong-wallet failure; with `cooldown` adds: `verify_onchain` missing-field + bad-URL paths, `should_reverify` distribution sanity
 - **`session_store::tests`** (requires `session` feature) - save/load round-trip, missing-session, `load_latest_session` picking the freshest valid session (`load_latest_session_for_wallet` narrows the same scan to one signer, covered from `activation::tests`)
 - **`identity::tests`** - `IdentityModel` parsing and wire format, ERC-6551 TBA derivation determinism and sensitivity to each input, `resolve_user_id` for both models
 - **`signer::tests`** (requires `headless` feature) - hex key parsing (bare/prefixed/padded, and every rejection: wrong length, non-hex, zero and out-of-curve-order scalars), `Debug` redaction and error messages asserted not to echo the input, `personal_sign` / `sign_prehash` recovery, RFC-6979 determinism, keystore decrypt, password-file precedence, and the strict env-key-over-keystore resolution order with no fall-through on a malformed key
@@ -64,36 +64,36 @@ scripts/test-e2e.sh
 
 Binary-level tests that spawn the wrapper process:
 
-- `runs_child_and_exits_zero` — wrapper exits 0 when child succeeds
-- `propagates_nonzero_exit_code` — wrapper forwards child's exit code
-- `passes_args_to_child` — `--` separator passes trailing args to child
-- `errors_on_missing_binary` — wrapper rejects nonexistent binary path
+- `runs_child_and_exits_zero` - wrapper exits 0 when child succeeds
+- `propagates_nonzero_exit_code` - wrapper forwards child's exit code
+- `passes_args_to_child` - `--` separator passes trailing args to child
+- `errors_on_missing_binary` - wrapper rejects nonexistent binary path
 
 Each test provisions a valid license proof in a temp directory via `RUB3_LICENSE_DIR`.
 
 ### License E2E tests (`tests/license_e2e.rs`)
 
-**Static tests** — use a deterministic test keypair (hardcoded private key `0xac0974...`). Fully reproducible:
+**Static tests** - use a deterministic test keypair (hardcoded private key `0xac0974...`). Fully reproducible:
 
-- `static_license_verifies` — construct proof, verify signature recovery matches wallet address
-- `static_license_loads_and_verifies` — write proof to disk, load it back, verify
-- `static_wrapper_runs_with_valid_license` — run wrapper binary with a valid proof, assert child executes
+- `static_license_verifies` - construct proof, verify signature recovery matches wallet address
+- `static_license_loads_and_verifies` - write proof to disk, load it back, verify
+- `static_wrapper_runs_with_valid_license` - run wrapper binary with a valid proof, assert child executes
 
-**Dynamic tests** — generate a random wallet each run via `k256::ecdsa::SigningKey::random()`:
+**Dynamic tests** - generate a random wallet each run via `k256::ecdsa::SigningKey::random()`:
 
-- `dynamic_wallet_generates_valid_signature` — prove the full crypto pipeline works with random keys
-- `dynamic_license_round_trips` — generate, save, load, verify with fresh keypair
-- `dynamic_wrapper_runs_with_fresh_license` — run wrapper with ephemeral license
+- `dynamic_wallet_generates_valid_signature` - prove the full crypto pipeline works with random keys
+- `dynamic_license_round_trips` - generate, save, load, verify with fresh keypair
+- `dynamic_wrapper_runs_with_fresh_license` - run wrapper with ephemeral license
 
 **Signal handling:**
 
-- `wrapper_forwards_sigterm` — spawn wrapper with `/bin/sleep`, send SIGTERM, assert clean exit
+- `wrapper_forwards_sigterm` - spawn wrapper with `/bin/sleep`, send SIGTERM, assert clean exit
 
 ### Tier-3 on-chain session E2E (`tests/session_onchain_e2e.rs`)
 
 Exercises `session::verify_onchain` against a live EVM node. Requires the Foundry toolchain (`anvil`, `forge`, `cast`) on PATH; gracefully prints `SKIP:` and returns when any of those are missing. Marked `#[ignore]` so default `cargo test` runs skip it.
 
-- `session_verify_onchain_e2e` — spawns `anvil` on port 8547, deploys `Rub3Access` via `forge create`, runs `purchase(address)` + `activate(uint256)` via `cast send`, extracts the receipt's block hash, then:
+- `session_verify_onchain_e2e` - spawns `anvil` on port 8547, deploys `Rub3Access` via `forge create`, runs `purchase(address)` + `activate(uint256)` via `cast send`, extracts the receipt's block hash, then:
   - asserts `verify_onchain` succeeds for a correctly-populated session,
   - tampers the `contract` field → `VerifyError::ContractMismatch`,
   - tampers the `activation_block_hash` → `VerifyError::BlockHashMismatch`,
@@ -156,11 +156,11 @@ In-process EVM: no network, no `.env`. 174 tests across five files.
 
 Shared utilities available to all integration test files:
 
-- `generate_wallet()` — random secp256k1 keypair, returns `(SigningKey, address_hex)`
-- `sign_activation(key, app_id, token_id)` — compute activation message, personal_sign, return hex signature
-- `create_license_json(dir, ...)` — write a valid `LicenseProof` JSON file
-- `wrapper_bin()` — path to the compiled wrapper binary
-- `verifying_key_to_address(key)` — derive Ethereum address from public key
+- `generate_wallet()` - random secp256k1 keypair, returns `(SigningKey, address_hex)`
+- `sign_activation(key, app_id, token_id)` - compute activation message, personal_sign, return hex signature
+- `create_license_json(dir, ...)` - write a valid `LicenseProof` JSON file
+- `wrapper_bin()` - path to the compiled wrapper binary
+- `verifying_key_to_address(key)` - derive Ethereum address from public key
 
 ## 3. Seed a license proof for manual testing
 
