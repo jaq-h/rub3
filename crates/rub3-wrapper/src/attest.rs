@@ -131,12 +131,24 @@ pub struct CanonicalContract {
     pub immutable_ranges: &'static [ImmutableRange],
 }
 
-/// The contract release every entry below was generated from.
+/// The contract release the current `contracts/` produces, and so the label a
+/// freshly generated row carries.
 ///
 /// A label, not a version the code branches on. It exists so a refusal or an
-/// audit log can say *which* canonical contract matched once this table holds
-/// more than one release of the same contract.
-const RELEASE: &str = "2026-08, contracts at implementation.md §2.3 (factory + protocol fee)";
+/// audit log can say *which* canonical contract matched, now that this table
+/// holds more than one release of the same contract.
+const RELEASE: &str =
+    "2026-08, contracts at implementation.md §2.2 (exact payment on the ETH rail)";
+
+/// Superseded by [`RELEASE`], and pinned for good all the same.
+///
+/// Requiring `msg.value` to equal the listed price exactly moved four of the
+/// five fingerprints. A contract deployed before that change goes on selling
+/// and validating its own tokens, so its code stays canonical forever; the rows
+/// carrying this label are the ones that must never be dropped to tidy the
+/// table up.
+const RELEASE_ETH_OVERPAY: &str =
+    "2026-08, contracts at implementation.md §2.3 (factory + protocol fee)";
 
 /// Every contract this binary accepts as canonical rub3 code.
 ///
@@ -146,7 +158,8 @@ const RELEASE: &str = "2026-08, contracts at implementation.md §2.3 (factory + 
 /// `scripts/canonical-bytecode-hashes.sh update`, then add the new rows here.
 /// **Add, do not overwrite** - a deployed contract stays canonical after its
 /// source moves on, and dropping its row would refuse a contract this project
-/// itself deployed and sold from.
+/// itself deployed and sold from. Rows are grouped by contract, newest release
+/// first, so a contract's history reads top to bottom.
 // One range per line, kept that way on purpose: this table is reviewed against
 // contracts/canonical-bytecode.json by eye as well as by test, and rustfmt's
 // four-lines-per-range expansion buries 52 offsets in 200 lines of braces.
@@ -157,6 +170,33 @@ pub static CANONICAL: &[CanonicalContract] = &[
         source: "contracts/src/Rub3Access.sol",
         role: Role::Licence,
         release: RELEASE,
+        masked_sha256: "f0da5f8622b8f5f293876d3acbddda1d56a0abdbc8c4fbf50ebb26f0b245e4ae",
+        immutable_ranges: &[
+            ImmutableRange { start: 1185, length: 32 },
+            ImmutableRange { start: 1443, length: 32 },
+            ImmutableRange { start: 1627, length: 32 },
+            ImmutableRange { start: 1922, length: 32 },
+            ImmutableRange { start: 2210, length: 32 },
+            ImmutableRange { start: 2379, length: 32 },
+            ImmutableRange { start: 2660, length: 32 },
+            ImmutableRange { start: 4508, length: 32 },
+            ImmutableRange { start: 5283, length: 32 },
+            ImmutableRange { start: 5924, length: 32 },
+            ImmutableRange { start: 5981, length: 32 },
+            ImmutableRange { start: 6154, length: 32 },
+            ImmutableRange { start: 6198, length: 32 },
+            ImmutableRange { start: 6673, length: 32 },
+            ImmutableRange { start: 6819, length: 32 },
+            ImmutableRange { start: 8659, length: 32 },
+            ImmutableRange { start: 8701, length: 32 },
+            ImmutableRange { start: 10009, length: 32 },
+        ],
+    },
+    CanonicalContract {
+        contract: "Rub3Access",
+        source: "contracts/src/Rub3Access.sol",
+        role: Role::Licence,
+        release: RELEASE_ETH_OVERPAY,
         masked_sha256: "d876353e538bb876a3eb3e6e870242986c6bdde6f7bcf930ee5815c9e91a0b54",
         immutable_ranges: &[
             ImmutableRange { start: 1185, length: 32 },
@@ -184,6 +224,14 @@ pub static CANONICAL: &[CanonicalContract] = &[
         source: "contracts/src/Rub3Factory.sol",
         role: Role::Deployer,
         release: RELEASE,
+        masked_sha256: "6a1e8ae8ec90d5c2204184b92ea15111f6cf4889a05cd8316e8758a190b7647a",
+        immutable_ranges: &[],
+    },
+    CanonicalContract {
+        contract: "Rub3AccessDeployer",
+        source: "contracts/src/Rub3Factory.sol",
+        role: Role::Deployer,
+        release: RELEASE_ETH_OVERPAY,
         masked_sha256: "32bfebacb709f0bfab9126ac9ebf8a9164064c8c22363a98b7af5aeb3ab888ae",
         immutable_ranges: &[],
     },
@@ -213,6 +261,37 @@ pub static CANONICAL: &[CanonicalContract] = &[
         source: "contracts/src/Rub3Subscription.sol",
         role: Role::Licence,
         release: RELEASE,
+        masked_sha256: "2eab4428ee29c805b4e151a0068673910e7ea4a8e45a760b61ec745f1aba65a1",
+        immutable_ranges: &[
+            ImmutableRange { start: 1284, length: 32 },
+            ImmutableRange { start: 1628, length: 32 },
+            ImmutableRange { start: 1812, length: 32 },
+            ImmutableRange { start: 2169, length: 32 },
+            ImmutableRange { start: 2488, length: 32 },
+            ImmutableRange { start: 2657, length: 32 },
+            ImmutableRange { start: 2990, length: 32 },
+            ImmutableRange { start: 3346, length: 32 },
+            ImmutableRange { start: 4973, length: 32 },
+            ImmutableRange { start: 5906, length: 32 },
+            ImmutableRange { start: 6557, length: 32 },
+            ImmutableRange { start: 6614, length: 32 },
+            ImmutableRange { start: 6784, length: 32 },
+            ImmutableRange { start: 6828, length: 32 },
+            ImmutableRange { start: 7303, length: 32 },
+            ImmutableRange { start: 7449, length: 32 },
+            ImmutableRange { start: 7984, length: 32 },
+            ImmutableRange { start: 8726, length: 32 },
+            ImmutableRange { start: 9736, length: 32 },
+            ImmutableRange { start: 9778, length: 32 },
+            ImmutableRange { start: 9882, length: 32 },
+            ImmutableRange { start: 11420, length: 32 },
+        ],
+    },
+    CanonicalContract {
+        contract: "Rub3Subscription",
+        source: "contracts/src/Rub3Subscription.sol",
+        role: Role::Licence,
+        release: RELEASE_ETH_OVERPAY,
         masked_sha256: "64a4c7bb65dc980c1de33dd9c9a0eae42cb017257162f7e0d8ab5520b2c7ccb4",
         immutable_ranges: &[
             ImmutableRange { start: 1284, length: 32 },
@@ -244,6 +323,14 @@ pub static CANONICAL: &[CanonicalContract] = &[
         source: "contracts/src/Rub3Factory.sol",
         role: Role::Deployer,
         release: RELEASE,
+        masked_sha256: "218f4165d090e7b7109507b178a50a03b1ad63fb65213ec10ffecc19a4de4429",
+        immutable_ranges: &[],
+    },
+    CanonicalContract {
+        contract: "Rub3SubscriptionDeployer",
+        source: "contracts/src/Rub3Factory.sol",
+        role: Role::Deployer,
+        release: RELEASE_ETH_OVERPAY,
         masked_sha256: "eb6ba50265e8d6f4c97e87a4c8d022a32436c8eabea5fe08d997df7efd9ed27d",
         immutable_ranges: &[],
     },
