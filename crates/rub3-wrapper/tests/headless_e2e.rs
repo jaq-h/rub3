@@ -2311,3 +2311,508 @@ fn headless_transport_failure_on_the_domain_separator_read_is_a_hard_error_e2e()
         "and nothing was bought, least of all in ETH",
     );
 }
+
+// ── A node that answers the pre-flight with a revert it invented ─────────────
+
+/// Forwards JSON-RPC to anvil, keeps a copy of every request body, and
+/// optionally answers one selector's `eth_call` with a revert the chain never
+/// gave.
+///
+/// This is the endpoint the pre-flight actually talks to, modelled honestly:
+/// it sees every byte the wrapper sends it, and it decides what to answer. The
+/// two capabilities are one fixture on purpose, because they are one threat -
+/// the party that receives a signed authorization is the same party that says
+/// whether it executes, so "the revert was transient" and "the revert was a
+/// lie" are indistinguishable from the wrapper's side and have the same
+/// consequence: a valid authorization is now in someone else's hands and the
+/// buyer has been sent down the ETH rail.
+struct RecordingProxy {
+    url: String,
+    seen: Arc<Mutex<Vec<String>>>,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RecordingProxy {
+    /// A faithful relay that only watches.
+    fn watching() -> Self {
+        Self::new(None)
+    }
+
+    /// A relay that answers every `eth_call` carrying `selector` with
+    /// `execution reverted`, and forwards everything else untouched.
+    fn reverting(selector: &str) -> Self {
+        Self::new(Some(selector))
+    }
+
+    fn new(revert_selector: Option<&str>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy");
+        let url = format!("http://{}", listener.local_addr().expect("proxy addr"));
+        // Same reason as `BlockingProxy`: the accept loop polls a shutdown flag
+        // and must not park in `accept`.
+        listener.set_nonblocking(true).expect("proxy non-blocking");
+
+        let upstream = format!("127.0.0.1:{PORT}");
+        let needle = revert_selector.map(|s| s.trim_start_matches("0x").to_ascii_lowercase());
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let recorder = Arc::clone(&seen);
+        let handle = std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        let upstream = upstream.clone();
+                        let needle = needle.clone();
+                        let recorder = Arc::clone(&recorder);
+                        std::thread::spawn(move || {
+                            record_and_relay(client, &upstream, recorder, needle.as_deref())
+                        });
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            url,
+            seen,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+
+    /// Every request body the wrapper sent, in order.
+    fn requests(&self) -> Vec<String> {
+        self.seen.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+impl Drop for RecordingProxy {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Relays one client connection, recording each request and substituting a
+/// revert for the intercepted selector.
+///
+/// Unlike [`relay`], this one keeps going after it acts: the intercepted call
+/// is a fallback trigger, not the end of the run, and everything after it -
+/// the ETH price read, the estimate, the broadcast - must still reach anvil.
+fn record_and_relay(
+    mut client: TcpStream,
+    upstream_addr: &str,
+    seen: Arc<Mutex<Vec<String>>>,
+    revert_selector: Option<&str>,
+) {
+    // See `relay`: the accepted stream inherits the listener's non-blocking
+    // flag, which would make the first read fail before the request arrives.
+    if client.set_nonblocking(false).is_err() {
+        return;
+    }
+    let _ = client.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut upstream: Option<TcpStream> = None;
+
+    loop {
+        let Some(request) = read_http_message(&mut client) else {
+            return;
+        };
+        let body = String::from_utf8_lossy(&request).to_string();
+        seen.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(body.clone());
+
+        let lowered = body.to_ascii_lowercase();
+        let intercept = revert_selector
+            .is_some_and(|selector| lowered.contains("\"eth_call\"") && lowered.contains(selector));
+        if intercept {
+            if client.write_all(revert_response(&body).as_bytes()).is_err() {
+                return;
+            }
+            continue;
+        }
+
+        if upstream.is_none() {
+            match TcpStream::connect(upstream_addr) {
+                Ok(stream) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                    upstream = Some(stream);
+                }
+                Err(_) => return,
+            }
+        }
+        let stream = upstream.as_mut().expect("upstream connected above");
+
+        if stream.write_all(&request).is_err() {
+            return;
+        }
+        let Some(response) = read_http_message(stream) else {
+            return;
+        };
+        if client.write_all(&response).is_err() {
+            return;
+        }
+    }
+}
+
+/// The JSON-RPC body a node returns for a reverted `eth_call`, carrying the
+/// request's own id.
+///
+/// Error code 3 is geth's and reth's, and is the shape the wrapper's own
+/// classifier reads as "the chain answered" rather than "the node failed" - so
+/// this drives the fallback rather than the hard-error path.
+fn revert_response(request_body: &str) -> String {
+    let id: u64 = request_body
+        .split("\"id\":")
+        .nth(1)
+        .and_then(|rest| {
+            let digits: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            digits.parse().ok()
+        })
+        .unwrap_or(1);
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":3,"message":"execution reverted"}}}}"#
+    );
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+        payload.len(),
+    )
+}
+
+/// The 4-byte selector of `purchaseWithAuthorization`, taken from the wrapper's
+/// own encoder rather than written out, so a signature change cannot leave this
+/// fixture watching for a call nobody makes.
+fn purchase_with_authorization_selector() -> String {
+    encoded_authorization_call()
+        .chars()
+        .skip(2)
+        .take(8)
+        .collect()
+}
+
+/// Calldata for one `purchaseWithAuthorization`, with every field zeroed. Only
+/// its shape is used: the selector, and the offsets the field readers below
+/// index by.
+fn encoded_authorization_call() -> String {
+    rpc::encode_purchase_with_authorization_calldata(
+        Address::ZERO,
+        rpc::IRub3License::PaymentAuthorization {
+            from: Address::ZERO,
+            validAfter: alloy::primitives::U256::ZERO,
+            validBefore: alloy::primitives::U256::ZERO,
+            salt: B256::ZERO,
+            signature: vec![0u8; 65].into(),
+        },
+    )
+}
+
+/// The `purchaseWithAuthorization` calldata carried in `blob`, if any: every
+/// hex digit from the selector to the first character that is not one.
+///
+/// The blob is a JSON-RPC body, so this recovers the calldata whether it sat in
+/// an `eth_call`'s `data` field or inside the hex of a signed transaction.
+fn authorization_calldata(blob: &str) -> Option<String> {
+    let lowered = blob.to_ascii_lowercase();
+    let at = lowered.find(&purchase_with_authorization_selector())?;
+    Some(
+        lowered[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect(),
+    )
+}
+
+/// The 32-byte word at `index`, counting from the end of the 4-byte selector.
+fn calldata_word(calldata: &str, index: usize) -> u64 {
+    let start = 8 + index * 64;
+    let word = calldata.get(start..start + 64).unwrap_or_else(|| {
+        panic!(
+            "calldata is {} chars, too short for word {index}",
+            calldata.len()
+        )
+    });
+    // Every field this test reads - an ABI offset and a unix timestamp - lives
+    // in the low 8 bytes, so the high 24 must be zero. Asserting that catches a
+    // misaligned read rather than silently truncating one.
+    assert!(
+        word[..48].chars().all(|c| c == '0'),
+        "word {index} is not a small integer: 0x{word}",
+    );
+    u64::from_str_radix(&word[48..], 16).expect("hex word")
+}
+
+/// `auth.validBefore` out of `purchaseWithAuthorization` calldata.
+///
+/// The tuple is dynamic (it ends in `bytes signature`), so its position is read
+/// from the ABI head rather than assumed: head word 0 is `recipient`, head word
+/// 1 is the offset to the tuple, and `validBefore` is the tuple's third field
+/// after `from` and `validAfter`.
+fn valid_before(calldata: &str) -> u64 {
+    let tuple_at = calldata_word(calldata, 1) as usize;
+    assert_eq!(tuple_at % 32, 0, "ABI offsets are word-aligned");
+    calldata_word(calldata, tuple_at / 32 + 2)
+}
+
+/// Moves the chain's clock forward and mines, so a test can cross an expiry
+/// without sleeping through it.
+fn warp(secs: u64) {
+    let url = rpc_url();
+    let output = Command::new("cast")
+        .args([
+            "rpc",
+            "evm_increaseTime",
+            &secs.to_string(),
+            "--rpc-url",
+            &url,
+        ])
+        .output()
+        .expect("failed to run cast rpc evm_increaseTime");
+    assert!(
+        output.status.success(),
+        "evm_increaseTime failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    mine(1);
+}
+
+/// Submits raw calldata to `contract` from the deployer key - the third party
+/// any endpoint holding an authorization could be - and reports whether the
+/// chain took it.
+fn submit_raw(contract: &str, calldata: &str) -> Result<(), String> {
+    let url = rpc_url();
+    let data = format!("0x{}", calldata.trim_start_matches("0x"));
+    let output = Command::new("cast")
+        .args([
+            "send",
+            contract,
+            &data,
+            "--private-key",
+            DEPLOYER_KEY,
+            "--rpc-url",
+            &url,
+        ])
+        .output()
+        .expect("failed to run cast send");
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+/// Simulates raw calldata against `contract` with `eth_call`, moving nothing.
+///
+/// The positive control for a replay test: it proves the captured blob is a
+/// live payment instrument at the moment it is captured, without spending it.
+fn call_raw(contract: &str, calldata: &str) -> Result<(), String> {
+    let url = rpc_url();
+    let data = format!("0x{}", calldata.trim_start_matches("0x"));
+    let output = Command::new("cast")
+        .args(["call", contract, &data, "--rpc-url", &url])
+        .output()
+        .expect("failed to run cast call");
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+/// True when a `cast` failure is the token refusing an expired authorization.
+///
+/// The mock reverts with the custom error `AuthorizationExpired()`; running
+/// from raw calldata, `cast` may print the decoded name or only the bare
+/// selector, so both spellings count.
+fn names_the_expiry(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("authorizationexpired") || lower.contains("0f05f5bf")
+}
+
+/// Unix seconds now, the clock `validBefore` is measured against.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the epoch")
+        .as_secs()
+}
+
+/// The endpoint reverts the pre-flight, keeps the authorization, and tries to
+/// spend it after the wrapper has already paid in ETH.
+///
+/// This is the fallback path's real hazard, and the reason the disclosed copy
+/// is short-lived. The token here is the *working* mock: nothing about this
+/// purchase is structurally impossible, so the authorization the endpoint is
+/// holding is a live payment instrument for the full listed price. The wrapper
+/// cannot tell that revert from a genuine one - which is the point - so it does
+/// the safe thing and buys in ETH. If the disclosed copy outlived the fallback
+/// by any useful margin, the buyer would then pay a second time, in USDC, for a
+/// licence they had already bought.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_disclosed_authorization_expires_before_the_endpoint_can_spend_it_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed contract address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    let funded_usdc: u128 = USDC_FUNDING.parse().expect("test constant");
+    let eth_before = eth_balance(agent.address());
+
+    let proxy = RecordingProxy::reverting(&purchase_with_authorization_selector());
+    let mut through_proxy = ctx(&contract, None);
+    through_proxy.rpc_url = proxy.url.clone();
+
+    let signed_at = unix_now();
+    let (session, outcome) = ensure_headless(agent.signer.as_ref(), &through_proxy)
+        .expect("a reverted pre-flight must fall back, not fail");
+
+    // The fallback happened, and it really was the ETH rail that paid.
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { token_id, paid } => {
+            assert_eq!(*token_id, 0);
+            assert!(
+                matches!(paid, PaymentRail::Eth { .. }),
+                "a reverted pre-flight must select ETH, got {paid:?}",
+            );
+        }
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+    assert!(
+        eth_before - eth_balance(agent.address()) > PRICE_WEI.parse::<u128>().unwrap(),
+        "the ETH price plus gas must have left the wallet",
+    );
+    assert_eq!(
+        usdc_balance(&usdc, agent.address()),
+        funded_usdc,
+        "the wrapper itself moved no USDC",
+    );
+    session::verify_local(&session).expect("locally signed session must verify");
+
+    // What the endpoint is now holding.
+    let disclosed = proxy
+        .requests()
+        .iter()
+        .filter(|body| body.to_ascii_lowercase().contains("\"eth_call\""))
+        .find_map(|body| authorization_calldata(body))
+        .expect("the pre-flight disclosed an authorization");
+
+    let lifetime = valid_before(&disclosed).saturating_sub(signed_at);
+    assert!(
+        lifetime <= 60,
+        "a disclosed authorization must expire in seconds, not minutes: {lifetime}s",
+    );
+
+    // Before the window closes the instrument is genuinely live: simulated,
+    // not sent, so it moves nothing and the balance assertions below still
+    // mean what they say. This is what makes the failure after the warp
+    // attributable to expiry rather than to a blob this test mis-extracted.
+    call_raw(&contract, &disclosed).unwrap_or_else(|e| {
+        panic!("the disclosed authorization must be spendable before it expires, but: {e}")
+    });
+
+    // And it is worthless once it has. Nothing here is faked: the calldata is
+    // the bytes that left the machine, replayed verbatim by a third party, on
+    // the same chain, against a token that would have honoured it.
+    warp(lifetime + 1);
+    let replay = submit_raw(&contract, &disclosed);
+    let refusal = replay.expect_err("an expired authorization must not be spendable");
+    assert!(
+        names_the_expiry(&refusal),
+        "the replay must fail because the authorization expired, not for some other \
+         reason: {refusal}",
+    );
+
+    assert_eq!(
+        usdc_balance(&usdc, agent.address()),
+        funded_usdc,
+        "the buyer must not have paid a second time, in a second currency",
+    );
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        1,
+        "and must hold one licence, not two",
+    );
+}
+
+/// The other half of the same trade: the copy that is actually broadcast keeps
+/// a window long enough to be mined under congestion.
+///
+/// The pre-flight window and the submission window solve different problems,
+/// and this is what stops the short one from silently becoming the long one.
+/// Both copies are read off the wire in a single successful run.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_broadcasts_a_longer_window_than_it_discloses_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    let contract = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    let proxy = RecordingProxy::watching();
+    let mut through_proxy = ctx(&contract, None);
+    through_proxy.rpc_url = proxy.url.clone();
+
+    let signed_at = unix_now();
+    let (_session, outcome) = ensure_headless(agent.signer.as_ref(), &through_proxy)
+        .expect("the stablecoin rail must still buy a licence through a plain relay");
+    match &outcome {
+        HeadlessOutcome::PurchasedAndActivated { paid, .. } => assert!(
+            matches!(paid, PaymentRail::Erc3009 { .. }),
+            "expected the stablecoin rail, got {paid:?}",
+        ),
+        other => panic!("expected PurchasedAndActivated, got {other:?}"),
+    }
+
+    let requests = proxy.requests();
+    let of_method = |method: &str| -> String {
+        requests
+            .iter()
+            .filter(|body| body.to_ascii_lowercase().contains(method))
+            .find_map(|body| authorization_calldata(body))
+            .unwrap_or_else(|| panic!("no {method} carried an authorization"))
+    };
+
+    let disclosed = valid_before(&of_method("\"eth_call\"")).saturating_sub(signed_at);
+    let broadcast =
+        valid_before(&of_method("\"eth_sendrawtransaction\"")).saturating_sub(signed_at);
+
+    assert!(
+        disclosed <= 60,
+        "the disclosed copy must expire in seconds: {disclosed}s",
+    );
+    assert!(
+        broadcast >= 600,
+        "the broadcast copy needs room to be mined under congestion: {broadcast}s",
+    );
+}

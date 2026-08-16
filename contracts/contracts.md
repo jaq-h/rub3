@@ -209,7 +209,7 @@ cast interface <IMPLEMENTATION_OR_TOKEN> --chain <CHAIN> | grep receiveWithAutho
 
 Read the output rather than the exit status: what you need is a line ending in `bytes signature)` (or `bytes)`). A listing that shows only the `(uint8, bytes32, bytes32)` form means the token cannot be used as `PRICE_TOKEN`. An *empty* result means the check did not answer - an unverified contract, the wrong chain, or a proxy address you have not resolved - and is not itself grounds to conclude anything about the token.
 
-A misconfiguration is not silent at runtime either, and it costs nobody a licence: the wrapper pre-flights the exact `purchaseWithAuthorization` call as an `eth_call` before broadcasting anything, and a token that reverts there selects the ETH rail with a printed reason naming the likely cause. No gas is spent and no activation is lost.
+A misconfiguration is not silent at runtime either, and it costs nobody a licence: the wrapper pre-flights the `purchaseWithAuthorization` call as an `eth_call` before broadcasting anything, differing from the broadcast one only in the authorization's validity window, and a token that reverts there selects the ETH rail with a printed reason naming the likely cause. No gas is spent and no activation is lost.
 
 Read what a contract offers (this is also exactly how the wrapper decides which rail to use - a zero token, or a revert from a contract deployed before §2.2, both mean "ETH only"):
 

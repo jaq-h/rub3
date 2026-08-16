@@ -1231,12 +1231,96 @@ mod headless {
         Ok((session, outcome))
     }
 
-    /// How long a purchase authorization stays spendable, in seconds.
+    /// How long the authorization that is **broadcast** stays spendable, in
+    /// seconds.
     ///
-    /// The wrapper signs and broadcasts in the same breath, so this only has to
-    /// survive congestion, not a human. Keeping it short bounds how long a
-    /// signature that never landed is worth anything to anyone who saw it.
-    const AUTHORIZATION_TTL_SECS: u64 = 900;
+    /// This one has to survive being *mined*. The wrapper signs and broadcasts
+    /// in the same breath, so it only has to outlast congestion, not a human -
+    /// but it does have to outlast congestion, including a base fee spike that
+    /// leaves the transaction in the mempool for several minutes. Fifteen
+    /// minutes is generous against Base's two-second blocks and still bounds
+    /// how long a signature that never landed is worth anything to anyone who
+    /// saw it.
+    ///
+    /// It is deliberately **not** the window on the copy that gets disclosed
+    /// during pre-flight; see [`PREFLIGHT_AUTHORIZATION_TTL_SECS`] for why the
+    /// two numbers cannot be one number.
+    pub(super) const AUTHORIZATION_TTL_SECS: u64 = 900;
+
+    /// How long the authorization that is **disclosed to the RPC endpoint**
+    /// during pre-flight stays spendable, in seconds.
+    ///
+    /// The pre-flight hands a signed authorization to a third-party endpoint as
+    /// `eth_call` calldata, and `purchaseWithAuthorization` is submittable by
+    /// anyone: disclosure is spending. When the pre-flight *fails* the wrapper
+    /// buys in ETH instead, so an endpoint that answered "reverted" - through
+    /// transient fault or through malice - is left holding a live payment
+    /// instrument for a licence the buyer is about to pay for again in another
+    /// currency. This window is what makes that instrument worthless.
+    ///
+    /// **The length of this window is the entire defence on that path, which
+    /// is why it is this small.** The ETH fallback pays through the payable
+    /// `purchase(address)`, which never touches `purchaseAuthorizationNonce`,
+    /// so it cannot burn the disclosed copy's single-use EIP-3009 nonce the way
+    /// a stablecoin submission would. For the lifetime of this window, and for
+    /// nothing beyond it, the disclosed copy stays spendable *alongside* the
+    /// ETH payment the wrapper is making - the buyer can still be charged in
+    /// both currencies by an endpoint fast enough to race. Seconds bound that
+    /// race; the shared nonce does not (see [`authorize_purchase`]).
+    ///
+    /// **The two numbers solve opposite problems and cannot be reconciled into
+    /// one.** [`AUTHORIZATION_TTL_SECS`] is sized so a broadcast transaction
+    /// can be mined; this one is sized so a leaked signature cannot be. A
+    /// single window short enough for the second is too short for the first,
+    /// which is why the pre-flight copy and the broadcast copy are signed
+    /// separately, over the same nonce (see [`authorize_purchase`]).
+    ///
+    /// Thirty seconds, because what this has to survive is one JSON-RPC round
+    /// trip on a *cold* connection - `rpc::build_provider` builds a fresh HTTP
+    /// provider per call and each call gets its own runtime, so the pre-flight
+    /// pays DNS, TCP and TLS setup rather than reusing anything - plus whatever
+    /// the local clock is out by. Cold against a remote HTTPS endpoint is tens
+    /// to hundreds of milliseconds, still two orders of magnitude under the
+    /// window, which leaves the rest of the margin for clock error. The chain's
+    /// side of the comparison helps rather than hurts: an `eth_call` executes
+    /// against the latest block, whose timestamp trails wall-clock time, so
+    /// lag only widens the margin.
+    ///
+    /// **Local-clock skew is the residual limit, and it cuts both ways.**
+    /// `validBefore` is [`AuthorizationTerms::signed_at`] plus this constant,
+    /// and `signed_at` is a pure local clock read, so the chain never agrees
+    /// with it exactly. A clock more than half a minute *behind* the chain's
+    /// costs availability: the pre-flight reverts as expired and the run buys
+    /// in ETH, which is the direction every other rail check already fails in,
+    /// and it announces itself with the chain's own "authorization is expired"
+    /// in the printed reason. A clock *ahead* of the chain's by S seconds costs
+    /// security instead, and says nothing: the disclosed copy is live on-chain
+    /// for 30 + S seconds, the pre-flight succeeds, the run looks entirely
+    /// ordinary, and no operator sees the widened window. On an NTP-less
+    /// container or a drifted VM, S is minutes. Deriving `validBefore` from the
+    /// chain's own clock would remove this direction outright and is the
+    /// natural refinement, but it puts a chain read and a new transport-failure
+    /// path in front of the purchase; it is not built here.
+    pub(super) const PREFLIGHT_AUTHORIZATION_TTL_SECS: u64 = 30;
+
+    /// The two windows solve opposite problems, so the relationship between
+    /// them is checked by the compiler rather than by a test: the copy that is
+    /// disclosed must expire in seconds, and the copy that is broadcast must
+    /// not.
+    const _: () = {
+        assert!(
+            PREFLIGHT_AUTHORIZATION_TTL_SECS <= 60,
+            "a disclosed authorization must expire in seconds",
+        );
+        assert!(
+            AUTHORIZATION_TTL_SECS >= 600,
+            "a broadcast authorization must survive congestion",
+        );
+        assert!(
+            PREFLIGHT_AUTHORIZATION_TTL_SECS < AUTHORIZATION_TTL_SECS,
+            "the copy that is disclosed must never outlive the copy that is used",
+        );
+    };
 
     /// Buys a token for `wallet` and returns `(token_id, rail)`.
     ///
@@ -1362,10 +1446,18 @@ mod headless {
     ///
     /// Everything the rail needs is resolved before one of these exists: the
     /// payment token's EIP-712 domain, the operator's spend ceiling, the
-    /// buyer's signature, and an `eth_call` of the exact transaction that will
-    /// be broadcast. Once [`choose_rail`] hands one back the rail is committed,
+    /// buyer's signature, and an `eth_call` of the transaction that will be
+    /// broadcast. Once [`choose_rail`] hands one back the rail is committed,
     /// and nothing downstream can discover a reason it was unusable after the
     /// ETH path has already been passed over.
+    ///
+    /// The pre-flighted copy and `auth` differ in one field, `validBefore`, and
+    /// nothing the pre-flight proves turns on it: the token compares it against
+    /// `block.timestamp`, both copies are in date when they execute, and the
+    /// signature over each is checked by the same code path. What the
+    /// pre-flight establishes - that the overload exists, that the buyer may
+    /// spend, that supply remains - transfers to `auth` unchanged. See
+    /// [`authorize_purchase`] for why they are not one signature.
     pub(super) struct TokenRail {
         price: rpc::StablecoinPrice,
         auth: rpc::IRub3License::PaymentAuthorization,
@@ -1385,7 +1477,17 @@ mod headless {
     /// by design, so disclosure *is* spending. The ceiling bounds what a single
     /// authorization may carry, which means bounding whether one is created at
     /// all. Hence: advertised -> affordable -> domain readable -> ceiling ->
-    /// sign -> pre-flight.
+    /// sign the short-lived copy -> pre-flight -> sign the broadcastable one.
+    ///
+    /// **The signing is split for the same reason the ceiling comes first.**
+    /// The pre-flight hands its copy to an RPC endpoint, and a revert sends the
+    /// run down the ETH rail while that endpoint keeps the calldata; a
+    /// transient revert - or an invented one - would otherwise leave a
+    /// fifteen-minute payment instrument in a stranger's hands for a licence
+    /// the buyer is about to pay for in ETH. So the disclosed copy expires in
+    /// seconds ([`PREFLIGHT_AUTHORIZATION_TTL_SECS`]), and the copy that has to
+    /// survive being mined is signed only once the pre-flight has passed and
+    /// the broadcast is next.
     ///
     /// That splits the outcomes cleanly in two, and they must not be blurred:
     ///
@@ -1481,7 +1583,7 @@ mod headless {
             }
         }
 
-        let auth = authorize_purchase(
+        let pending = authorize_purchase(
             signer,
             ctx,
             contract,
@@ -1495,16 +1597,23 @@ mod headless {
         // implementing only the split `(v, r, s)` form is conforming, passes
         // the licence contract's constructor probe, and still reverts here. The
         // contract cannot detect that at deploy time, so the wrapper executes
-        // the exact transaction it is about to send and reads the answer before
-        // any gas is spent. It executes the whole purchase, so the revert it
+        // the transaction it is about to send, differing only in `validBefore`,
+        // and reads the answer before any gas is spent. Nothing this proves
+        // turns on that field. It executes the whole purchase, so the revert it
         // reports may be about the licence contract or the buyer rather than
         // the overload: lead with what the chain said.
+        //
+        // **This discloses an authorization to a third party**, which is why
+        // the copy sent here is the short-lived one. A revert selects ETH, and
+        // the endpoint that reported it - honestly or otherwise - keeps the
+        // calldata; only its window stops that from becoming a second payment
+        // for the same licence. See `PREFLIGHT_AUTHORIZATION_TTL_SECS`.
         match rpc::preflight_purchase_with_authorization(
             &ctx.rpc_url,
             contract,
             wallet,
             wallet,
-            auth.clone(),
+            pending.preflight.clone(),
         ) {
             Ok(()) => {}
             Err(e) if e.is_transport() => return Err(HeadlessError::Rpc(e.to_string())),
@@ -1518,6 +1627,10 @@ mod headless {
             }
         }
 
+        // Only now, with the rail committed and the broadcast next, is a
+        // signature worth stealing created.
+        let auth = pending.broadcastable(signer)?;
+
         Ok(Some(TokenRail { price, auth }))
     }
 
@@ -1530,13 +1643,41 @@ mod headless {
         None
     }
 
-    /// Signs the EIP-3009 authorization that pays for one purchase.
+    /// Signs the EIP-3009 authorizations that pay for one purchase: one to
+    /// disclose, one to broadcast.
     ///
-    /// Everything that binds the authorization is read from the chain rather
-    /// than assumed here: the nonce from the licence contract (it is what ties
-    /// the signature to the mint recipient) and the EIP-712 domain from the
-    /// payment token itself, resolved in [`choose_rail`]. The wrapper
-    /// contributes only the salt and the validity window.
+    /// Everything that binds them is read from the chain rather than assumed
+    /// here: the nonce from the licence contract (it is what ties the signature
+    /// to the mint recipient) and the EIP-712 domain from the payment token
+    /// itself, resolved in [`choose_rail`]. The wrapper contributes only the
+    /// salt and the validity windows.
+    ///
+    /// **Two copies, one nonce.** The two differ in exactly one field,
+    /// `validBefore`, so they are two signatures over one payment rather than
+    /// two payments: the salt is shared, `purchaseAuthorizationNonce` is a pure
+    /// function of it, and EIP-3009 nonces are single-use. Whichever of the two
+    /// reaches the chain first burns the nonce and voids the other.
+    ///
+    /// **That defence covers the submission path only, and not the fallback
+    /// path this arrangement exists for.** When the pre-flight passes, the
+    /// wrapper's own submission is `purchaseWithAuthorization` over the same
+    /// nonce, so the worst an endpoint can do with the disclosed copy inside
+    /// its window is buy the buyer the licence they were buying anyway, and the
+    /// wrapper's submission then reverts instead of paying twice. When the
+    /// pre-flight *fails*, the wrapper pays through the ETH branch of
+    /// [`purchase`] instead: the payable `purchase(address)` never reads or
+    /// writes `purchaseAuthorizationNonce`, so nothing on that path burns the
+    /// disclosed copy's nonce and the sharing buys no protection whatsoever.
+    /// There, [`PREFLIGHT_AUTHORIZATION_TTL_SECS`] is the only thing standing
+    /// between a leaked authorization and a second payment in a second
+    /// currency, which is why it is measured in seconds.
+    ///
+    /// The broadcast copy is signed **after** the pre-flight, by
+    /// [`PendingAuthorization::broadcastable`], and only when the pre-flight
+    /// passed, so no *long-lived* authorization is ever created on the path
+    /// that ends in an ETH purchase. The short-lived copy is created there, and
+    /// it is a fully valid payment instrument until it expires; bounding that
+    /// window is what the split is for, not eliminating the instrument.
     ///
     /// A failure reading the nonce stays a hard error, including a
     /// contract-level one: `purchaseAuthorizationNonce` lives on the licence
@@ -1550,7 +1691,7 @@ mod headless {
         wallet: Address,
         amount: U256,
         domain_separator: alloy::primitives::B256,
-    ) -> Result<rpc::IRub3License::PaymentAuthorization, HeadlessError> {
+    ) -> Result<PendingAuthorization, HeadlessError> {
         use alloy::primitives::B256;
         use rand::RngCore;
 
@@ -1561,29 +1702,90 @@ mod headless {
         let nonce = rpc::purchase_authorization_nonce(&ctx.rpc_url, contract, wallet, salt)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
 
-        let valid_after = U256::ZERO;
-        let valid_before =
-            U256::from(chrono::Utc::now().timestamp().max(0) as u64 + AUTHORIZATION_TTL_SECS);
-
-        let digest = rpc::receive_authorization_digest(
-            domain_separator,
+        let terms = AuthorizationTerms {
             wallet,
             contract,
             amount,
-            valid_after,
-            valid_before,
-            nonce,
-        );
-
-        let signature = signer.sign_prehash(digest).map_err(HeadlessError::Signer)?;
-
-        Ok(rpc::IRub3License::PaymentAuthorization {
-            from: wallet,
-            validAfter: valid_after,
-            validBefore: valid_before,
+            domain_separator,
             salt,
-            signature: pack_signature(&signature).into(),
+            nonce,
+            signed_at: chrono::Utc::now().timestamp().max(0) as u64,
+        };
+
+        Ok(PendingAuthorization {
+            preflight: terms.sign(signer, PREFLIGHT_AUTHORIZATION_TTL_SECS)?,
+            terms,
         })
+    }
+
+    /// Everything one purchase's authorizations are bound to, minus the
+    /// validity window - the one field the two copies differ in.
+    pub(super) struct AuthorizationTerms {
+        pub(super) wallet: Address,
+        pub(super) contract: Address,
+        pub(super) amount: U256,
+        pub(super) domain_separator: alloy::primitives::B256,
+        pub(super) salt: alloy::primitives::B256,
+        pub(super) nonce: alloy::primitives::B256,
+        /// One clock read, shared by both copies, so the windows are two
+        /// offsets from the same instant rather than from two.
+        pub(super) signed_at: u64,
+    }
+
+    impl AuthorizationTerms {
+        /// Signs one copy, valid for `ttl_secs` from [`Self::signed_at`].
+        pub(super) fn sign(
+            &self,
+            signer: &dyn Signer,
+            ttl_secs: u64,
+        ) -> Result<rpc::IRub3License::PaymentAuthorization, HeadlessError> {
+            let valid_after = U256::ZERO;
+            let valid_before = U256::from(self.signed_at + ttl_secs);
+
+            let digest = rpc::receive_authorization_digest(
+                self.domain_separator,
+                self.wallet,
+                self.contract,
+                self.amount,
+                valid_after,
+                valid_before,
+                self.nonce,
+            );
+
+            let signature = signer.sign_prehash(digest).map_err(HeadlessError::Signer)?;
+
+            Ok(rpc::IRub3License::PaymentAuthorization {
+                from: self.wallet,
+                validAfter: valid_after,
+                validBefore: valid_before,
+                salt: self.salt,
+                signature: pack_signature(&signature).into(),
+            })
+        }
+    }
+
+    /// A signed short-lived authorization, plus what is needed to sign the
+    /// long-lived one if - and only if - the pre-flight passes.
+    struct PendingAuthorization {
+        /// The copy that goes to the RPC endpoint as `eth_call` calldata, and
+        /// which must be assumed to have leaked the moment it is sent.
+        preflight: rpc::IRub3License::PaymentAuthorization,
+        terms: AuthorizationTerms,
+    }
+
+    impl PendingAuthorization {
+        /// Signs the copy that will actually be broadcast.
+        ///
+        /// Called only once the pre-flight has proved the purchase executes.
+        /// Reaching for this earlier would put a
+        /// [`AUTHORIZATION_TTL_SECS`]-long signature on the fallback path,
+        /// which is the whole thing being avoided.
+        fn broadcastable(
+            &self,
+            signer: &dyn Signer,
+        ) -> Result<rpc::IRub3License::PaymentAuthorization, HeadlessError> {
+            self.terms.sign(signer, AUTHORIZATION_TTL_SECS)
+        }
     }
 
     /// The 65-byte `r || s || v` packing an EOA signature is, with `v` in
@@ -2534,6 +2736,62 @@ mod tests {
         );
 
         std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
+    // ── Authorization disclosure (§2.2) ──────────────────────────────────────
+
+    /// Two signatures, one payment.
+    ///
+    /// The copies differ in `validBefore` and nothing else, which is what makes
+    /// them alternatives rather than two purchases: the salt is shared, the
+    /// licence contract derives the EIP-3009 nonce from it, and that nonce is
+    /// single-use. Whichever reaches the chain first voids the other.
+    #[test]
+    fn the_two_authorization_copies_share_one_nonce_and_differ_only_in_their_window() {
+        use alloy::primitives::{B256, U256};
+
+        let signer = crate::signer::LocalSigner::from_hex(
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+        // A fixed instant, so the two windows are checked as exact numbers
+        // rather than as a range around "now".
+        let signed_at = 1_700_000_000u64;
+        let terms = headless::AuthorizationTerms {
+            wallet: signer.address(),
+            contract: "0x0000000000000000000000000000000000000abc"
+                .parse()
+                .expect("test address"),
+            amount: U256::from(5_000_000u64),
+            domain_separator: B256::repeat_byte(0x11),
+            salt: B256::repeat_byte(0x22),
+            nonce: B256::repeat_byte(0x33),
+            signed_at,
+        };
+
+        let disclosed = terms
+            .sign(&signer, headless::PREFLIGHT_AUTHORIZATION_TTL_SECS)
+            .expect("signing a pre-flight copy");
+        let broadcast = terms
+            .sign(&signer, headless::AUTHORIZATION_TTL_SECS)
+            .expect("signing a broadcast copy");
+
+        assert_eq!(
+            disclosed.validBefore,
+            U256::from(signed_at + headless::PREFLIGHT_AUTHORIZATION_TTL_SECS),
+        );
+        assert_eq!(
+            broadcast.validBefore,
+            U256::from(signed_at + headless::AUTHORIZATION_TTL_SECS),
+        );
+
+        assert_eq!(disclosed.salt, broadcast.salt, "one salt, so one nonce");
+        assert_eq!(disclosed.from, broadcast.from);
+        assert_eq!(disclosed.validAfter, broadcast.validAfter);
+        assert_ne!(
+            disclosed.signature, broadcast.signature,
+            "different windows are different digests, so different signatures",
+        );
     }
 
     #[test]
