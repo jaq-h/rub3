@@ -620,7 +620,8 @@ rub3 register --name myapp --contract 0x1234...abcd
 
 **Drift protection** - the published record has to stay true
 - `pinned_table_mirrors_the_canonical_manifest` asserts every fingerprint and every immutable range in `contracts/canonical-bytecode.json` is pinned in `attest::CANONICAL`, and prints the row to add when it is not. The blocking `bytecode-fingerprints` CI job already guarantees the manifest matches the contracts; this extends the chain to the binary, and it runs in every tier-2-and-up matrix job
-- Entries accumulate rather than being overwritten: a contract already deployed at an older fingerprint stays canonical forever, because it goes on validating its own tokens forever
+- **Entries accumulate rather than being overwritten, from the first deploy onwards: once a contract is deployed at a fingerprint, its row is permanent**, because that contract goes on selling and validating its own tokens forever however far its source moves on
+- That rule has nothing to protect until then, and nothing is deployed to any public network yet (§1.5): the contracts do not reach mainnet or get declared ready for use until the registry ships, and the factory and the registry launch together (§2.3). A superseded row before the first deploy guards no holder while widening the set of code the wrapper will spend money on, so the table carries exactly one row per contract today - the pre-exact-payment rows of the §2.3 contracts were dropped on that ground while the condition was still false, which is a one-off and not licence to prune the table once a fingerprint is live
 - `bytecode_hash = "none"` (already pinned) is what makes any of this reproducible. Under solc's default a stray comment or a renamed source directory moves every fingerprint
 
 **What this does not prove**, stated in `README.md`, `architecture.md` and `contracts/contracts.md` rather than implied away
