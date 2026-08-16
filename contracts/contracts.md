@@ -343,13 +343,14 @@ forge script script/DeployFactory.s.sol \
   --broadcast
 
 # 2. Any number of licence contracts through it. The fee is not an input here:
-#    the factory reads it off itself.
+#    the factory reads it off itself. FACTORY is the published canonical
+#    address, or a local factory when testing.
 CONTRACT_TYPE=access \
 TOKEN_NAME="My App License" \
 TOKEN_SYMBOL=MAL \
 IDENTITY_MODEL=0 \
 PRICE=50000000000000000 \
-FACTORY=<CANONICAL_FACTORY_ADDRESS_TBD> \   # or a local factory when testing
+FACTORY=<CANONICAL_FACTORY_ADDRESS_TBD> \
 forge script script/Deploy.s.sol \
   --rpc-url http://127.0.0.1:8545 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
