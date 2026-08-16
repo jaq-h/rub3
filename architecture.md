@@ -940,6 +940,7 @@ This is intentional and matches the semantics: **transfer sells the account to t
 ### Defense layers summary
 
 ```
+Attestation:   masked code hash vs fingerprints pinned in the binary (pre-purchase: refuses to buy from non-canonical code)
 Distribution:  on-chain binary hash (verify download)
 Encryption:    AES-256-GCM binary encryption (tiers 3-4: binary useless without valid session)
 Identity:      ENS resolution (verify developer identity)
