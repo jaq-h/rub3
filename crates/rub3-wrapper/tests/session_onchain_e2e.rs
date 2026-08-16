@@ -23,7 +23,7 @@ use rub3_wrapper::rpc;
 use rub3_wrapper::session::{self, Session, VerifyError};
 
 // Anvil's built-in account #0 (deterministic, documented, no real value).
-const DEPLOYER_KEY:  &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const DEPLOYER_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const DEPLOYER_ADDR: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
 const PORT: u16 = 8547;
@@ -47,7 +47,12 @@ fn tool_available(bin: &str) -> bool {
 fn contracts_dir() -> PathBuf {
     // tests/ → crates/rub3-wrapper → crates → workspace root → contracts
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    crate_dir.parent().unwrap().parent().unwrap().join("contracts")
+    crate_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("contracts")
 }
 
 // ── Anvil lifecycle ───────────────────────────────────────────────────────────
@@ -111,8 +116,7 @@ fn forge_create_rub3_access() -> String {
     // with a single stand-in release hash - the zero hash is rejected on-chain
     // because it is the `Unknown` sentinel. `predecessor` is the contract whose
     // holders may migrate onto this one; zero means none.
-    let wrapper_hashes =
-        "[0x1111111111111111111111111111111111111111111111111111111111111111]";
+    let wrapper_hashes = "[0x1111111111111111111111111111111111111111111111111111111111111111]";
     let zero_addr = "0x0000000000000000000000000000000000000000";
     let output = Command::new("forge")
         .current_dir(contracts_dir())
@@ -120,10 +124,13 @@ fn forge_create_rub3_access() -> String {
             "create",
             "src/Rub3Access.sol:Rub3Access",
             "--broadcast",
-            "--private-key", DEPLOYER_KEY,
-            "--rpc-url", &rpc_url(),
+            "--private-key",
+            DEPLOYER_KEY,
+            "--rpc-url",
+            &rpc_url(),
             "--constructor-args",
-            "Rub3 Test", "RUB3",
+            "Rub3 Test",
+            "RUB3",
             // IdentityTerms: (identityModel, tbaImplementation).
             "(0,0x0000000000000000000000000000000000000000)",
             wrapper_hashes,
@@ -132,7 +139,10 @@ fn forge_create_rub3_access() -> String {
             "(0,0x0000000000000000000000000000000000000000,0)",
             // FeeTerms: (feeBps, treasury). Direct deploy, so no fee.
             "(0,0x0000000000000000000000000000000000000000)",
-            "0", "15", zero_addr, DEPLOYER_ADDR,
+            "0",
+            "15",
+            zero_addr,
+            DEPLOYER_ADDR,
         ])
         .output()
         .expect("failed to run forge create");
@@ -159,9 +169,13 @@ fn forge_create_rub3_access() -> String {
 fn cast_send(contract: &str, sig: &str, args: &[&str]) -> String {
     let mut cmd = Command::new("cast");
     cmd.args([
-        "send", contract, sig,
-        "--private-key", DEPLOYER_KEY,
-        "--rpc-url", &rpc_url(),
+        "send",
+        contract,
+        sig,
+        "--private-key",
+        DEPLOYER_KEY,
+        "--rpc-url",
+        &rpc_url(),
         "--json",
     ]);
     for a in args {
@@ -185,11 +199,7 @@ fn cast_send(contract: &str, sig: &str, args: &[&str]) -> String {
 
 fn cast_tx_block_hash(tx_hash: &str) -> String {
     let output = Command::new("cast")
-        .args([
-            "receipt", tx_hash,
-            "blockHash",
-            "--rpc-url", &rpc_url(),
-        ])
+        .args(["receipt", tx_hash, "blockHash", "--rpc-url", &rpc_url()])
         .output()
         .expect("failed to run cast receipt");
     if !output.status.success() {
@@ -220,14 +230,21 @@ fn session_verify_onchain_e2e() {
 
     // 1) Deploy Rub3Access.
     let contract = forge_create_rub3_access();
-    let contract_addr: alloy::primitives::Address =
-        contract.parse().expect("forge returned a malformed address");
+    let contract_addr: alloy::primitives::Address = contract
+        .parse()
+        .expect("forge returned a malformed address");
 
     // Pre-purchase supply state.
-    assert_eq!(rpc::supply_cap(&rpc_url(), contract_addr).unwrap(), 0,
-        "supplyCap should be unlimited (0) in this fixture");
-    assert_eq!(rpc::next_token_id(&rpc_url(), contract_addr).unwrap(), 0,
-        "nextTokenId should be 0 before any mint");
+    assert_eq!(
+        rpc::supply_cap(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "supplyCap should be unlimited (0) in this fixture"
+    );
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        0,
+        "nextTokenId should be 0 before any mint"
+    );
 
     // 2) purchase(address) — mints token_id 0 to DEPLOYER_ADDR.
     //    `price` is 0, so msg.value = 0.
@@ -239,37 +256,42 @@ fn session_verify_onchain_e2e() {
     let minted = rpc::mint_token_id(&rpc_url(), &purchase_tx, contract_addr, deployer_addr)
         .expect("mint_token_id should find the Transfer log");
     assert_eq!(minted, 0, "first mint should be token id 0");
-    assert_eq!(rpc::next_token_id(&rpc_url(), contract_addr).unwrap(), 1,
-        "nextTokenId should be 1 after one mint");
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), contract_addr).unwrap(),
+        1,
+        "nextTokenId should be 1 after one mint"
+    );
 
     // 3) activate(uint256) — records cooldown, assigns session id 1.
     let activate_tx = cast_send(&contract, "activate(uint256)", &["0"]);
 
     // 4) Pull the block hash the receipt recorded.
     let block_hash = cast_tx_block_hash(&activate_tx);
-    assert!(block_hash.starts_with("0x") && block_hash.len() == 66,
-        "unexpected block hash from cast: {block_hash}");
+    assert!(
+        block_hash.starts_with("0x") && block_hash.len() == 66,
+        "unexpected block hash from cast: {block_hash}"
+    );
 
     // 5) Build a Session referencing the real on-chain values. Signature/nonce
     //    are irrelevant here — `verify_onchain` never touches them.
     let session = Session {
-        app_id:                "com.rub3.test".into(),
-        token_id:              0,
-        identity:              "access".into(),
-        user_id:               DEPLOYER_ADDR.into(),
-        tba:                   None,
-        wallet:                DEPLOYER_ADDR.into(),
-        nonce:                 "00".into(),
-        issued_at:             chrono::Utc::now().to_rfc3339(),
-        expires_at:            Some("2099-01-01T00:00:00Z".into()),
-        signature:             "0x00".into(),
-        chain:                 "31337".into(),
-        contract:              contract.clone(),
-        activation_tx:         Some(activate_tx.clone()),
-        activation_block:      None,
+        app_id: "com.rub3.test".into(),
+        token_id: 0,
+        identity: "access".into(),
+        user_id: DEPLOYER_ADDR.into(),
+        tba: None,
+        wallet: DEPLOYER_ADDR.into(),
+        nonce: "00".into(),
+        issued_at: chrono::Utc::now().to_rfc3339(),
+        expires_at: Some("2099-01-01T00:00:00Z".into()),
+        signature: "0x00".into(),
+        chain: "31337".into(),
+        contract: contract.clone(),
+        activation_tx: Some(activate_tx.clone()),
+        activation_block: None,
         activation_block_hash: Some(block_hash.clone()),
-        session_id:            Some(1),
-        device_pubkey:         None,
+        session_id: Some(1),
+        device_pubkey: None,
     };
 
     // ── Happy path ───────────────────────────────────────────────────────────
@@ -286,9 +308,8 @@ fn session_verify_onchain_e2e() {
 
     // ── Tamper: wrong block hash ─────────────────────────────────────────────
     let mut bad_block = session.clone();
-    bad_block.activation_block_hash = Some(
-        "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into(),
-    );
+    bad_block.activation_block_hash =
+        Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into());
     match session::verify_onchain(&bad_block, &rpc_url()) {
         Err(VerifyError::BlockHashMismatch { .. }) => {}
         other => panic!("expected BlockHashMismatch, got {other:?}"),
@@ -296,9 +317,8 @@ fn session_verify_onchain_e2e() {
 
     // ── Tamper: non-existent tx hash ─────────────────────────────────────────
     let mut missing_tx = session.clone();
-    missing_tx.activation_tx = Some(
-        "0x1111111111111111111111111111111111111111111111111111111111111111".into(),
-    );
+    missing_tx.activation_tx =
+        Some("0x1111111111111111111111111111111111111111111111111111111111111111".into());
     match session::verify_onchain(&missing_tx, &rpc_url()) {
         Err(VerifyError::ReceiptNotFound) => {}
         other => panic!("expected ReceiptNotFound, got {other:?}"),
