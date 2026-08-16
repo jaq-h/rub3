@@ -167,7 +167,7 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | Variable | Required | Description |
 |---|---|---|
 | `FEE_BPS` | yes | Protocol fee in basis points, within `MIN_FEE_BPS`..`MAX_FEE_BPS` (200-300). No default: this decides rub3's take for every contract the factory ever deploys |
-| `TREASURY` | yes | Fee recipient. Must be non-zero, and must be able to receive ETH |
+| `TREASURY` | yes | Fee recipient. Must be non-zero, and must be able to receive ETH. Immutable on the factory and on everything it deploys, so the custody requirement and the pre-mainnet proof in [Treasury custody, and the pre-mainnet proof](#treasury-custody-and-the-pre-mainnet-proof) apply before any mainnet factory deploy |
 | `PREVIOUS_FACTORY` | no | The `Rub3Factory` this one supersedes. Unset (or `0x0`) for the **first** factory only; set it on every later one, or the contracts the old factory recorded stop being acceptable predecessors on the new one. Immutable, so it cannot be added afterwards |
 
 ## Paying in USDC (EIP-3009)
@@ -410,6 +410,33 @@ cast call <FACTORY> "isDeployed(address)(bool)" <LICENCE> --rpc-url $RPC
 ```
 
 `Rub3Factory` also enumerates: `deploymentCount()`, `deploymentAt(uint256)`, `deployments()`, so an agent can list the canonical set without replaying logs.
+
+### Treasury custody, and the pre-mainnet proof
+
+`TREASURY` is the single most consequential argument to `DeployFactory.s.sol`, because it is `immutable` on the factory *and* on every licence contract that factory will ever deploy. There is no setter, no admin path, and no migration that reaches a contract already deployed - so if the treasury key is lost, or the treasury is a contract that later becomes unable to receive, **every fee accrued on every contract that factory deployed is unrecoverable, permanently**. The accrue-don't-push design means that failure never reaches a buyer (`test_accrual_rejectingTreasuryCannotBlockPurchases`: purchases still settle and the developer is still paid in full, only rub3's own sweep fails), which is precisely why it would be discovered late.
+
+**The accepted position: the treasury is a Safe multisig on Base with rotatable owners.** A multisig rather than an EOA because the address can never be changed while the signer set behind it can, so a lost or rotated key is an owner change rather than a stranded factory generation; a Safe specifically because it is the battle-tested contract on this chain and it receives both ETH and ERC-20 without conditions. Nothing about this needs a contract change - the contracts already accept any address that can receive - and no multisig is configured today.
+
+**Pre-mainnet launch requirement, to be performed before the mainnet factory deploy and not after:** on Base Sepolia, deploy a factory whose `TREASURY` is the Safe, deploy a licence through it, complete one purchase on each rail, then call `withdrawFees()` and `withdrawTokenFees(<USDC>)` and confirm the Safe's ETH and USDC balances actually moved. Both sweeps are permissionless, so any key can drive them:
+
+```bash
+cast send <LICENCE> "withdrawFees()"                    --rpc-url $BASE_SEPOLIA_RPC_URL --private-key $ANY_KEY
+cast send <LICENCE> "withdrawTokenFees(address)" <USDC> --rpc-url $BASE_SEPOLIA_RPC_URL --private-key $ANY_KEY
+cast balance <SAFE>                                     --rpc-url $BASE_SEPOLIA_RPC_URL
+cast call <USDC> "balanceOf(address)(uint256)" <SAFE>   --rpc-url $BASE_SEPOLIA_RPC_URL
+```
+
+**And a second pre-mainnet step, this one against Base mainnet itself and immediately before the factory deploy:** confirm that the address about to be passed as `TREASURY` has code, and that the Safe behind it reads back the owner set and threshold intended.
+
+```bash
+cast code $TREASURY                           --rpc-url $BASE_RPC_URL   # must be non-empty
+cast call $TREASURY "getOwners()(address[])"  --rpc-url $BASE_RPC_URL
+cast call $TREASURY "getThreshold()(uint256)" --rpc-url $BASE_RPC_URL
+```
+
+That is a separate step because the testnet proof cannot cover it: the Sepolia Safe is a separate deployment, and code at an address on one chain says nothing about code at the same address on another. An identical address is not evidence either - Safe proxies are deployed through the canonical factory with CREATE2, so the same owners, threshold, and salt nonce give the same address on both chains, and a Safe that exists on Sepolia at that address can still be nothing but a counterfactual on mainnet. So passing the proof above establishes that a Safe receives on both rails and nothing about the value actually typed into the mainnet deploy. `Rub3Factory`'s constructor rejects only `address(0)` and deliberately performs no code check - an EOA treasury stays valid - so a mistyped address, or a counterfactual Safe address not yet deployed on mainnet, is accepted silently and permanently. Accrue-don't-push then means nothing surfaces the mistake until the first sweep, which is the late discovery this section exists to prevent.
+
+A Safe that cannot receive on either rail is a mainnet factory that can never collect on that rail, with no way back. Proving the mechanism on testnet and checking the mainnet address itself before the deploy is the whole mitigation.
 
 ### How the split works
 
