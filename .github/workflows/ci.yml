@@ -57,6 +57,12 @@ jobs:
           # without this entry nothing blocking compiles src/webview.rs.
           - bundle: tier-2 + webview
             features: tier-2,webview
+          # The human purchase path. `show_purchase` and its pre-purchase code
+          # attestation are gated on `onchain-write`, which tier-2 does not
+          # enable, so tier-2,webview compiles the window but not the one screen
+          # in it that spends money. This is the only entry that builds it.
+          - bundle: tier-3 + webview
+            features: tier-3,webview
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -88,12 +94,19 @@ jobs:
   # emits warnings, so a permissive clippy job would sit green forever and prove
   # nothing.
   #
-  # Clippy here builds the default bundle (tier-2) plus `--all-targets`. Whole
-  # modules are `#[cfg]`-gated out per tier bundle (see CLAUDE.md), so a clean
-  # run here does not prove the other bundles are clean; the local tier matrix
-  # remains the contributor's job. It was verified clean across tier-0 through
-  # tier-4, tier-3,binary-encryption, tier-2,webview and tier-3,headless at the
-  # commit that made fmt blocking.
+  # Clippy here builds the default bundle (tier-2) plus `--all-targets`, and
+  # then tier-3,webview. Whole modules are `#[cfg]`-gated out per tier bundle
+  # (see CLAUDE.md), so a clean run does not prove the other bundles are clean;
+  # the local tier matrix remains the contributor's job. It was verified clean
+  # across all nine: tier-0 through tier-4, tier-3,binary-encryption,
+  # tier-2,webview, tier-3,webview and tier-3,headless.
+  #
+  # tier-3,webview is linted here as well because the default bundle compiles
+  # none of the window's purchase screen or the code attestation guarding it -
+  # both need onchain-write - so that gate would otherwise be shipped by a job
+  # that never built it. It is one extra invocation on purpose: linting every
+  # bundle here would duplicate the matrix job for a lint that has never
+  # differed outside this one gap.
   #
   # The repo has no `rustfmt.toml`: formatting is stock rustfmt defaults on
   # purpose, so `cargo fmt --all` is always the whole fix for a red fmt step.
@@ -116,6 +129,10 @@ jobs:
       - name: cargo clippy
         if: always()
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo clippy (tier-3,webview)
+        if: always()
+        run: cargo clippy -p rub3-wrapper --no-default-features --features tier-3,webview --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Solidity. `forge test` MUST run from contracts/ -- remappings.txt uses paths

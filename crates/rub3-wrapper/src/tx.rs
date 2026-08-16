@@ -9,6 +9,13 @@
 //! [`Signer::sign_prehash`], which a KMS or enclave backend serves without
 //! releasing a key. Calldata construction stays in [`crate::rpc`]; this module
 //! only wraps it in an envelope.
+//!
+//! Every error built from an alloy provider here goes through
+//! [`crate::rpc::redact_urls`], the one sanitiser, because these messages are
+//! built from the request and carry the packed `RPC_URL` with whatever key is
+//! embedded in it. `TxError::Rpc` and `TxError::Rejected` reach an operator
+//! through the agent door verbatim, so the redaction has to happen where the
+//! error is made rather than where it is printed.
 
 use alloy::consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy::eips::eip2718::Encodable2718;
@@ -17,6 +24,7 @@ use alloy::primitives::{Address, TxKind, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::TransactionRequest;
 
+use crate::rpc::redact_urls;
 use crate::signer::{Signer, SignerError};
 
 /// Multiplier applied to the node's `eth_estimateGas` result, in percent.
@@ -162,15 +170,15 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
         let chain_id = provider
             .get_chain_id()
             .await
-            .map_err(|e| TxError::Rpc(e.to_string()))?;
+            .map_err(|e| TxError::Rpc(redact_urls(&e.to_string())))?;
         let nonce = provider
             .get_transaction_count(from)
             .await
-            .map_err(|e| TxError::Rpc(e.to_string()))?;
+            .map_err(|e| TxError::Rpc(redact_urls(&e.to_string())))?;
         let fees = provider
             .estimate_eip1559_fees()
             .await
-            .map_err(|e| TxError::Rpc(e.to_string()))?;
+            .map_err(|e| TxError::Rpc(redact_urls(&e.to_string())))?;
 
         // Pre-flight: a wallet that cannot even cover `value` will make
         // `eth_estimateGas` fail with an opaque error. Checking first lets us
@@ -178,7 +186,7 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
         let balance = provider
             .get_balance(from)
             .await
-            .map_err(|e| TxError::Rpc(e.to_string()))?;
+            .map_err(|e| TxError::Rpc(redact_urls(&e.to_string())))?;
         if balance < plan.value {
             return Err(TxError::InsufficientFunds(Some(Shortfall {
                 required: plan.value,
@@ -196,7 +204,7 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
         let estimate = provider
             .estimate_gas(request)
             .await
-            .map_err(|e| classify(e.to_string()))?;
+            .map_err(|e| classify(redact_urls(&e.to_string())))?;
         let gas_limit = estimate.saturating_mul(GAS_LIMIT_BUFFER_PCT) / 100;
 
         let max_cost =
@@ -227,7 +235,7 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
         let pending = provider
             .send_raw_transaction(&raw)
             .await
-            .map_err(|e| classify(e.to_string()))?;
+            .map_err(|e| classify(redact_urls(&e.to_string())))?;
         Ok(format!("0x{}", hex::encode(pending.tx_hash().as_slice())))
     })
 }
@@ -237,7 +245,7 @@ pub fn send(rpc_url: &str, signer: &dyn Signer, plan: &TxPlan) -> Result<String,
 fn build_provider(rpc_url: &str) -> Result<impl Provider, TxError> {
     let url: url::Url = rpc_url
         .parse()
-        .map_err(|e: url::ParseError| TxError::Rpc(e.to_string()))?;
+        .map_err(|e: url::ParseError| TxError::Rpc(redact_urls(&e.to_string())))?;
     Ok(alloy::providers::ProviderBuilder::new().connect_http(url))
 }
 
@@ -271,6 +279,36 @@ mod tests {
         let signer = LocalSigner::from_hex(ANVIL_KEY).unwrap();
         let err = send("not-a-url", &signer, &plan()).unwrap_err();
         assert!(matches!(err, TxError::Rpc(_)), "got {err:?}");
+    }
+
+    /// The agent door prints `TxError` straight through as `HeadlessError::Rpc`,
+    /// so an unreachable node during a headless purchase is where the packed
+    /// endpoint reaches an operator. Driven through `send` rather than through
+    /// the sanitiser, so what is asserted is what the door would actually
+    /// print.
+    #[test]
+    fn a_failed_send_never_carries_the_packed_endpoints_key() {
+        const KEY: &str = "3ac91be5d7204f18ba6e0c9d4f27a615";
+        const HOST: &str = "127.0.0.1";
+        let signer = LocalSigner::from_hex(ANVIL_KEY).unwrap();
+
+        for url in [
+            // Port 1 is reserved and never listening, so every one of these is
+            // refused rather than left to time out.
+            format!("http://{HOST}:1/v2/{KEY}"),
+            format!("http://{HOST}:1/rpc?apiKey={KEY}"),
+            format!("http://apikey:{KEY}@{HOST}:1/rpc"),
+        ] {
+            let rendered = send(&url, &signer, &plan()).unwrap_err().to_string();
+            assert!(
+                !rendered.contains(KEY),
+                "the key reached the door: {rendered}"
+            );
+            assert!(
+                rendered.contains(HOST),
+                "the endpoint that failed still has to be nameable: {rendered}"
+            );
+        }
     }
 
     /// The classifier only pattern-matched a string, so it must not claim to

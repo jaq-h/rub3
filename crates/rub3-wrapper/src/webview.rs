@@ -378,15 +378,14 @@ impl IpcState {
     /// feature, goes to the tier-3 cooldown screen. Otherwise, falls back
     /// to the legacy activation-message screen.
     fn proceed_after_token_selected(&self, owner_address: &str, token_id: u64) {
+        // One statement per bundle, so the two cannot both run: the earlier
+        // shape needed a `return` to stop the tier-3 arm falling into the
+        // legacy one, and that `return` is dead code under every bundle that
+        // compiles it.
         #[cfg(feature = "cooldown")]
-        {
-            self.show_cooldown(owner_address, token_id);
-            return;
-        }
+        self.show_cooldown(owner_address, token_id);
         #[cfg(not(feature = "cooldown"))]
-        {
-            self.show_activate(owner_address, token_id);
-        }
+        self.show_activate(owner_address, token_id);
     }
 
     fn show_activate(&self, address: &str, token_id: u64) {
@@ -437,6 +436,22 @@ impl IpcState {
     /// the contract, encodes `purchase(recipient)` calldata, and emits
     /// `onShowPurchase` with the data the UI needs. Emits an error if supply
     /// is exhausted.
+    ///
+    /// **The code attestation runs first, before every other step here.** This
+    /// is the one function in this file that asks a person to pay, and the
+    /// screen it builds is the whole apparatus of the ask: the contract
+    /// address to send to, the value, the calldata. A person cannot read
+    /// bytecode, so presenting that screen at all is the wrapper vouching for
+    /// the address. Refusing after it is on screen is not refusing - the
+    /// address and calldata are already in front of a wallet - which is why the
+    /// gate returns before anything is displayed rather than warning alongside
+    /// it.
+    ///
+    /// Fails closed, including on a chain read that did not complete, for the
+    /// same reason the agent door does. That posture stops here: `show_activate`,
+    /// `show_cooldown` and `finalize_session` serve a licence already paid for
+    /// and must never consult this gate - see `attest`'s module docs, and the
+    /// test that holds them to it.
     #[cfg(feature = "onchain-write")]
     fn show_purchase(
         &self,
@@ -444,6 +459,30 @@ impl IpcState {
         recipient: alloy::primitives::Address,
         contract_addr: alloy::primitives::Address,
     ) {
+        match crate::attest::verify_before_purchase(&self.rpc_url, contract_addr) {
+            // One line, on the one path in this file that spends money, naming
+            // what the money is about to go to. Mirrors the agent door.
+            Ok(canonical) => eprintln!(
+                "rub3: {contract_addr} verified as canonical {} ({})",
+                canonical.contract, canonical.release
+            ),
+            Err(e) => {
+                let notice = refusal_notice(&self.contract, &e);
+                eprintln!("rub3: refusing to present a purchase: {e}");
+                self.eval(format!(
+                    "window.rub3.onPurchaseBlocked({})",
+                    serde_json::json!({
+                        "title":     notice.title,
+                        "body":      notice.body,
+                        "nextStep":  notice.next_step,
+                        "detail":    notice.detail,
+                        "retryable": notice.retryable,
+                    })
+                ));
+                return;
+            }
+        }
+
         let cap = match crate::rpc::supply_cap(&self.rpc_url, contract_addr) {
             Ok(c) => c,
             Err(e) => {
@@ -699,6 +738,183 @@ impl IpcState {
     }
 }
 
+// ── The purchase refusal, in a person's words ────────────────────────────────
+
+/// What the window says when the contract does not verify.
+///
+/// The agent door answers the same refusal with an exit code and a machine
+/// detail line, which is the right answer for an orchestrator and no answer at
+/// all for a person: "NotCanonicalContract, code_bytes=0" tells a buyer neither
+/// what happened nor what to do about it. The verification is shared - one gate,
+/// in `attest`, called from both doors - and only the wording differs, which is
+/// where it should differ.
+#[cfg(feature = "onchain-write")]
+struct RefusalNotice {
+    /// The headline: what this is, in one line. Emitted as `"title"`, written
+    /// into `#b-title`.
+    title: &'static str,
+    /// What the check found, said without jargon and without accusing anyone.
+    /// A refusal is equally what a legitimate contract released after this app
+    /// was packed looks like, and the wording must not pretend otherwise.
+    /// Emitted as `"body"`, written into `#b-body`.
+    body: String,
+    /// The one thing the person can usefully do next. Emitted as `"nextStep"`,
+    /// written into `#b-next`.
+    next_step: &'static str,
+    /// The technical finding, for a message to whoever published the software.
+    /// Emitted as `"detail"`, written into `#b-detail`.
+    ///
+    /// A refusal carries its finding verbatim: it is a verdict on the contract,
+    /// and every word of it is about the contract. A failed read carries only
+    /// the kind of failure, because the transport error it came from embeds the
+    /// request URL, and a packed `RPC_URL` can hold a provider API key. That
+    /// key would then be on a buyer's screen under a line inviting them to
+    /// share it, and it tells them nothing their next step does not already
+    /// say. The full error still goes to stderr for whoever ran the wrapper
+    /// from a terminal.
+    detail: String,
+    /// Whether trying again could plausibly change the answer. True only for a
+    /// chain read that did not complete; a refused address is a settled answer
+    /// and offering a retry for it would invite the buyer to keep clicking
+    /// until the check passes. Derived from [`crate::rpc::RpcError::is_retryable`]
+    /// rather than decided here, so the two cannot drift apart. Emitted as
+    /// `"retryable"`, and toggles `#btn-b-retry`.
+    retryable: bool,
+}
+
+/// Turns a gate failure into what the window shows.
+///
+/// Pure, so the words a buyer is about to read are exercised by tests directly
+/// rather than inferred from a screenshot.
+#[cfg(feature = "onchain-write")]
+fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNotice {
+    use crate::attest::{GateError, Refusal, Role};
+    use crate::rpc::RpcError;
+
+    match error {
+        // Not a verdict on the contract: the wrapper has no opinion yet,
+        // because it never got the bytes. Said plainly, because "could not
+        // verify" reads as "found something wrong" to most people.
+        GateError::Fetch(e) => RefusalNotice {
+            title: "Could not check this contract",
+            body: format!(
+                "Before showing you a payment, this app reads the code deployed at {contract} \
+                 and compares it with the licence contracts it was built to trust. That read \
+                 did not complete, so there is nothing to compare. Nothing has been signed and \
+                 nothing has been sent."
+            ),
+            // Tied to `retryable` below, so the words and the button always
+            // agree: telling someone to try again beside a screen with no Try
+            // Again button on it is an instruction they cannot follow.
+            next_step: if e.is_retryable() {
+                "This is a connection problem, not a verdict on the contract. \
+                 Check your network and try again."
+            } else {
+                "This is not a verdict on the contract, but repeating it will not help. \
+                 Check the network and address settings with whoever published this software."
+            },
+            // The kind of failure only, which is a narrower thing than the
+            // redaction `RpcError::transport` already applies. That one strips
+            // the URL out of the error value so no surface can leak the packed
+            // key; this one decides that a buyer being told to forward what
+            // they see should be forwarding a sentence about the failure and
+            // not a network error at all. The redaction is the floor; this is
+            // the choice made on top of it, and neither replaces the other.
+            // Stderr still gets the sanitized error in full.
+            detail: match e {
+                RpcError::Transport(_) => {
+                    "The node this app reads the chain through did not answer the request for \
+                     the contract's code."
+                        .to_string()
+                }
+                RpcError::Contract(_) => {
+                    "The request for the contract's code came back as an error rather than as \
+                     code."
+                        .to_string()
+                }
+                RpcError::InvalidInput(_) => {
+                    "The request for the contract's code was rejected as malformed before it \
+                     reached the network."
+                        .to_string()
+                }
+                RpcError::EnsNotSupported => {
+                    "The contract is named by an ENS name, which this app cannot resolve, so \
+                     its code was never requested."
+                        .to_string()
+                }
+            },
+            retryable: e.is_retryable(),
+        },
+
+        GateError::Refused(refusal) => match refusal {
+            // An empty address is the one refusal a person can often fix
+            // themselves - wrong network, or a copied address that lost a
+            // character - so it says that instead of talking about code.
+            Refusal::Unrecognised(finding) if finding.code_len == 0 => RefusalNotice {
+                title: "Nothing is deployed at this address",
+                body: format!(
+                    "There is no contract at {contract} on this network, so there is no licence \
+                     to buy here. A payment sent to it would leave your wallet and buy nothing."
+                ),
+                next_step: "Either the address or the network is wrong. Check both with \
+                            whoever published this software before sending anything.",
+                detail: finding.to_string(),
+                retryable: false,
+            },
+
+            // Code is there and it is not ours. Both innocent explanations are
+            // stated first, because the honest reading of a miss is "this app
+            // does not know that contract", not "that contract is a fake".
+            Refusal::Unrecognised(finding) => RefusalNotice {
+                title: "This app does not recognise the contract's code",
+                body: format!(
+                    "There is a contract at {contract}, but its code does not match any rub3 \
+                     licence contract this app was built to trust. It may be a newer release \
+                     than this copy of the app knows about, or it may be a modified copy that \
+                     does not behave the way a rub3 licence does. From here the two look the \
+                     same, so you are not being asked to pay either of them. Nothing has been \
+                     signed and nothing has been sent."
+                ),
+                next_step: "Confirm the address with whoever published this software. If they \
+                            say it is current, this copy of the app is older than the contract \
+                            and needs updating.",
+                detail: finding.to_string(),
+                retryable: false,
+            },
+
+            // The code is ours; the address is a category error. Saying so
+            // keeps the buyer from hunting for a compromise that is not there.
+            Refusal::NotALicence {
+                contract: name,
+                role,
+            } => RefusalNotice {
+                title: "This address is rub3 code, but not a licence contract",
+                body: format!(
+                    "The code at {contract} is genuine rub3 code - {name}, {}. A payment sent \
+                     to it would buy nothing and would not come back. The address is wrong; \
+                     the code is not.",
+                    match role {
+                        Role::Factory =>
+                            "the factory that deploys licence contracts rather than one that \
+                             sells them",
+                        Role::Deployer =>
+                            "an internal helper the factory uses to deploy licence contracts",
+                        // Not a state the gate produces - it accepts every
+                        // licence-role match - but kept total rather than
+                        // unreachable so a role added to the table later
+                        // cannot panic a buyer's window.
+                        Role::Licence => "which this app did not accept as a purchase target",
+                    }
+                ),
+                next_step: "Ask whoever published this software for the address of its \
+                            licence contract.",
+                detail: refusal.to_string(),
+                retryable: false,
+            },
+        },
+    }
+}
+
 // ── Tier-3 helpers ────────────────────────────────────────────────────────────
 
 #[cfg(feature = "cooldown")]
@@ -715,4 +931,348 @@ struct FinalizeArgs {
     activation_tx: String,
     activation_block: u64,
     activation_block_hash: String,
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+/// The purchase gate, and the words it puts in front of a person.
+///
+/// Compiled only where a purchase can be made from this window, which is the
+/// same condition the gate itself is compiled under: below tier-3 there is no
+/// `show_purchase` to guard and nothing here to test.
+#[cfg(all(test, feature = "onchain-write"))]
+mod tests {
+    use super::*;
+    use crate::attest::{Refusal, Role, Unrecognised};
+    use crate::test_support::StubNode;
+
+    /// An address that is not the zero address, so nothing short-circuits on
+    /// "no contract configured" before the gate is reached.
+    const CONTRACT: &str = "0x000000000000000000000000000000000000dEaD";
+    const BUYER: &str = "0x00000000000000000000000000000000000B0B0b";
+
+    /// An `IpcState` wired to channels instead of a window, so the scripts it
+    /// would have evaluated can be read back.
+    fn state_for(rpc_url: &str) -> (IpcState, mpsc::Receiver<Cmd>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let (result_tx, _result_rx) = mpsc::channel::<ActivationResult>();
+        // The result receiver is dropped on purpose: a refusal must not send a
+        // result at all, and `send` on a dropped channel is an error the code
+        // already ignores, so this cannot mask one.
+        (
+            IpcState {
+                app_id: "test.app".to_string(),
+                contract: CONTRACT.to_string(),
+                chain_id: 8453,
+                rpc_url: rpc_url.to_string(),
+                developer_ens: None,
+                session_ttl_secs: 3600,
+                cmd_tx,
+                result_tx,
+            },
+            cmd_rx,
+        )
+    }
+
+    /// Every script the state emitted, in order.
+    fn scripts(rx: &mpsc::Receiver<Cmd>) -> Vec<String> {
+        rx.try_iter()
+            .filter_map(|cmd| match cmd {
+                Cmd::Eval(script) => Some(script),
+                Cmd::Close => None,
+            })
+            .collect()
+    }
+
+    /// The argument of the one `onPurchaseBlocked` call, parsed. Fails if the
+    /// window was told anything else, so "it also showed the purchase screen"
+    /// cannot pass as a refusal.
+    fn blocked_payload(rx: &mpsc::Receiver<Cmd>) -> serde_json::Value {
+        let scripts = scripts(rx);
+        assert_eq!(
+            scripts.len(),
+            1,
+            "a refusal is one message and one screen, got {scripts:?}"
+        );
+        let script = &scripts[0];
+        let arg = script
+            .strip_prefix("window.rub3.onPurchaseBlocked(")
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("expected a purchase refusal, got: {script}"));
+        serde_json::from_str(arg).expect("the payload handed to the window is valid JSON")
+    }
+
+    fn buyer() -> alloy::primitives::Address {
+        BUYER.parse().expect("test buyer address")
+    }
+
+    fn contract() -> alloy::primitives::Address {
+        CONTRACT.parse().expect("test contract address")
+    }
+
+    // ── The gate ─────────────────────────────────────────────────────────────
+
+    /// The refusal a person is most likely to meet: a contract is there, and it
+    /// is not one this build knows.
+    ///
+    /// Driven through `show_purchase` against a node that answers with real
+    /// non-canonical code, so what is asserted is the behaviour of the entry
+    /// point the connect screen calls, not of a helper beneath it.
+    #[test]
+    fn unrecognised_code_never_reaches_the_purchase_screen() {
+        let node = StubNode::serving(
+            r#"{"jsonrpc":"2.0","id":0,"result":"0x6080604052348015600f57600080fd5b50"}"#,
+        );
+        let (state, rx) = state_for(&node.url);
+
+        state.show_purchase(BUYER, buyer(), contract());
+
+        let payload = blocked_payload(&rx);
+        assert_eq!(
+            payload["title"], "This app does not recognise the contract's code",
+            "payload: {payload}"
+        );
+        assert_eq!(
+            payload["retryable"], false,
+            "a refused address is a settled answer, not something to click again"
+        );
+        assert!(
+            payload["detail"]
+                .as_str()
+                .expect("detail is a string")
+                .contains("17 bytes"),
+            "the finding must survive to the screen verbatim: {payload}"
+        );
+    }
+
+    /// The ordering claim, which is the whole point of the gate: the code is
+    /// checked before price and supply are even read.
+    ///
+    /// A node that answers nothing fails both the code read and the supply
+    /// read, so the two orderings are told apart by *which* failure the window
+    /// is given. Getting "supply cap read failed" here would mean the contract
+    /// was being priced before it was verified.
+    #[test]
+    fn the_code_is_checked_before_supply_and_price_are_read() {
+        // Port 1 is reserved and never listening: the connection is refused
+        // immediately rather than hanging the test out to a timeout.
+        let (state, rx) = state_for("http://127.0.0.1:1");
+
+        state.show_purchase(BUYER, buyer(), contract());
+
+        let payload = blocked_payload(&rx);
+        assert_eq!(
+            payload["title"], "Could not check this contract",
+            "the failure reported must be the code check, not a later read: {payload}"
+        );
+        assert_eq!(
+            payload["retryable"], true,
+            "an unreachable node is the one refusal worth retrying"
+        );
+    }
+
+    // ── The words ────────────────────────────────────────────────────────────
+
+    /// Two refusal causes, two different explanations. A buyer told "the code
+    /// did not verify" for both has been told nothing they can act on: one of
+    /// them means the address may be dangerous, the other means the address is
+    /// simply the wrong one.
+    #[test]
+    fn the_two_refusal_causes_read_differently() {
+        let unrecognised = refusal_notice(
+            CONTRACT,
+            &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
+                code_len: 4_096,
+                exposed: vec!["seize(uint256)"],
+            })),
+        );
+        let not_a_licence = refusal_notice(
+            CONTRACT,
+            &crate::attest::GateError::Refused(Refusal::NotALicence {
+                contract: "Rub3Factory",
+                role: Role::Factory,
+            }),
+        );
+
+        assert_ne!(unrecognised.title, not_a_licence.title);
+        assert_ne!(unrecognised.body, not_a_licence.body);
+        assert_ne!(unrecognised.next_step, not_a_licence.next_step);
+
+        // The unrecognised case cannot claim to know what the code is.
+        assert!(
+            unrecognised.body.contains("may be a newer release")
+                && unrecognised.body.contains("modified copy"),
+            "a miss is equally a newer contract and a hostile one; both must be said: {}",
+            unrecognised.body
+        );
+        // The not-a-licence case knows exactly what the code is, and says the
+        // address is the mistake rather than leaving a buyer hunting for one.
+        assert!(
+            not_a_licence.body.contains("genuine rub3 code")
+                && not_a_licence.body.contains("Rub3Factory")
+                && not_a_licence.body.contains("The address is wrong"),
+            "the address, not the code, is the fault here: {}",
+            not_a_licence.body
+        );
+        assert!(!unrecognised.retryable && !not_a_licence.retryable);
+    }
+
+    /// An address holding nothing is a third thing a person can act on - almost
+    /// always the wrong network or a mistyped address - and saying "the code
+    /// does not match" about an empty address would send them looking for a
+    /// contract that is not there.
+    #[test]
+    fn an_empty_address_says_the_address_is_empty() {
+        let notice = refusal_notice(
+            CONTRACT,
+            &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
+                code_len: 0,
+                exposed: vec![],
+            })),
+        );
+        assert_eq!(notice.title, "Nothing is deployed at this address");
+        assert!(
+            notice.next_step.contains("network"),
+            "the likeliest cause has to be named: {}",
+            notice.next_step
+        );
+    }
+
+    /// Every notice is prose a person reads, so it has to survive the source
+    /// formatting that produced it: no doubled spaces from a line continuation,
+    /// no stray indentation, and the address always present so the words are
+    /// about something.
+    #[test]
+    fn every_notice_reads_as_finished_prose() {
+        let notices = [
+            refusal_notice(
+                CONTRACT,
+                &crate::attest::GateError::Fetch(crate::rpc::RpcError::Transport(
+                    "connection refused".into(),
+                )),
+            ),
+            refusal_notice(
+                CONTRACT,
+                &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
+                    code_len: 0,
+                    exposed: vec![],
+                })),
+            ),
+            refusal_notice(
+                CONTRACT,
+                &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
+                    code_len: 4_096,
+                    exposed: vec![],
+                })),
+            ),
+            refusal_notice(
+                CONTRACT,
+                &crate::attest::GateError::Refused(Refusal::NotALicence {
+                    contract: "Rub3Factory",
+                    role: Role::Factory,
+                }),
+            ),
+        ];
+
+        for notice in &notices {
+            for (field, text) in [
+                ("title", notice.title.to_string()),
+                ("body", notice.body.clone()),
+                ("next_step", notice.next_step.to_string()),
+            ] {
+                assert!(
+                    !text.contains("  ") && !text.contains('\n'),
+                    "{field} carries source formatting into the window: {text:?}"
+                );
+                assert_eq!(text.trim(), text, "{field} has stray whitespace: {text:?}");
+                assert!(!text.is_empty(), "{field} is empty");
+            }
+            assert!(
+                notice.body.ends_with('.') && notice.next_step.ends_with('.'),
+                "a sentence shown to a person ends: {:?} / {:?}",
+                notice.body,
+                notice.next_step
+            );
+            assert!(
+                notice.body.contains(CONTRACT),
+                "the notice must name the address it is about: {}",
+                notice.body
+            );
+            assert!(!notice.detail.is_empty(), "the finding must be shown");
+        }
+    }
+
+    /// A failed read must not put the RPC endpoint on a buyer's screen.
+    ///
+    /// The transport error is built from the request, so it carries the URL the
+    /// wrapper was packed with, and that URL can hold a provider API key. The
+    /// blocked screen shows `detail` under a line telling the person to send it
+    /// to whoever published the software, so anything in it is as good as
+    /// published. Every field the screen renders is checked, not just `detail`,
+    /// because a leak moved into the body is the same leak.
+    #[test]
+    fn a_failed_read_never_puts_the_rpc_endpoint_on_screen() {
+        const HOST: &str = "base-mainnet.example-provider.io";
+        const SECRET: &str = "9f3c1d7ab24e4a1e8c05f6d2b7e19a44";
+        let transport = format!(
+            "error sending request for url (https://{HOST}/v2/{SECRET}?apiKey={SECRET}): \
+             connection closed before message completed"
+        );
+
+        let notice = refusal_notice(
+            CONTRACT,
+            &crate::attest::GateError::Fetch(crate::rpc::RpcError::Transport(transport)),
+        );
+
+        let shown = format!(
+            "{} {} {} {}",
+            notice.title, notice.body, notice.next_step, notice.detail
+        );
+        for leaked in [HOST, SECRET, "https://", "apiKey", "example-provider"] {
+            assert!(
+                !shown.contains(leaked),
+                "the refusal screen shows {leaked:?}, which came from the packed RPC URL: {shown}"
+            );
+        }
+        assert!(
+            !notice.detail.is_empty(),
+            "redacting the endpoint must not leave the buyer with a blank finding"
+        );
+    }
+
+    /// The refusal screen is not the only place an RPC failure is shown, and it
+    /// is not even the first. `Connect` runs the ownership check before a
+    /// purchase screen exists in the flow at all, and its failure arm puts the
+    /// error straight into the window's error box - which is also where the
+    /// blocked screen's `Try Again` button sends the buyer back to. Driven
+    /// through `handle` so the message asserted on is the one the window is
+    /// actually given.
+    ///
+    /// The other `eval_err` call sites in this file - the cooldown check, the
+    /// supply cap, `nextTokenId`, the price read and the tx pollers - render
+    /// the same `RpcError` the same way, and inherit the same protection from
+    /// its constructors rather than from anything here.
+    #[test]
+    fn the_ownership_check_error_box_never_shows_the_packed_endpoint() {
+        const KEY: &str = "c7e1f4a30b9d42e8a6135f0c8b27d954";
+        let (state, rx) = state_for(&format!("http://127.0.0.1:1/v2/{KEY}?apiKey={KEY}"));
+
+        state.handle(format!(r#"{{"type":"connect","address":"{BUYER}"}}"#));
+
+        let scripts = scripts(&rx);
+        assert_eq!(
+            scripts.len(),
+            1,
+            "expected one error message, got {scripts:?}"
+        );
+        let shown = &scripts[0];
+        assert!(
+            shown.contains("ownership check failed"),
+            "this test is meant to drive the ownership check: {shown}"
+        );
+        assert!(
+            !shown.contains(KEY),
+            "the packed endpoint's key reached the window: {shown}"
+        );
+    }
 }

@@ -126,6 +126,41 @@ pub enum RpcError {
 }
 
 impl RpcError {
+    /// Builds a [`RpcError::Transport`] from a network-layer error, with any
+    /// URL in its message reduced to `scheme://host[:port]`.
+    ///
+    /// Sanitizing at construction, rather than at a display helper, is
+    /// deliberate. The packed `RPC_URL` can carry a provider API key in its
+    /// userinfo, its path or its query, and alloy builds these messages from
+    /// the request, so the key rides in the error value itself. A formatter on
+    /// the webview's error path would cover the window only: the same string
+    /// reaches an operator through the agent door, which turns
+    /// `attest::GateError::Fetch` into a printed `HeadlessError::Rpc`, and
+    /// through `show_purchase`'s `eprintln!`. Redacting here means the URL
+    /// never enters the value, so every surface that exists now or later
+    /// inherits it and no call site has to remember.
+    ///
+    /// Distinct from the webview's kind-only `detail`, which is a separate
+    /// decision about how much a non-technical buyer should be invited to
+    /// paste into a support channel. This one is the floor under every
+    /// surface; that one is a choice about one screen. Do not collapse them.
+    pub fn transport(e: impl std::fmt::Display) -> RpcError {
+        RpcError::Transport(redact_urls(&e.to_string()))
+    }
+
+    /// Builds a [`RpcError::Contract`] from a contract-call error, redacted the
+    /// same way as [`RpcError::transport`].
+    ///
+    /// Needed as much as the transport constructor: alloy reports an
+    /// unreachable node during an `eth_call` as a contract-layer error, so the
+    /// most-travelled leak is here rather than in `Transport`. The window's
+    /// "ownership check failed" message, which every buyer meets before a
+    /// purchase screen exists, is built from a `tokens_of_owner` failure of
+    /// exactly this kind.
+    pub fn contract(e: impl std::fmt::Display) -> RpcError {
+        RpcError::Contract(redact_urls(&e.to_string()))
+    }
+
     /// Whether repeating the identical call could plausibly succeed later.
     ///
     /// Only transport failures qualify: a 502, a rate limit or a dropped
@@ -147,6 +182,121 @@ impl RpcError {
     /// same conclusion.
     pub fn is_transport(&self) -> bool {
         matches!(self, RpcError::Transport(_))
+    }
+}
+
+/// Every character that cannot appear inside a URL, and so ends one.
+///
+/// `)` is in the set because reqwest wraps the URL in parentheses, and every
+/// other member is excluded by RFC 3986 outright. `,`, `.` and `;` are
+/// deliberately absent: they are legal in a query string, and cutting the token
+/// short at one would leave the tail of the URL - which is where a key sits -
+/// standing in the message. `[` and `]` are absent for the same reason and a
+/// sharper one: they open and close an IPv6 host, so treating them as
+/// terminators would cut the token to `scheme://` and leave the entire
+/// authority, path and query behind as prose.
+const URL_TERMINATORS: &[char] = &[
+    ' ', '\t', '\n', '\r', '"', '\'', '(', ')', '{', '}', '<', '>', '`', '|', '\\', '^',
+];
+
+/// What replaces a URL whose authority could not be read.
+const UNREADABLE_URL: &str = "[redacted url]";
+
+/// Rewrites every URL in `message` to `scheme://host[:port]`.
+///
+/// The host and port stay: an operator chasing a dead endpoint needs to know
+/// which one failed, and neither is the secret. Userinfo, path, query and
+/// fragment all go, because a provider key is put in one of those three.
+///
+/// Fails closed. A token whose authority will not parse is replaced by
+/// [`UNREADABLE_URL`] and then consumed to the next whitespace, because the
+/// alternative - emitting the placeholder and letting the unparsed tail through
+/// as prose - would print the key while claiming to have redacted it, which is
+/// worse than not redacting at all.
+pub(crate) fn redact_urls(message: &str) -> String {
+    let bytes = message.as_bytes();
+    let mut out = String::with_capacity(message.len());
+    let mut cursor = 0;
+
+    while let Some(offset) = message[cursor..].find("://") {
+        let separator = cursor + offset;
+
+        // Walk back over the scheme. Stopping where the scheme does means a
+        // bare "://" in prose is left alone rather than swallowing the words
+        // in front of it.
+        let mut start = separator;
+        while start > cursor {
+            let c = bytes[start - 1] as char;
+            if c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        if start == separator {
+            out.push_str(&message[cursor..separator + 3]);
+            cursor = separator + 3;
+            continue;
+        }
+
+        out.push_str(&message[cursor..start]);
+
+        let authority_start = separator + 3;
+        let mut end = url_token_end(message, authority_start);
+        // Sentence punctuation trailing the URL belongs to the sentence, so it
+        // is handed back rather than parsed as part of the address.
+        while end > authority_start && matches!(bytes[end - 1], b'.' | b',' | b';' | b':') {
+            end -= 1;
+        }
+
+        match redact_url(&message[start..end]) {
+            Some(origin) => {
+                out.push_str(&origin);
+                cursor = end;
+            }
+            None => {
+                out.push_str(UNREADABLE_URL);
+                let tail = &message[end..];
+                cursor = end + tail.find(char::is_whitespace).unwrap_or(tail.len());
+            }
+        }
+    }
+
+    out.push_str(&message[cursor..]);
+    out
+}
+
+/// Where the URL beginning at `authority_start` stops.
+///
+/// An IPv6 host is bracketed, and the brackets belong to it, so the scan skips
+/// past the matching `]` before looking for a terminator. Its port, path and
+/// query then terminate exactly as any other URL's do. An opening bracket with
+/// no closing one is not an authority this can read, so the token is cut to
+/// nothing and the caller's fail-closed branch takes it.
+fn url_token_end(message: &str, authority_start: usize) -> usize {
+    let rest = &message[authority_start..];
+    let scan_from = if rest.starts_with('[') {
+        match rest.find(']') {
+            Some(bracket) => authority_start + bracket + 1,
+            None => return authority_start,
+        }
+    } else {
+        authority_start
+    };
+    let tail = &message[scan_from..];
+    scan_from + tail.find(URL_TERMINATORS).unwrap_or(tail.len())
+}
+
+/// One URL token, reduced to its origin, or `None` when there is no authority
+/// to reduce it to. An address this cannot read is an address it cannot promise
+/// carries no key, so the caller drops it whole rather than passing any of it
+/// on.
+fn redact_url(token: &str) -> Option<String> {
+    let url = token.parse::<url::Url>().ok()?;
+    match (url.host_str(), url.port()) {
+        (Some(host), Some(port)) => Some(format!("{}://{host}:{port}", url.scheme())),
+        (Some(host), None) => Some(format!("{}://{host}", url.scheme())),
+        (None, _) => None,
     }
 }
 
@@ -177,7 +327,7 @@ pub fn owner_of(rpc_url: &str, contract: Address, token_id: u64) -> Result<Addre
             .ownerOf(U256::from(token_id))
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(RpcError::contract)?;
         Ok(result)
     })
 }
@@ -192,11 +342,7 @@ pub fn eth_price(rpc_url: &str, contract: Address) -> Result<U256, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
         let instance = IRub3License::new(contract, provider);
-        let result = instance
-            .price()
-            .call()
-            .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+        let result = instance.price().call().await.map_err(RpcError::contract)?;
         Ok(result)
     })
 }
@@ -218,7 +364,7 @@ pub fn tokens_of_owner(
             .balanceOf(owner)
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(RpcError::contract)?;
 
         let count = balance.to::<u64>();
         let mut tokens = Vec::with_capacity(count as usize);
@@ -228,7 +374,7 @@ pub fn tokens_of_owner(
                 .tokenOfOwnerByIndex(owner, U256::from(i))
                 .call()
                 .await
-                .map_err(|e| RpcError::Contract(e.to_string()))?;
+                .map_err(RpcError::contract)?;
             tokens.push(token_id.to::<u64>());
         }
 
@@ -258,7 +404,7 @@ pub fn cooldown_ready(
             .cooldownReady(U256::from(token_id))
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(RpcError::contract)?;
         Ok((r.ready, r.blocksRemaining.to::<u64>()))
     })
 }
@@ -276,7 +422,7 @@ pub fn last_activation_block(
             .lastActivationBlock(U256::from(token_id))
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(RpcError::contract)?;
         Ok(r.to::<u64>())
     })
 }
@@ -290,7 +436,7 @@ pub fn cooldown_blocks(rpc_url: &str, contract: Address) -> Result<u64, RpcError
             .cooldownBlocks()
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(RpcError::contract)?;
         Ok(r.to::<u64>())
     })
 }
@@ -305,7 +451,7 @@ pub fn active_session_id(rpc_url: &str, contract: Address, token_id: u64) -> Res
             .activeSessionId(U256::from(token_id))
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(RpcError::contract)?;
         Ok(r.to::<u64>())
     })
 }
@@ -334,7 +480,7 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
         let maybe = provider
             .get_transaction_receipt(hash)
             .await
-            .map_err(|e| RpcError::Transport(e.to_string()))?;
+            .map_err(RpcError::transport)?;
 
         let receipt = match maybe {
             Some(r) => r,
@@ -508,7 +654,7 @@ pub fn identity_model(rpc_url: &str, contract: Address) -> Result<u8, RpcError> 
             .identityModel()
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(RpcError::contract)?;
         Ok(r)
     })
 }
@@ -525,7 +671,7 @@ pub fn tba_implementation(rpc_url: &str, contract: Address) -> Result<Address, R
             .tbaImplementation()
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(RpcError::contract)?;
         Ok(r)
     })
 }
@@ -539,10 +685,7 @@ pub fn tba_implementation(rpc_url: &str, contract: Address) -> Result<Address, R
 pub fn chain_id(rpc_url: &str) -> Result<u64, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
-        provider
-            .get_chain_id()
-            .await
-            .map_err(|e| RpcError::Transport(e.to_string()))
+        provider.get_chain_id().await.map_err(RpcError::transport)
     })
 }
 
@@ -559,7 +702,7 @@ pub fn get_code(rpc_url: &str, contract: Address) -> Result<Vec<u8>, RpcError> {
         let code = provider
             .get_code_at(contract)
             .await
-            .map_err(|e| RpcError::Transport(e.to_string()))?;
+            .map_err(RpcError::transport)?;
         Ok(code.to_vec())
     })
 }
@@ -571,7 +714,7 @@ pub fn get_block_number(rpc_url: &str) -> Result<u64, RpcError> {
         provider
             .get_block_number()
             .await
-            .map_err(|e| RpcError::Transport(e.to_string()))
+            .map_err(RpcError::transport)
     })
 }
 
@@ -586,7 +729,7 @@ pub fn supply_cap(rpc_url: &str, contract: Address) -> Result<u64, RpcError> {
             .supplyCap()
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(RpcError::contract)?;
         Ok(r.to::<u64>())
     })
 }
@@ -600,7 +743,7 @@ pub fn next_token_id(rpc_url: &str, contract: Address) -> Result<u64, RpcError> 
             .nextTokenId()
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))?;
+            .map_err(RpcError::contract)?;
         Ok(r.to::<u64>())
     })
 }
@@ -720,7 +863,7 @@ pub fn purchase_authorization_nonce(
             .purchaseAuthorizationNonce(recipient, salt)
             .call()
             .await
-            .map_err(|e| RpcError::Contract(e.to_string()))
+            .map_err(RpcError::contract)
     })
 }
 
@@ -846,7 +989,7 @@ fn classify_call_error(e: &alloy::contract::Error) -> RpcError {
         ContractError::ZeroData(..)
         | ContractError::AbiError(_)
         | ContractError::UnknownFunction(_)
-        | ContractError::UnknownSelector(_) => RpcError::Contract(e.to_string()),
+        | ContractError::UnknownSelector(_) => RpcError::contract(e),
         ContractError::TransportError(JsonRpcError::ErrorResp(payload)) => {
             // Geth and reth answer a reverted `eth_call` with code 3; anvil and
             // several hosted nodes use -32000 and say so in the message. Revert
@@ -855,12 +998,12 @@ fn classify_call_error(e: &alloy::contract::Error) -> RpcError {
                 || payload.as_revert_data().is_some()
                 || payload.message.to_ascii_lowercase().contains("revert");
             if reverted {
-                RpcError::Contract(e.to_string())
+                RpcError::contract(e)
             } else {
-                RpcError::Transport(e.to_string())
+                RpcError::transport(e)
             }
         }
-        _ => RpcError::Transport(e.to_string()),
+        _ => RpcError::transport(e),
     }
 }
 
@@ -885,7 +1028,7 @@ pub fn mint_token_id(
         let receipt = provider
             .get_transaction_receipt(hash)
             .await
-            .map_err(|e| RpcError::Transport(e.to_string()))?
+            .map_err(RpcError::transport)?
             .ok_or_else(|| RpcError::Contract("receipt not found".into()))?;
 
         for log in receipt.inner.logs() {
@@ -918,9 +1061,7 @@ pub fn mint_token_id(
 // ── Internals ─────────────────────────────────────────────────────────────────
 
 fn build_provider(rpc_url: &str) -> Result<impl alloy::providers::Provider, RpcError> {
-    let url: url::Url = rpc_url
-        .parse()
-        .map_err(|e: url::ParseError| RpcError::Transport(e.to_string()))?;
+    let url: url::Url = rpc_url.parse().map_err(RpcError::transport)?;
     Ok(ProviderBuilder::new().connect_http(url))
 }
 
@@ -945,6 +1086,159 @@ mod tests {
     // A well-known contract on Base mainnet (verified, non-zero supply).
     // Used only to confirm the RPC path reaches the network in integration tests.
     const SAMPLE_CONTRACT: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+
+    /// A provider key lives in one of three places in an endpoint URL, and an
+    /// error built from the request carries whichever one it is. All three have
+    /// to be gone by the time the error value exists, because from there it is
+    /// printed by the agent door, by `show_purchase`'s stderr line and by the
+    /// window's error box, none of which can put back what construction did not
+    /// strip.
+    #[test]
+    fn a_key_in_the_endpoint_url_never_survives_into_the_error() {
+        const KEY: &str = "9f3c1d7ab24e4a1e8c05f6d2b7e19a44";
+        const HOST: &str = "base-mainnet.example-provider.io";
+
+        for url in [
+            format!("https://{HOST}/v2/{KEY}"),
+            format!("https://{HOST}/rpc?apiKey={KEY}"),
+            format!("https://{KEY}@{HOST}/rpc"),
+            format!("https://apikey:{KEY}@{HOST}/rpc"),
+        ] {
+            let message = format!("error sending request for url ({url}): dispatch failure");
+            for rendered in [
+                RpcError::transport(&message).to_string(),
+                RpcError::contract(&message).to_string(),
+            ] {
+                assert!(
+                    !rendered.contains(KEY),
+                    "the key survived into {rendered:?} (from {url})"
+                );
+                assert!(
+                    rendered.contains(HOST),
+                    "the host is not the secret and an operator needs it: {rendered:?}"
+                );
+                assert!(
+                    rendered.contains("dispatch failure"),
+                    "redaction ate the failure itself: {rendered:?}"
+                );
+            }
+        }
+    }
+
+    /// Redaction is a rewrite of the address, not a truncation of the message:
+    /// the port stays because it identifies the endpoint, and prose on both
+    /// sides of the URL has to come through intact or the error stops being
+    /// readable.
+    #[test]
+    fn redaction_keeps_the_origin_and_the_words_around_it() {
+        assert_eq!(
+            redact_urls("error sending request for url (http://127.0.0.1:8547/v2/k?t=k): refused"),
+            "error sending request for url (http://127.0.0.1:8547): refused"
+        );
+        assert_eq!(
+            redact_urls("could not reach https://node.example.com/rpc/secret."),
+            "could not reach https://node.example.com."
+        );
+        assert_eq!(
+            redact_urls("relative URL without a base"),
+            "relative URL without a base"
+        );
+        assert_eq!(
+            redact_urls("the scheme :// on its own is prose"),
+            "the scheme :// on its own is prose"
+        );
+    }
+
+    /// An IPv6 endpoint is bracketed, and the brackets are part of the host.
+    /// Reading them as delimiters used to cut the token to `scheme://`, which
+    /// failed to parse, so the placeholder was emitted and then the whole
+    /// authority, path and query were appended verbatim as prose - destroying
+    /// the host it meant to keep while publishing the key it meant to strip.
+    #[test]
+    fn a_bracketed_ipv6_endpoint_keeps_its_host_and_loses_its_key() {
+        const KEY: &str = "9f3c1d7ab24e4a1e8c05f6d2b7e19a44";
+
+        assert_eq!(
+            redact_urls(&format!(
+                "error sending request for url (http://[::1]:8545/v2/{KEY})"
+            )),
+            "error sending request for url (http://[::1]:8545)"
+        );
+        assert_eq!(
+            redact_urls(&format!(
+                "could not reach https://[2001:db8::ff00:42:8329]/rpc?apiKey={KEY}"
+            )),
+            "could not reach https://[2001:db8::ff00:42:8329]"
+        );
+        // The trailing-punctuation loop is what could not advance when the
+        // token was cut to `scheme://`, so it gets a bracketed case of its own.
+        assert_eq!(
+            redact_urls(&format!(
+                "node http://[::1]:8545/v2/{KEY}, and then nothing."
+            )),
+            "node http://[::1]:8545, and then nothing."
+        );
+
+        for message in [
+            format!("http://[::1]:8545/v2/{KEY}"),
+            format!("https://[2001:db8::1]:443/rpc?apiKey={KEY}"),
+            format!("http://user:{KEY}@[::1]:8545/rpc"),
+        ] {
+            let rendered = redact_urls(&message);
+            assert!(!rendered.contains(KEY), "the key survived: {rendered}");
+        }
+    }
+
+    /// A URL whose authority cannot be read must fail closed. Emitting the
+    /// placeholder and then letting the unparsed tail through as prose is the
+    /// one outcome worse than no redaction at all: it prints the key while
+    /// claiming to have removed it.
+    #[test]
+    fn an_unreadable_url_is_dropped_whole_rather_than_half_printed() {
+        const KEY: &str = "8b21e5c0f7a94d63b0e2417cf5da9e38";
+
+        for message in [
+            // An opening bracket with no closing one: no authority to read.
+            format!("failed: http://[::1:8545/v2/{KEY} and stopped"),
+            // No host at all, so nothing survives redaction.
+            format!("failed: file:///var/keys/{KEY} and stopped"),
+        ] {
+            let rendered = redact_urls(&message);
+            assert!(!rendered.contains(KEY), "the key survived: {rendered}");
+            assert!(
+                rendered.contains(UNREADABLE_URL),
+                "an unreadable address must say so: {rendered}"
+            );
+            assert!(
+                rendered.ends_with("and stopped"),
+                "only the address is dropped, not the rest of the message: {rendered}"
+            );
+        }
+    }
+
+    /// The window's "ownership check failed" box is the error surface every
+    /// buyer meets first, and alloy reports an unreachable node during that
+    /// `eth_call` as a *contract* error rather than a transport one. Driven
+    /// through the real call so the classification cannot be assumed.
+    #[test]
+    fn an_unreachable_node_leaks_no_key_through_the_ownership_check() {
+        const KEY: &str = "0d41a9b7c8e24f6db3157ae9c2f80b16";
+        // Port 1 is reserved and never listening, so the connection is refused
+        // rather than left to time out.
+        let url = format!("http://127.0.0.1:1/v2/{KEY}?apiKey={KEY}");
+
+        let err = tokens_of_owner(&url, Address::ZERO, Address::ZERO).unwrap_err();
+
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains(KEY),
+            "the key reached the window: {rendered}"
+        );
+        assert!(
+            rendered.contains("127.0.0.1:1"),
+            "the endpoint that failed still has to be nameable: {rendered}"
+        );
+    }
 
     #[test]
     fn resolve_ens_returns_not_supported() {
@@ -1449,126 +1743,7 @@ mod tests {
 #[cfg(test)]
 mod stub_node_tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    /// A local HTTP endpoint that answers every request with the same body.
-    ///
-    /// Each instance binds its own ephemeral port, so nothing is shared between
-    /// tests and they may run in parallel. The port is bound before the URL is
-    /// handed out, which is what makes the endpoint reachable the instant a
-    /// test can name it: a bound listening socket queues incoming connections
-    /// in the kernel whether or not the accept loop has reached `accept` yet.
-    struct StubNode {
-        url: String,
-        shutdown: Arc<AtomicBool>,
-        handle: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl StubNode {
-        fn serving(body: &'static str) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub node");
-            let url = format!("http://{}", listener.local_addr().expect("local addr"));
-            // The accept loop polls a shutdown flag, so it must not park in
-            // `accept` forever. This flag is for the listener alone; see
-            // `answer` for why it must not reach the accepted stream.
-            listener
-                .set_nonblocking(true)
-                .expect("stub node non-blocking");
-
-            let shutdown = Arc::new(AtomicBool::new(false));
-            let flag = Arc::clone(&shutdown);
-            let handle = std::thread::spawn(move || {
-                while !flag.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((stream, _)) => answer(stream, body),
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-
-            Self {
-                url,
-                shutdown,
-                handle: Some(handle),
-            }
-        }
-    }
-
-    impl Drop for StubNode {
-        fn drop(&mut self) {
-            self.shutdown.store(true, Ordering::Relaxed);
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-        }
-    }
-
-    /// Answers one accepted connection with `body`.
-    ///
-    /// Two details here are load-bearing, and getting either wrong makes the
-    /// stub answer a request it never read, which the client reports as a send
-    /// failure rather than as the response it was handed:
-    ///
-    /// 1. `accept` on the BSD socket layer returns a stream that inherits the
-    ///    listener's non-blocking flag, so the accepted stream is put back into
-    ///    blocking mode. Otherwise the first `read` returns `WouldBlock` the
-    ///    moment the connection lands, before the request has arrived, and
-    ///    `set_read_timeout` has no blocking read to apply to.
-    /// 2. The request is drained in full before the socket closes. Closing a
-    ///    socket with bytes still queued unread sends a reset instead of a
-    ///    clean shutdown, and the client sees the reset in place of the reply.
-    fn answer(mut stream: TcpStream, body: &str) {
-        if stream.set_nonblocking(false).is_err() {
-            return;
-        }
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-        if !drain_request(&mut stream) {
-            return;
-        }
-
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.flush();
-        let _ = stream.shutdown(Shutdown::Write);
-    }
-
-    /// Reads one complete HTTP request: the headers, then exactly the body
-    /// length they declare. Reports whether a whole request arrived.
-    fn drain_request(stream: &mut TcpStream) -> bool {
-        let mut buf: Vec<u8> = Vec::new();
-        let mut chunk = [0u8; 1024];
-
-        loop {
-            if let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
-                // A request with no declared length carries no body.
-                let length: usize = head
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length:"))
-                    .and_then(|value| value.trim().parse().ok())
-                    .unwrap_or(0);
-                if buf.len() >= head_end + 4 + length {
-                    return true;
-                }
-            }
-
-            match stream.read(&mut chunk) {
-                Ok(0) | Err(_) => return false,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            }
-        }
-    }
+    use crate::test_support::StubNode;
 
     /// A rate limit is the node's own state, not the contract's. Reading it as
     /// "this contract offers no stablecoin rail" would pay in the wrong
