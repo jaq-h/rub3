@@ -69,7 +69,7 @@ rub3/
 │   │       └── MockEIP3009Token.sol  # Faithful EIP-3009 stand-in for USDC, plus its negative fixtures
 │   ├── script/
 │   │   ├── Deploy.s.sol              # Deploy either contract to any EVM chain, directly or via FACTORY
-│   │   └── DeployFactory.s.sol       # Deploy a Rub3Factory (FEE_BPS + TREASURY, both required)
+│   │   └── DeployFactory.s.sol       # Deploy a Rub3Factory (FEE_BPS + TREASURY required; PREVIOUS_FACTORY optional)
 │   ├── foundry.toml
 │   ├── remappings.txt                # Import remappings pinned in-tree (a reproducibility input)
 │   ├── foundry.lock                  # Pinned dependency revisions, mirrors the submodule gitlinks
