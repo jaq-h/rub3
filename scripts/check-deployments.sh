@@ -71,23 +71,21 @@ expected_chains='{"8453": "base", "84532": "base_sepolia"}'
 # a no-op that still prints "ok". Kept as one program rather than a loop of
 # shell tests so the whole schema is readable in one place.
 errors="$(jq -r --argjson aliases "$aliases_json" --argjson expected "$expected_chains" '
-  def fail($msg): "\($msg)";
-
   [
-    (if .schema != 1 then fail("schema must be 1") else empty end),
-    (if (.note | type) != "string" then fail("note must be a string") else empty end),
-    (if (.fields | type) != "object" then fail("fields must be an object") else empty end),
+    (if .schema != 1 then "schema must be 1" else empty end),
+    (if (.note | type) != "string" then "note must be a string" else empty end),
+    (if (.fields | type) != "object" then "fields must be an object" else empty end),
     (if (.chains | type) != "object"
-      then fail("chains must be an object")
+      then "chains must be an object"
       else (
         (($expected | keys[]) as $id |
           (if (.chains | has($id)) | not
-            then fail("chains must include \($id) (\($expected[$id])), a chain this file must answer for")
+            then "chains must include \($id) (\($expected[$id])), a chain this file must answer for"
             else empty end)),
 
         (($expected | to_entries[]) as $p |
           (if ($aliases | index($p.value)) == null
-            then fail("chain \($p.key): the pinned name \"\($p.value)\" is no longer an [rpc_endpoints] key in contracts/foundry.toml (\($aliases | join(", ")))")
+            then "chain \($p.key): the pinned name \"\($p.value)\" is no longer an [rpc_endpoints] key in contracts/foundry.toml (\($aliases | join(", ")))"
             else empty end)),
 
         (.chains | to_entries[] |
@@ -96,36 +94,36 @@ errors="$(jq -r --argjson aliases "$aliases_json" --argjson expected "$expected_
           ($e.value) as $c |
           (
             (if ($id | test("^[1-9][0-9]*$") | not)
-              then fail("chain key \($id): must be a decimal chain id") else empty end),
+              then "chain key \($id): must be a decimal chain id" else empty end),
             (if ($c | type) != "object"
-              then fail("chain \($id): entry must be an object")
+              then "chain \($id): entry must be an object"
               else (
                 (if ($c | keys) != ["deploy_block", "factory", "generation", "name"]
-                  then fail("chain \($id): keys must be exactly name, factory, deploy_block, generation") else empty end),
+                  then "chain \($id): keys must be exactly name, factory, deploy_block, generation" else empty end),
                 (if ($c.name | type) != "string" or ($c.name | length) == 0
-                  then fail("chain \($id): name must be a non-empty string")
+                  then "chain \($id): name must be a non-empty string"
                   elif ($expected | has($id)) and ($c.name != $expected[$id])
-                    then fail("chain \($id): name must be \"\($expected[$id])\", the [rpc_endpoints] key in contracts/foundry.toml for this chain, not \"\($c.name)\"")
+                    then "chain \($id): name must be \"\($expected[$id])\", the [rpc_endpoints] key in contracts/foundry.toml for this chain, not \"\($c.name)\""
                   elif ($aliases | index($c.name)) == null
-                    then fail("chain \($id): name \"\($c.name)\" is not an [rpc_endpoints] key in contracts/foundry.toml (\($aliases | join(", ")))")
+                    then "chain \($id): name \"\($c.name)\" is not an [rpc_endpoints] key in contracts/foundry.toml (\($aliases | join(", ")))"
                   else empty end),
 
                 (if $c.factory != null and (($c.factory | type) != "string" or ($c.factory | test("^0x[0-9a-fA-F]{40}$") | not))
-                  then fail("chain \($id): factory must be null or 0x-prefixed 40-hex") else empty end),
+                  then "chain \($id): factory must be null or 0x-prefixed 40-hex" else empty end),
                 (if ($c.factory | type) == "string" and ($c.factory | ascii_downcase) == "0x0000000000000000000000000000000000000000"
-                  then fail("chain \($id): factory must not be the zero address") else empty end),
+                  then "chain \($id): factory must not be the zero address" else empty end),
                 (if ($c.factory | type) == "string" and ($c.factory | test("^0x[0-9a-f]{40}$")) and ($c.factory | test("[a-f]"))
-                  then fail("chain \($id): factory must be EIP-55 checksummed, not all lower case") else empty end),
+                  then "chain \($id): factory must be EIP-55 checksummed, not all lower case" else empty end),
                 (if ($c.factory | type) == "string" and ($c.factory | test("^0x[0-9A-F]{40}$")) and ($c.factory | test("[A-F]"))
-                  then fail("chain \($id): factory must be EIP-55 checksummed, not all upper case") else empty end),
+                  then "chain \($id): factory must be EIP-55 checksummed, not all upper case" else empty end),
 
                 (if $c.deploy_block != null and (($c.deploy_block | type) != "number" or ($c.deploy_block | floor) != $c.deploy_block or $c.deploy_block < 0)
-                  then fail("chain \($id): deploy_block must be null or a non-negative integer") else empty end),
+                  then "chain \($id): deploy_block must be null or a non-negative integer" else empty end),
                 (if $c.generation != null and (($c.generation | type) != "number" or ($c.generation | floor) != $c.generation or $c.generation < 1)
-                  then fail("chain \($id): generation must be null or an integer >= 1") else empty end),
+                  then "chain \($id): generation must be null or an integer >= 1" else empty end),
 
                 (if ([$c.factory, $c.deploy_block, $c.generation] | map(. == null) | unique | length) != 1
-                  then fail("chain \($id): an entry is wholly populated or wholly null, never partly") else empty end)
+                  then "chain \($id): an entry is wholly populated or wholly null, never partly" else empty end)
               )
               end)
           )

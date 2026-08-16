@@ -346,7 +346,14 @@ Which path you get is decided by one environment variable, `FACTORY`:
 
 Forgetting `FACTORY` is not an error and does not fail: you get a working, fee-free, unrecorded contract and one line of `console.log` saying so.
 
-**Which factory is canonical is answered by [`contracts/deployments.json`](deployments.json)**, committed beside `canonical-bytecode.json` and keyed by chain id, one entry per chain carrying the factory address, the block it was deployed in, and its generation in the `previousFactory` chain. That file is the only place the answer is published, so a tool that needs it reads it rather than asking a human: `jq -er '.chains["8453"].factory // error("no canonical factory is published for chain 8453")' contracts/deployments.json`. Its own `fields` object documents every key, and `scripts/check-deployments.sh` (run by CI) rejects a malformed or half-filled entry.
+**Which factory is canonical is answered by [`contracts/deployments.json`](deployments.json)**, committed beside `canonical-bytecode.json` and keyed by chain id, one entry per chain carrying the factory address, the block it was deployed in, and its generation in the `previousFactory` chain. That file is the only place the answer is published, so a tool that needs it reads it rather than asking a human, keyed by the chain it is asking about:
+
+```bash
+CHAIN_ID=8453 # 84532 for Base Sepolia
+jq -er --arg id "$CHAIN_ID" ".chains[\$id].factory // error(\"no canonical factory is published for chain \(\$id)\")" contracts/deployments.json
+```
+
+Its own `fields` object documents every key, and `scripts/check-deployments.sh` (run by CI) rejects a malformed or half-filled entry.
 
 **Every entry in it is unpopulated today.** Nothing is deployed to a public network: the contracts are not deployed to mainnet or declared ready for use until the registry is ready, and the factory and the registry launch together. Unpopulated is written as `null` in every field, never as a placeholder address, so there is nothing in the file a script could mistake for a deploy - a `null` factory means "this chain has no canonical factory", and the correct response is to stop, not to substitute another address. That read is the one recipe used everywhere in this repo, and the `// error(...)` half is the point of it: on an unpopulated entry it prints nothing at all and reports the error on stderr, so there is no value to paste and no empty string to hand to forge. The walkthrough below is local, so it takes its factory from step 1 and uses that same read as the live-chain alternative. Either way the deploy refuses unless it has a well-formed address, because `vm.envOr` reads anything it cannot parse exactly as it reads unset, as "no factory": an unpopulated entry, a stray `null`, or an unsubstituted placeholder must never be allowed to degrade into a direct, unrecorded deploy, which is the outcome this file exists to prevent.
 
@@ -368,23 +375,25 @@ forge script script/DeployFactory.s.sol \
 #    no canonical factory, so paste the Rub3Factory address step 1 printed.
 #    Targeting a live chain, take it from the manifest instead:
 #
-#      CANONICAL_FACTORY=$(jq -er '.chains["8453"].factory // error("no canonical factory is published for chain 8453")' deployments.json)
+#      CHAIN_ID=8453 # 84532 for Base Sepolia
+#      CANONICAL_FACTORY=$(jq -er --arg id "$CHAIN_ID" ".chains[\$id].factory // error(\"no canonical factory is published for chain \(\$id)\")" deployments.json)
 #
 #    The grep below is not decoration. forge reads a FACTORY it cannot parse as
 #    an address exactly as it reads an unset one, as "no factory", so a stray
 #    "null" or an unsubstituted placeholder would deploy directly and unrecorded
-#    without failing. Anything that is not 40 hex digits stops here instead. To
+#    without failing. Anything that is not 40 hex digits stops here instead, and
+#    so does the all-zero address, which forge reads as "no factory" too. To
 #    deploy directly on purpose, drop the FACTORY line entirely.
 CANONICAL_FACTORY=0xYourLocalFactoryFromStep1
 
-FACTORY_ADDR=$(printf '%s' "$CANONICAL_FACTORY" | grep -Ex '0x[0-9a-fA-F]{40}')
+FACTORY_ADDR=$(printf '%s' "$CANONICAL_FACTORY" | grep -Ex '0x[0-9a-fA-F]{40}' | grep -Ev '^0x0{40}$')
 
 CONTRACT_TYPE=access \
 TOKEN_NAME="My App License" \
 TOKEN_SYMBOL=MAL \
 IDENTITY_MODEL=0 \
 PRICE=50000000000000000 \
-FACTORY=${FACTORY_ADDR:?CANONICAL_FACTORY is not a 40-hex address: paste the one step 1 printed, read it from deployments.json for a live chain, or drop this FACTORY line for a deliberate direct deploy} \
+FACTORY=${FACTORY_ADDR:?CANONICAL_FACTORY is not a usable factory address: paste the one step 1 printed, read it from deployments.json for a live chain, or drop this FACTORY line for a deliberate direct deploy} \
 forge script script/Deploy.s.sol \
   --rpc-url http://127.0.0.1:8545 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
