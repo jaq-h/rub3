@@ -13,7 +13,7 @@
 
 mod helpers;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const APP_ID: &str = "com.rub3.example";
@@ -47,6 +47,19 @@ fn licensed() -> tempfile::TempDir {
     tmp
 }
 
+/// An empty session directory inside `root`.
+///
+/// The session fast path runs before the legacy proof path in any bundle that
+/// compiles it, and it resolves `~/.rub3/sessions` when `RUB3_SESSION_DIR` is
+/// unset. A session left there by a developer's own run would then serve a
+/// launch these tests seeded a legacy proof for, so the tests that name the
+/// legacy proof have to own an empty directory rather than inherit a machine's.
+fn empty_sessions(root: &Path) -> PathBuf {
+    let dir = root.join("sessions");
+    std::fs::create_dir_all(&dir).expect("the session directory should be creatable");
+    dir
+}
+
 /// Launches `args` under a real wrapper process holding a valid legacy proof.
 fn wrapped(license_dir: &Path, args: &[&str]) -> Output {
     let mut cmd = Command::new(helpers::wrapper_bin());
@@ -55,6 +68,7 @@ fn wrapped(license_dir: &Path, args: &[&str]) -> Output {
         cmd.arg("--").args(&args[1..]);
     }
     cmd.env("RUB3_LICENSE_DIR", license_dir.join("licenses"))
+        .env("RUB3_SESSION_DIR", empty_sessions(license_dir))
         .output()
         .expect("the wrapper should run")
 }
@@ -261,6 +275,7 @@ fn a_stale_address_in_the_wrappers_environment_never_reaches_the_child() {
         .arg(probe_bin())
         .args(["--", "try"])
         .env("RUB3_LICENSE_DIR", tmp.path().join("licenses"))
+        .env("RUB3_SESSION_DIR", empty_sessions(tmp.path()))
         .env("RUB3_SDK_SOCKET", &stale)
         .output()
         .expect("the wrapper should run");

@@ -358,4 +358,29 @@ mod tests {
 
         assert_no_agent_vars(&seen, &["0xdeadbeef", "hunter2"]);
     }
+
+    /// The channel address is scrubbed from every child's environment in every
+    /// bundle, including the ones that serve no channel at all - a child that
+    /// inherited one would talk to somebody else's channel and be answered.
+    ///
+    /// `tests/sdk_e2e.rs` proves the same thing for a build that does serve one,
+    /// but that suite does not compile without the `sdk` feature, and the scrub
+    /// is deliberately unconditional. This is the half no `sdk`-gated test can
+    /// reach.
+    #[test]
+    fn the_wrapped_binary_does_not_inherit_a_stale_sdk_channel_address() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stale = dir.path().join("somebody-elses.sock");
+
+        std::env::set_var(SDK_ADDRESS_ENV, &stale);
+        let seen = child_environment(dir.path());
+        std::env::remove_var(SDK_ADDRESS_ENV);
+
+        let assigned = format!("{SDK_ADDRESS_ENV}=");
+        assert!(
+            !seen.lines().any(|l| l.starts_with(&assigned)),
+            "{SDK_ADDRESS_ENV} reached the wrapped binary: {seen}"
+        );
+    }
 }

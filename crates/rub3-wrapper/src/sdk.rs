@@ -250,6 +250,19 @@ mod platform {
         while !shutdown.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // macOS and the BSDs hand the accepted socket the
+                    // listener's O_NONBLOCK; Linux does not. So this call is
+                    // load-bearing on one platform and a no-op on the other,
+                    // and without it a read that arrives before the client's
+                    // first line would return EAGAIN, which `serve_connection`
+                    // reads as a malformed request and answers before closing.
+                    // A stream that cannot be put back into blocking mode is
+                    // dropped rather than served, so the client sees a dead
+                    // connection rather than an invented protocol error.
+                    if stream.set_nonblocking(false).is_err() {
+                        continue;
+                    }
+
                     // A thread per connection: an application holding a
                     // keep-alive connection open must not stop a second one
                     // being served, and a blocking read on an idle connection
@@ -744,5 +757,57 @@ mod tests {
             !std::path::Path::new(&address).exists(),
             "the endpoint should be removed with the channel"
         );
+    }
+
+    /// The keep-alive contract `serve_connection` documents, over a real socket:
+    /// one connection, two requests, and the reader idle between them.
+    ///
+    /// The idle gaps are the whole point, and they are why the `Loopback` tests
+    /// above cannot stand in for this one. A scripted in-memory stream always
+    /// has the next request already waiting, so it never exercises the read that
+    /// finds nothing there yet - the read a socket still carrying the listener's
+    /// O_NONBLOCK answers with EAGAIN, and this side then reports as a malformed
+    /// request before closing the connection.
+    #[cfg(unix)]
+    #[test]
+    fn two_requests_on_one_idle_real_connection_are_both_answered() {
+        use std::io::BufRead;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        /// Long enough that the accept loop has picked the connection up and
+        /// reached its first read before anything is written to it.
+        const IDLE: Duration = Duration::from_millis(150);
+
+        let channel = serve(Offer::None("tier-0 build".to_string())).expect("the channel starts");
+        let mut stream = UnixStream::connect(channel.address()).expect("the channel accepts");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("a read deadline, so a silent server fails rather than hangs");
+        let mut reader = BufReader::new(stream.try_clone().expect("a duplicated handle"));
+
+        let mut got = Vec::new();
+        for op in ["heartbeat", "session"] {
+            // Idle first, so the server is already blocked in a read when the
+            // request arrives rather than finding it buffered.
+            std::thread::sleep(IDLE);
+
+            let request = format!("{{\"protocol\":1,\"op\":\"{op}\"}}\n");
+            stream
+                .write_all(request.as_bytes())
+                .expect("the connection should still accept a request");
+            stream.flush().expect("flush");
+
+            let mut line = String::new();
+            let read = reader.read_line(&mut line).expect("an answer");
+            assert!(
+                read > 0,
+                "the connection closed instead of answering {op}: got {got:?}"
+            );
+            got.push(serde_json::from_str::<serde_json::Value>(&line).expect("one JSON line"));
+        }
+
+        assert_eq!(got[0]["result"], "alive", "{got:?}");
+        assert_eq!(got[1]["result"], "no_session", "{got:?}");
     }
 }
