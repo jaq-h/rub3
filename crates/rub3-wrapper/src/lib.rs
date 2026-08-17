@@ -28,7 +28,14 @@ pub mod tx;
 
 pub mod activation;
 pub mod rpc;
-mod supervisor;
+pub mod supervisor;
+
+// The wrapper's half of the SDK channel (implementation.md §3.5): the local
+// socket a wrapped application asks "are you there" and "who is running me"
+// over. Orthogonal to the tier bundles - what an application may ask does not
+// depend on how hard the launch was gated - so no bundle enables it.
+#[cfg(feature = "sdk")]
+pub mod sdk;
 
 // Interactive (human) front door. Optional: a `headless` build links neither
 // `wry` nor `tao`.
@@ -51,7 +58,7 @@ pub(crate) mod test_support;
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub use activation::{ensure, ActivationError};
-pub use supervisor::run as supervisor_run;
+pub use supervisor::{run as supervisor_run, Launch};
 
 #[cfg(feature = "headless")]
 pub use activation::{ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome};

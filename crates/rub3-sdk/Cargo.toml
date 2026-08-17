@@ -1,0 +1,19 @@
+# The package is `rub3` while the directory is `rub3-sdk`: the application-facing
+# API reads `rub3::session()` (implementation.md §3.5 names it that way), and the
+# directory keeps the "which crate is this" answer legible next to
+# `crates/rub3-wrapper/`. Cargo commands use the package name: `-p rub3`.
+[package]
+name = "rub3"
+version = "0.1.0"
+edition = "2021"
+description = "Ask the rub3 wrapper who is running this application"
+
+[dependencies]
+# Deliberately short, and it is a design constraint rather than an accident: a
+# wrapped application links this crate into its own build, so anything here is
+# a dependency the application's users inherit. No `alloy`, no `wry`, no async
+# runtime, no HTTP client. The transports are `std` only - a Unix socket on
+# unix, a named-pipe client opened as a file on Windows.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }

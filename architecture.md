@@ -693,12 +693,24 @@ The per-module map lives in `README.md` → "Project structure", which is the si
 | `keyring` | Cross-platform OS keychain access (tier 4, keychain/enclave storage) |
 | `rand` | Cryptographic random nonce generation |
 | `aes-gcm` | AES-256-GCM binary encryption/decryption (tiers 3-4, when encrypt_binary = true) |
+| `rub3` | The SDK crate's wire types, so both halves of the channel share one definition (feature `sdk`) |
+| `windows-sys` | `CreateNamedPipeW` and friends for the channel's named-pipe server (feature `sdk`, Windows only; the client side needs no dependency) |
 
 ---
 
-### 3. rub3 SDK (Rust Crate) *(not started - implementation.md §3.5)*
+### 3. rub3 SDK (Rust Crate) *(built - implementation.md §3.5)*
 
-A thin in-process crate the wrapped app links: `rub3::heartbeat()` and `rub3::session()`, talking to the wrapper over the IPC socket. The one design constraint worth stating here is that application code keys persistent data on `SessionInfo::user_id` (the TBA under the account model, the wallet under the access model), never on the current signing wallet, so a transfer or a wallet rotation does not orphan the user's data. The proposed surface is in implementation.md §3.5.
+The crate a wrapped app links: `rub3::heartbeat()` and `rub3::session()`, talking to the wrapper over a per-launch local endpoint whose address arrives in `RUB3_SDK_SOCKET`. The wrapper's half is `sdk.rs`, behind the `sdk` feature, which no tier bundle enables - what an application may ask about itself is independent of how hard the launch was gated.
+
+**Application code keys persistent data on `SessionInfo::user_id`** (the TBA under the account model, the wallet under the access model), never on the current signing wallet, so a transfer or a wallet rotation does not orphan the user's data. That is enforced by the types rather than by this paragraph: `UserId` implements `Hash`, `Eq`, `Ord` and `Display`, and `Wallet` implements only `Display`, so keying anything on the wallet does not compile.
+
+**What `heartbeat()` proves: an honest integration and a live wrapper. That is the whole claim.** Licensing is enforced before the wrapper launches anything, so by the time the endpoint exists the gate has already run - a live heartbeat says a wrapper is there and answering, not that anything it decided was correct. It re-verifies no signature, reads no chain and consults no contract.
+
+**What it does not prove.** It is not a defence against a determined local attacker, and no local IPC could be. Anyone able to run the wrapped binary outside its wrapper controls the machine: they can publish a socket of their own and answer every request however they like, and any credential the SDK could demand would ship inside the binary they already control. The channel therefore carries no authentication, deliberately. Nor is it tamper evidence - a patched application simply does not call it. What it catches is the ordinary set: an application run directly, a wrapper that died mid-run, a stale address, a version-skewed pair.
+
+**Exactly six fields cross it** - `app_id`, `token_id`, `user_id`, `wallet`, `identity`, `expires_at`. The session signature, its nonce, the activation transaction and the device key stay on the wrapper's side: an application that could read the signature could replay the session somewhere the wrapper never launched it.
+
+**It never gates a launch.** A channel that fails to start is a warning on stderr and the binary runs anyway; refusing to start a paid-for program because a socket could not be created would be a revocation surface (see "Ownership invariants"). Whether the application requires the channel is the developer's call, made by calling `heartbeat()` or not.
 
 ---
 
@@ -873,10 +885,18 @@ Deferred; no launch flow is implemented. See "Deferred designs".
 
 ```text
 While running:
-  Wrapper ──heartbeat IPC──▶ App (every 5s)
-  App panics/exits if heartbeat stops
-  Wrapper exits if app exits
+  App ──"are you there?"──▶ Wrapper       (rub3::heartbeat(), when the app asks)
+  App ──"who is running me?"──▶ Wrapper   (rub3::session())
+  App panics if the wrapper does not answer
+  Wrapper exits when the app exits
 ```
+
+The application asks; the wrapper does not push. A pushed heartbeat would need a
+policy for what the wrapper does when the application stops answering, and the
+only honest answers are "nothing" or "kill a paid-for launch" - the second is a
+revocation surface. So the wrapper answers, and the application decides whether
+it requires an answer. Available in a build with the `sdk` feature; see
+"Components → rub3 SDK" for what a heartbeat does and does not prove.
 
 ---
 
@@ -989,7 +1009,7 @@ Cooldown:      on-chain rate limit (tiers 3-4: prevents mass session distributio
 Revocation:    on-chain session counter (tiers 3-4: new session kills old)
 Device:        ephemeral keypair bound to hardware (tier 4: non-transferable)
 Enforcement:   session TTL (tiers 1-3) or device challenge (tier 4)
-Runtime:       heartbeat IPC (app cannot run without wrapper)
+Runtime:       heartbeat IPC (catches a direct launch or a dead wrapper; proves nothing against a local attacker - see "Components -> rub3 SDK")
 ```
 
 ---

@@ -7,6 +7,15 @@ edition = "2021"
 name = "rub3-wrapper"
 path = "src/main.rs"
 
+# The worked SDK integration, and the child process of `tests/sdk_e2e.rs`. It
+# lives here rather than in the SDK crate because the test that proves both
+# halves needs a stable `CARGO_BIN_EXE_` path for the application it launches,
+# and only this package can offer one alongside the wrapper binary itself.
+[[bin]]
+name = "rub3-sdk-probe"
+path = "src/bin/rub3-sdk-probe.rs"
+required-features = ["sdk"]
+
 [features]
 # Default: tier 2 + the interactive webview - matches the historical runtime
 # behaviour (signature + TTL + on-chain ownership check, human activation UI).
@@ -42,6 +51,15 @@ cooldown        = []
 device-key      = ["dep:keyring"]
 binary-encryption = ["dep:aes-gcm"]   # orthogonal add-on, composes with tier-3+
 
+# ── SDK channel (orthogonal add-on, composes with any tier) ───────────────────
+# Serves the `rub3` SDK crate (implementation.md §3.5): a per-launch local socket
+# the wrapped application asks "are you there" and "who is running me" over. Not
+# named by any tier bundle - what an application may ask is independent of how
+# hard the launch was gated - so a build that wants it says so, exactly like
+# `binary-encryption`. Under tier-0 there is no session model to report and the
+# channel answers heartbeats only.
+sdk = ["dep:rub3", "dep:windows-sys"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
@@ -63,10 +81,26 @@ rand    = { version = "0.8", optional = true }
 keyring = { version = "2", optional = true }
 aes-gcm = { version = "0.10", optional = true }
 zeroize = { version = "1", optional = true }
+# The SDK crate owns the wire types both sides must agree on, so the wrapper
+# reads them from there rather than keeping a second copy to drift. It pulls in
+# nothing the wrapper does not already build (serde, serde_json, chrono).
+rub3    = { path = "../rub3-sdk", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }
 libc = "0.2"
+
+# Named-pipe *server* for the SDK channel (feature `sdk`). Only the server needs
+# it: a named-pipe client is an ordinary file handle, so the SDK crate opens one
+# with no dependency at all. Never compiled on unix, and never without `sdk`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+] }
 
 [dev-dependencies]
 rand = "0.8"

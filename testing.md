@@ -16,9 +16,9 @@ cargo test -p rub3-wrapper
 
 This runs all unit tests, integration tests, and license e2e tests. No external tools required - wallet generation and signing are done natively in Rust via `k256`.
 
-The workspace has a second member, the docs MCP server, whose suites are separate
-and described in [Docs MCP server](#docs-mcp-server-cratesrub3-docs-mcp) below:
-`cargo test -p rub3-docs-mcp`.
+The workspace has a further member, the docs MCP server, whose suites are
+separate and described in [Docs MCP server](#docs-mcp-server-cratesrub3-docs-mcp)
+below: `cargo test -p rub3-docs-mcp`.
 
 The default bundle is `tier-2` + `webview`, so it compiles neither the tier-3
 capabilities nor the headless front door. Cargo features are additive, so
@@ -37,15 +37,23 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3,webview --lib
 
 For reference, `--lib` counts per bundle: `tier-0` 51, `tier-1` 81, `tier-2` 121,
 `tier-3`/`tier-4` 131, `tier-2,webview` 122, `tier-3,webview` 147,
-`tier-3,headless` 195. Each total includes `#[ignore]`d tests, which a plain run
-skips and reports as ignored rather than passed: one network test in every
-bundle, plus the three anvil-gated webview session-flow tests under
-`tier-3,webview`. So a bundle's total is the `passed` and `ignored` figures of
-its own run added together, which is the number these commands print between
-them and not a sum across bundles. `tier-1` and `tier-2` diverge because `attest` needs
-`onchain-read`. `tier-2,webview` and `tier-3,webview` diverge because the
-window's purchase screen, the code attestation guarding it, and the tier-3
-session flow all need `onchain-write` or `cooldown`.
+`tier-3,headless` 195, `tier-0,sdk` 58, `tier-3,sdk` 143. Each total includes
+`#[ignore]`d tests, which a plain run skips and reports as ignored rather than
+passed: one network test in every bundle, plus the three anvil-gated webview
+session-flow tests under `tier-3,webview`. So a bundle's total is the `passed`
+and `ignored` figures of its own run added together, which is the number these
+commands print between them and not a sum across bundles. `tier-1` and `tier-2`
+diverge because `attest` needs `onchain-read`. `tier-2,webview` and
+`tier-3,webview` diverge because the window's purchase screen, the code
+attestation guarding it, and the tier-3 session flow all need `onchain-write` or
+`cooldown`. The `sdk` bundles diverge from each other by the five
+session-projection tests, which need a session model to project.
+
+The `rub3` SDK crate is its own package, so it is its own invocation:
+
+```bash
+cargo test -p rub3     # 13 unit tests + 3 doctests
+```
 
 Network-dependent tests (requires internet). `--ignored` runs *only* the ignored tests, so this replaces the suite above rather than adding to it:
 
@@ -77,6 +85,7 @@ scripts/test-e2e.sh
 - **`attest::tests`** (requires `onchain-read`, so tier-2 and up) - the pre-purchase code check (§2.6). Drift: every fingerprint and immutable range in `contracts/canonical-bytecode.json` is pinned in `attest::CANONICAL` (the failure prints the row to add), the pinned hashes are lowercase hex of 32 bytes, the ranges are sorted, disjoint and one word wide, and `FORBIDDEN_SIGNATURES` is compared against the `string[N]` array in `contracts/test/Rub3Invariants.t.sol` with Solidity comments stripped first. Comparison: a legitimate deploy that chose different immutables still matches, a truncated deploy is refused rather than partially masked, an address with no code says so, and the selector helper is checked against the published `transfer(address,uint256)` vector. The negative case is `a_renamed_seizure_function_passes_the_name_scan_and_fails_the_hash` - an owner-only seizure named `reconcileLedger(uint256,address)` is asserted to pass the blacklist in silence and to fail the masked hash, which is the asymmetry the module exists for. Gate: `only_licence_roles_are_purchase_targets` runs `decide()` over the shipped table and requires exactly the `Role::Licence` rows accepted and every factory and deployer row refused as `NotALicence`, and `the_attest_module_is_reachable_only_from_the_purchase_path` walks the crate's own `src/` recursively and asserts three things: the set of modules referencing the module at all, by any item rather than only by calling the gate, is a subset of the purchase-path allowlist (`activation.rs`, `webview.rs`); each allowlisted purchase path holds exactly one call site (`activation.rs::headless::purchase` and `webview.rs::show_purchase`), since a subset is also satisfied by calling the gate nowhere; and the named human launch entry points inside `webview.rs` (`show_activate`, `show_cooldown`, `finalize_session`) reference it not at all, which is the half a file-granular allowlist cannot speak for, failing loudly rather than vacuously when one of those functions can no longer be found. That is how "fail closed on purchase, fail open on launch" is enforced structurally rather than by a default. It guards source structure, not runtime wiring, and it is not total: a new launch function added to `webview.rs` is unguarded until it is named, and the same file granularity means a reference elsewhere in `activation.rs` is not caught either. The behavioural half is the launch-path e2e below. Registry (§2.9), driven over a scripted `ChainReader` whose call log is half the point: the three-way verdict of the design (a pinned-table hit that asks the registry *nothing*, a release the registry vouches for, and code neither knows); the registry's own code verified before its answer is believed, with `a_registry_whose_own_code_is_not_canonical_is_never_believed` scripting an answer that *would* be accepted if the check were skipped, `canonical_code_that_is_not_a_registry_is_not_believed_either` for the factory at that address, and `an_unverified_registry_is_never_asked_anything` asserting through the log that nothing follows a failed verification; each of the three reads failing in turn; a hostile offset table dropped and never even hashed under; a record declaring ranges other than the table that found it; every candidate table tried, and the two ends of the bound on that: `candidate_offset_tables_are_capped_on_the_purchase_path` publishes one more usable table than the cap allows and hides the answer under the oldest, first-published one - which is the table outside the budget now that the wrapper reads from the newest end - then asserts through the call log both that the cap is what the registry was *asked* for and that exactly the cap's worth of lookups followed, while `the_offset_table_read_is_bounded_before_the_answer_is_decoded` and `a_registry_that_ignores_the_requested_window_still_buys_no_extra_lookups` split the two costs apart against a registry holding four times the cap - the read is requested bounded so a long published set never reaches the shape check, and a node that answers with more than it was asked for still buys no extra round trip; `the_budget_is_spent_on_the_newest_layouts` pins which end that budget goes to, since a registry is consulted only after a pinned-table miss and a miss is by definition about newer code: out of 64 layouts a release published under the newest is found in a single lookup, and one published under the oldest is refused as unknown, which is the trade the cap makes on purpose; a deprecated release bought with a warning that says held licences are unaffected; a registry record for a non-licence role including one this build has no name for; the shape rules for an immutable slot, `PUSH32` included; `registry_table_mirrors_the_deployment_manifest`, which pins `attest::REGISTRIES` to `contracts/deployments.json`; `nothing_is_deployed_so_the_accumulate_only_rule_is_not_live_yet`, which reads that same manifest and asserts every `factory` and every `code_registry` is still `null`, so `CANONICAL`'s statement that its rows may still be corrected in place is a checked fact rather than a comment - the two records are independent deploys, either one going live arms the permanence rule for what it put on chain, and this fails at that moment so the doc gets updated instead of quietly rotting; `an_unknown_role_number_is_never_guessed_at`, since the first variant is a licence and a registry newer than this build can publish a role this one has no name for (the numbering itself is a wire encoding and is held by the anvil suite, not here); `an_empty_address_is_refused_without_asking_the_registry`, because an address holding no code has no release for an authority to recognise and must keep the one refusal a person can usually act on; and `registry_supplied_text_cannot_break_the_line_that_quotes_it`, which publishes a contract name and a version label carrying a space, an `=` and a newline and asserts neither can invent a field in the agent door's `key=value` detail line nor forge a `rub3:` line of the wrapper's own output. The one that matters most is `an_unpublished_registry_changes_nothing_about_the_gate`: no chain carries a registry address, a table miss costs no extra chain read, and the refusal string is unchanged to the sentence, so the whole step is inert until something is deployed
 - **`webview::tests`** (requires `webview` + `onchain-write`, so only `tier-3,webview`) - the human purchase gate (§2.8). `show_purchase` driven against a `StubNode` answering with non-canonical code emits exactly one message to the window and it is the refusal, so "it also showed the purchase screen" cannot pass; against an unreachable endpoint the failure reported is the code check rather than the supply read, which is how the ordering claim is tested rather than asserted. The words are covered too: the two refusal causes carry different titles, bodies and next steps, an address holding no code says so instead of talking about a mismatch, every notice names the address and survives its source line continuations as finished prose, and a failed read shows the kind of failure only rather than a network error the buyer is then told to forward. The endpoint redaction itself is tested a layer down, in `rpc`, since it is a property of the error value rather than of this screen; what is tested here is that it holds on the window's *other* error surface too, by driving `handle` with a `connect` message against an endpoint whose URL embeds a key and asserting the "ownership check failed" box carries none of it. The §2.9 additions: the three code-registry outcomes read differently and none is retryable, the registry is named as the wrong address rather than as bad code, a role this build is too old to name is refused in words a person can read, and `a_failed_registry_read_never_puts_the_packed_endpoint_on_screen` covers the second route to the same leak - a registry read's failure reason travels *inside* the refusal rather than beside it, so `Unrecognised::shareable_detail` drops it while keeping the registry's *answer*, which names no endpoint. `a_deprecated_release_advises_the_buyer_rather_than_alarming_them` covers the other direction: a deprecated release has to reach the person, since the premise of this whole screen is that a buyer cannot read bytecode and a buyer does not read stderr either, and it has to reach them as advice - the sentence names the release, says the code is genuine and says the licence stays valid, and it promises no successor, since the record carries none, while a current release and a pinned-table hit say nothing at all
 - **`supervisor::tests`** (Unix) - the wrapped binary's own reported environment carries none of the `RUB3_AGENT_*` credential variables (the list is `agent_env::AGENT_ENV_VARS`; `RUB3_AGENT_MAX_TOKEN_AMOUNT` and `RUB3_AGENT_MAX_ETH_WEI` are spend policy rather than credentials and are deliberately not on it), covered for the raw-key source, the keystore-plus-password-file source (the documented preferred setup) and all sources at once
+- **`sdk::tests`** (requires `sdk`) - the wrapper's half of the SDK channel (§3.5). The request handler is driven over a loopback stream that shares its read and write ends the way a duplicated socket handle does: several requests answered on one connection, an unrecognised operation answered as an error rather than a dropped connection, a foreign protocol version told which two versions are in play rather than complained about as JSON, and a malformed line answered once before the connection ends, asserted by the second request on that stream *not* being read. One test serves a real socket and drives the SDK's own client over it, asserting a live channel answers, a tier-0 channel reports no session, and a dropped channel stops answering and leaves no endpoint behind - which is what makes a dead wrapper detectable. `the_scrubbed_variable_name_matches_the_sdk_crates_constant` pins `supervisor::SDK_ADDRESS_ENV` against `rub3::wire::ADDRESS_ENV`, the second copy that exists because a build without this feature cannot name the first. With `session` a further five cover the projection onto the six fields an application may see: the account model reporting an identity distinct from its signer, the access model reporting them equal, a tier-4 session with no TTL reading as "does not expire" rather than "expired", an identity model this build has never heard of carried through verbatim rather than mapped onto a known one, and an unreadable `expires_at` refusing to report the session at all rather than serving it with the TTL quietly dropped
 
 ### Integration tests (`tests/integration.rs`)
 
@@ -88,6 +97,26 @@ Binary-level tests that spawn the wrapper process:
 - `errors_on_missing_binary` - wrapper rejects nonexistent binary path
 
 Each test provisions a valid license proof in a temp directory via `RUB3_LICENSE_DIR`.
+
+### SDK channel E2E (`tests/sdk_e2e.rs`)
+
+Requires the `sdk` feature; no network and no Foundry, so it runs in the ordinary
+suite rather than behind `#[ignore]`. A **real wrapper process** launches a **real
+application linking the `rub3` crate** - `rub3-sdk-probe`, which prints one
+`key=value` line per field - and every assertion is on what that application
+printed. Nothing reaches into the wrapper's internals, because §3.5 makes no claim
+about them.
+
+- `an_application_launched_by_the_wrapper_sees_a_live_heartbeat` - the positive case
+- `an_application_launched_without_a_wrapper_panics_with_the_documented_failure` - the negative case, run rather than asserted: exit 101, and the panic text is required to name `RUB3_SDK_SOCKET` and to say `rub3-wrapper --binary`, since a developer who has just run a wrapped binary directly is its whole audience
+- `without_a_wrapper_the_reported_failure_is_not_wrapped` - the same absence through `try_heartbeat`
+- `an_address_pointing_at_nothing_reports_a_dead_wrapper_rather_than_no_wrapper` - the two failures must be distinguishable: the first is a wrapper that died, the second a binary run directly
+- `a_launch_served_from_a_legacy_proof_reports_no_session` - a heartbeat and no session, with no `user_id` reported at all. The legacy proof predates the identity model, and synthesising one from the wallet would invent an identity claim the wrapper never verified
+- `the_endpoint_is_removed_when_the_wrapper_exits` (Unix) - the socket and its directory are both gone afterwards, so a later launch cannot be answered by a stale endpoint
+- `the_endpoint_directory_is_private_to_this_user` (Unix) - asserted `drwx------` rather than assumed. That mode is the access control on the channel; the name is unguessable only by accident
+- `a_stale_address_in_the_wrappers_environment_never_reaches_the_child` - an address exported into the wrapper's own environment is scrubbed, because a child that inherited it would talk to somebody else's channel and be answered
+- `a_wrapped_application_sees_the_session_the_wrapper_launched_on` (requires `cooldown`) - both entry points on one launch, field for field, with an account-model session whose `user_id` is asserted to differ from its `wallet`
+- `the_application_never_receives_the_session_signature_or_nonce` (requires `cooldown`) - the seeded session's signature and nonce are asserted absent from what the application printed, along with `contract`, `chain`, `issued_at`, the activation fields and the device key. An application that could read the signature could replay the session somewhere the wrapper never launched it
 
 ### License E2E tests (`tests/license_e2e.rs`)
 
@@ -245,6 +274,15 @@ cargo test -p rub3-wrapper --no-default-features --features tier-2 \
     --test code_registry_e2e -- --ignored code_registry
 ```
 
+### The SDK crate (`crates/rub3-sdk/`, run with `cargo test -p rub3`)
+
+13 unit tests plus 3 doctests, none of which need a wrapper:
+
+- **The wire format** - `session_info_carries_exactly_the_six_specified_fields` compares the serialized key set against the literal list from §3.5, so widening `SessionInfo` fails here; a round trip; a session with no TTL never expiring and a past TTL expiring; an identity model this build does not know surviving deserialization *and* a round trip unchanged, since the wrapper and the application are packaged separately and can be built from different revisions; the envelope carrying the protocol version on both a request and a response, asserted against the literal JSON
+- **Framing** - a line past `MAX_LINE_BYTES` reported as exceeding the ceiling rather than as broken JSON, because a reader that truncated silently would blame the parser; a cleanly closed stream reading as "no message" rather than an error
+- **The documented failure with no wrapper** - an absent address, an empty one (the shape a shell leaves behind, and it means the same thing), and an address nothing listens on, each mapping to its own error; the panic text naming the variable and the way out; every error asserted to read as finished prose and to produce a two-line panic
+- **Doctests** - a `no_run` example of the API as an application writes it, a `Display` example for `Wallet`, and a `compile_fail` one proving `Wallet` cannot be a `HashMap` key. That last one is the `user_id`-not-`wallet` rule made executable rather than documented
+
 ### Test helpers (`tests/helpers/mod.rs`)
 
 Shared utilities available to all integration test files:
@@ -252,6 +290,7 @@ Shared utilities available to all integration test files:
 - `generate_wallet()` - random secp256k1 keypair, returns `(SigningKey, address_hex)`
 - `sign_activation(key, app_id, token_id)` - compute activation message, personal_sign, return hex signature
 - `create_license_json(dir, ...)` - write a valid `LicenseProof` JSON file
+- `create_session_json(dir, ...)` (requires `session`) - write a signed `Session` where the launch fast path will look for it, and return it. The signature is over `session::session_message`, the same preimage the wrapper verifies, so the seeded session passes `verify_local` rather than merely deserializing
 - `wrapper_bin()` - path to the compiled wrapper binary
 - `verifying_key_to_address(key)` - derive Ethereum address from public key
 

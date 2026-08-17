@@ -68,28 +68,40 @@ fn main() {
         std::process::exit(activation::EXIT_GENERIC);
     }
 
-    if cli.headless {
-        if let Err(code) = run_headless(cli.token_id) {
-            std::process::exit(code);
+    // Whichever door authorises the launch hands back what the SDK channel will
+    // report to the wrapped application (§3.5).
+    let launch = if cli.headless {
+        match run_headless(cli.token_id) {
+            Ok(launch) => launch,
+            Err(code) => std::process::exit(code),
         }
-    } else if let Err(e) = rub3_wrapper::ensure(
-        APP_ID,
-        CONTRACT,
-        CHAIN_ID,
-        RPC_URL,
-        DEVELOPER_ENS.map(str::to_string),
-        SESSION_TTL_SECS,
-    ) {
-        eprintln!("error: {e}");
-        // A headless-only build has exactly one door, and it is opt-in: signing
-        // and broadcasting on the operator's behalf should never happen because
-        // a flag was forgotten.
-        #[cfg(all(feature = "headless", not(feature = "webview")))]
-        eprintln!("hint: this build activates headlessly - re-run with --headless");
-        std::process::exit(activation::EXIT_GENERIC);
-    }
+    } else {
+        match rub3_wrapper::ensure(
+            APP_ID,
+            CONTRACT,
+            CHAIN_ID,
+            RPC_URL,
+            DEVELOPER_ENS.map(str::to_string),
+            SESSION_TTL_SECS,
+        ) {
+            Ok(launch) => launch,
+            Err(e) => {
+                eprintln!("error: {e}");
+                // A headless-only build has exactly one door, and it is opt-in:
+                // signing and broadcasting on the operator's behalf should never
+                // happen because a flag was forgotten.
+                #[cfg(all(feature = "headless", not(feature = "webview")))]
+                eprintln!("hint: this build activates headlessly - re-run with --headless");
+                std::process::exit(activation::EXIT_GENERIC);
+            }
+        }
+    };
 
-    std::process::exit(rub3_wrapper::supervisor_run(&cli.binary, &cli.args));
+    std::process::exit(rub3_wrapper::supervisor_run(
+        &cli.binary,
+        &cli.args,
+        &launch,
+    ));
 }
 
 // ── Headless ──────────────────────────────────────────────────────────────────
@@ -97,7 +109,7 @@ fn main() {
 /// Runs the agent activation path. `Err(code)` is the process exit code to use;
 /// every code is documented in [`activation::EXIT_CODE_HELP`].
 #[cfg(feature = "headless")]
-fn run_headless(token_id: Option<u64>) -> Result<(), i32> {
+fn run_headless(token_id: Option<u64>) -> Result<rub3_wrapper::Launch, i32> {
     use rub3_wrapper::activation::{ensure_headless, HeadlessContext, HeadlessError};
     use rub3_wrapper::signer::resolve_signer;
 
@@ -126,7 +138,7 @@ fn run_headless(token_id: Option<u64>) -> Result<(), i32> {
                 session.wallet,
                 signer.source(),
             );
-            Ok(())
+            Ok(rub3_wrapper::Launch::from_session(session))
         }
         Err(e) => {
             report(&e);
@@ -146,7 +158,7 @@ fn report(e: &rub3_wrapper::activation::HeadlessError) {
 }
 
 #[cfg(not(feature = "headless"))]
-fn run_headless(_token_id: Option<u64>) -> Result<(), i32> {
+fn run_headless(_token_id: Option<u64>) -> Result<rub3_wrapper::Launch, i32> {
     eprintln!(
         "error: --headless requires a build with the `headless` feature \
          (rebuild with --features headless)"

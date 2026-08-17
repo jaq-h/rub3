@@ -44,6 +44,12 @@ rub3/
 │   │       ├── derivation.rs         # Mutation proofs: the served answer follows the file
 │   │       ├── docs_legibility.rs    # The docs + llms.txt machine-legibility gate
 │   │       └── mcp_stdio.rs          # Spawns the binary and speaks JSON-RPC to it
+│   ├── rub3-sdk/                     # The `rub3` crate a wrapped application links (§3.5)
+│   │   └── src/
+│   │       ├── lib.rs                # `heartbeat()` / `session()` + what a heartbeat proves and does not
+│   │       ├── info.rs               # `SessionInfo`, and the `UserId` / `Wallet` types that enforce the keying rule
+│   │       ├── wire.rs               # The protocol both halves share: env var, version, request/response, framing
+│   │       └── transport.rs          # Client connect: Unix socket, or a Windows named pipe opened as a file
 │   └── rub3-wrapper/                 # Wrapper runtime
 │       ├── src/
 │       │   ├── main.rs               # CLI entry point (clap), app constants
@@ -60,11 +66,13 @@ rub3/
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC message handling (feature `webview`)
 │       │   ├── webview/session_flow.rs # Test-only: the §1.8 activation flows driven at the IPC seam, three of them anvil-gated (`#[cfg(test)]`, never shipped)
 │       │   ├── webview/session_flow/onchain.rs # Test-only: the anvil harness behind those three (spawn/deploy/mine helpers, port 8551)
-│       │   ├── supervisor.rs         # Child process lifecycle, SIGTERM forwarding, `RUB3_AGENT_*` stripped from the child
+│       │   ├── supervisor.rs         # Child process lifecycle, SIGTERM forwarding, `RUB3_AGENT_*` stripped from the child, SDK channel lifetime
+│       │   ├── sdk.rs                # Wrapper half of the SDK channel: local socket / named pipe serving heartbeat + session (feature `sdk`)
 │       │   ├── session.rs            # Session schema, message hash, verify_local, is_expired
 │       │   ├── session_store.rs      # Session persistence, load_latest_session
 │       │   ├── device.rs             # Device keypair scaffold (feature `device-key`, tier 4 - deferred)
 │       │   ├── decrypt.rs            # Binary decryption scaffold (feature `binary-encryption` - deferred)
+│       │   ├── bin/rub3-sdk-probe.rs # Worked SDK integration and the e2e suite's child application (feature `sdk`)
 │       │   └── test_support.rs       # Test-only scaffolding shared by more than one module (`#[cfg(test)]`, never shipped)
 │       ├── assets/
 │       │   └── activation.html       # Activation UI (address input, token select, signature)
@@ -74,6 +82,7 @@ rub3/
 │           ├── license_e2e.rs        # License verification tests (static + dynamic wallets, SIGTERM)
 │           ├── session_onchain_e2e.rs # Anvil-gated: verify_onchain against a live chain
 │           ├── headless_e2e.rs       # Anvil-gated: fresh key → purchase → activate → persist → fast path
+│           ├── sdk_e2e.rs            # Real wrapper launching a real SDK-linked app, and the no-wrapper failure
 │           └── code_registry_e2e.rs  # Anvil-gated: deploys Rub3CodeRegistry, publishes through cast, reads back through the wrapper's ABI mirror
 ├── contracts/                        # Foundry project - ERC-721 license contracts
 │   ├── src/
@@ -141,6 +150,8 @@ check.
 | `chrono` | RFC-3339 timestamps, session TTL |
 | `rand` | Nonce generation (feature = `session`) |
 | `nix` / `libc` | Unix signal handling (SIGTERM forwarding) |
+| `rub3` | The SDK crate, for the channel's wire types (feature `sdk`) |
+| `windows-sys` | Named-pipe server for the SDK channel (feature `sdk`, Windows only) |
 
 Dev dependencies: `rand`, `tempfile`.
 
@@ -157,6 +168,10 @@ door**. Front doors are independent features and compose:
 |---|---|---|
 | `webview` | `wry`, `tao` | Native activation window - the human path |
 | `headless` | no GUI deps at all | Signer in, session out - the agent path |
+
+`sdk` is an orthogonal add-on that composes with any tier bundle, like
+`binary-encryption`. It serves the [rub3 SDK](#the-rub3-sdk) channel to the
+wrapped application; no tier bundle enables it.
 
 ```bash
 cargo build -p rub3-wrapper --no-default-features --features tier-3,webview    # human
@@ -185,6 +200,13 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --li
 
 # Only the network-dependent tests (--ignored filters out the suite above)
 cargo test -p rub3-wrapper -- --ignored
+
+# The SDK crate, including its doctests (one of which asserts a keying mistake
+# does NOT compile)
+cargo test -p rub3
+
+# The SDK channel end to end: a real wrapper launching a real SDK-linked app
+cargo test -p rub3-wrapper --no-default-features --features tier-3,sdk --test sdk_e2e
 ```
 
 **Unit tests** (`src/`): one suite per module, so which ones compile follows the tier bundle and front door selected. [testing.md](testing.md) owns the per-suite inventory and the `--lib` count for each bundle.
@@ -475,6 +497,66 @@ what that figure includes:
 `~/.rub3/sessions/<app_id>/<token_id>.json`) - useful for containers with a
 mounted volume.
 
+## The rub3 SDK
+
+The `rub3` crate (`crates/rub3-sdk/`) is what a wrapped application links so it
+can ask the wrapper who is running it. Build the wrapper with the `sdk` feature
+to serve it:
+
+```bash
+cargo build -p rub3-wrapper --no-default-features --features tier-3,webview,sdk
+```
+
+At the top of the application's `main`:
+
+```rust
+fn main() {
+    // Panics if this process was not launched by a live rub3 wrapper.
+    rub3::heartbeat();
+
+    let session = rub3::session();
+
+    // Key every persistent row on `user_id`. Never on `session.wallet`.
+    let state = std::path::Path::new("state").join(session.user_id.as_str());
+    std::fs::create_dir_all(&state).unwrap();
+}
+```
+
+`try_heartbeat()` and `try_session()` are the same checks returning an `Error`,
+for an application that would rather degrade than die.
+
+**`user_id`, never `wallet`.** A licence NFT can be sold or moved to a fresh key,
+so the wallet on the next session is a different address for the same licence and
+the same user. `user_id` is the identity the licence grants - the wallet under the
+access model, the token's ERC-6551 account address under the account model - and
+the wrapper resolves that difference before the application sees it. The types
+enforce it: `UserId` implements `Hash`, `Eq`, `Ord` and `Display`, and `Wallet`
+implements only `Display`, so keying data on the wallet does not compile.
+
+**What `heartbeat()` proves, and what it does not.** It is an honest-integration
+and liveness check, and that is the whole claim. Licensing is enforced by the
+wrapper *before* it launches anything, so a live heartbeat says a wrapper is there
+and answering - not that anything it decided was correct. It is **not** a defence
+against a determined local attacker, and no local IPC could be: anyone able to run
+the wrapped binary outside its wrapper can publish a socket of their own and answer
+however they like, and any credential the SDK could demand would ship inside the
+binary they already control. The channel carries no authentication for exactly that
+reason. What it catches is the ordinary set - an application run directly, a wrapper
+that died mid-run, a stale address, a version-skewed pair - and those are worth
+catching. The crate's own documentation says the same thing to the developer who
+reads it.
+
+**Diagnostics.** `rub3-sdk-probe` is the worked integration; run it under a wrapper
+to see what the channel reports, or directly to see the documented failure:
+
+```bash
+cargo run -p rub3-wrapper --no-default-features --features tier-3,sdk \
+    --bin rub3-wrapper -- --binary ./target/debug/rub3-sdk-probe -- all
+```
+
+Windows support is written and type-checked but has never been executed - see
+implementation.md §3.5.
+
 ## Current status
 
 Shipped capabilities, one line each. [implementation.md](implementation.md) is
@@ -496,7 +578,7 @@ the authority on what each covers, what it cost, and what comes next.
 - **Spend ceilings (§2.2, §2.7)** - one operator policy bounds both rails before anything is spent: `RUB3_AGENT_MAX_TOKEN_AMOUNT` gates the stablecoin rail before an authorization is signed, `RUB3_AGENT_MAX_ETH_WEI` gates the ETH rail before the transaction is sent, and the ETH one defaults to 0.1 ETH so neither rail is ever unbounded (exit 22)
 - **Deploy scripts** - `forge script` deploys either licence contract to any EVM chain from env vars, directly or through a factory; `DeployFactory.s.sol` deploys the factory itself
 
-**Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, SDK, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
+**Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
 
 ## Direction
 

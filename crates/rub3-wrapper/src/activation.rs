@@ -15,6 +15,7 @@
 
 use alloy::primitives::Address;
 
+use crate::supervisor::Launch;
 use crate::{license, rpc, store};
 
 #[cfg(feature = "webview")]
@@ -63,7 +64,12 @@ impl std::fmt::Display for ActivationError {
 ///   3. Slow path: open the activation webview and wait for user completion.
 ///
 /// On webview success the appropriate record is persisted to disk before
-/// returning `Ok(())`.
+/// returning.
+///
+/// The [`Launch`] returned carries whatever authorised the launch, which is what
+/// the SDK channel reports to the wrapped application (§3.5). A launch served
+/// from the legacy proof carries no session: that record predates the identity
+/// model and has no `user_id` to report.
 pub fn ensure(
     app_id: &str,
     contract: &str,
@@ -71,16 +77,16 @@ pub fn ensure(
     rpc_url: &str,
     developer_ens: Option<String>,
     session_ttl_secs: i64,
-) -> Result<(), ActivationError> {
+) -> Result<Launch, ActivationError> {
     // ── Fast path 1: existing session (tier 3) ───────────────────────────────
     #[cfg(feature = "cooldown")]
-    if try_session_fast_path(app_id, rpc_url, None, None).is_some() {
-        return Ok(());
+    if let Some(session) = try_session_fast_path(app_id, rpc_url, None, None) {
+        return Ok(Launch::from_session(session));
     }
 
     // ── Fast path 2: existing legacy proof ───────────────────────────────────
     if try_legacy_fast_path(app_id, contract, rpc_url) {
-        return Ok(());
+        return Ok(Launch::bare());
     }
 
     // ── Slow path: activation window ─────────────────────────────────────────
@@ -102,7 +108,7 @@ fn interactive_slow_path(
     rpc_url: &str,
     developer_ens: Option<String>,
     session_ttl_secs: i64,
-) -> Result<(), ActivationError> {
+) -> Result<Launch, ActivationError> {
     let ctx = ActivationContext {
         app_id: app_id.to_string(),
         contract: contract.to_string(),
@@ -129,14 +135,15 @@ fn interactive_slow_path(
 pub(crate) fn persist_activation(
     app_id: &str,
     result: ActivationResult,
-) -> Result<(), ActivationError> {
+) -> Result<Launch, ActivationError> {
     match result {
-        ActivationResult::LegacySuccess { proof } => {
-            store::save_proof(app_id, &proof).map_err(|e| ActivationError::Error(e.to_string()))
-        }
+        ActivationResult::LegacySuccess { proof } => store::save_proof(app_id, &proof)
+            .map(|()| Launch::bare())
+            .map_err(|e| ActivationError::Error(e.to_string())),
         #[cfg(feature = "cooldown")]
         ActivationResult::SessionSuccess { session } => {
             crate::session_store::save_session(&session)
+                .map(|()| Launch::from_session(session))
                 .map_err(|e| ActivationError::Error(e.to_string()))
         }
         ActivationResult::Cancelled => Err(ActivationError::Cancelled),
@@ -152,7 +159,7 @@ fn interactive_slow_path(
     _rpc_url: &str,
     _developer_ens: Option<String>,
     _session_ttl_secs: i64,
-) -> Result<(), ActivationError> {
+) -> Result<Launch, ActivationError> {
     Err(ActivationError::NoInteractiveFrontDoor)
 }
 

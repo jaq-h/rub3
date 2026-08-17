@@ -895,13 +895,52 @@ Fleet licensing - the tier the agent economy actually wants.
 - One license NFT = K concurrent fleet instances; buy another token to scale. Cooldown still rate-limits churn.
 - Wrapper: seat-aware activation + a clear "fleet exhausted, N seats in use" error for orchestrators.
 
-### 3.5 - rub3 SDK crate `[not started]` *(moved from old §2.3)*
+### 3.5 - rub3 SDK crate `[complete]` *(moved from old §2.3)*
 
-- `rub3::heartbeat()` - panics if wrapper is not alive (Unix socket / named pipe)
-- `rub3::session()` - returns `SessionInfo { app_id, token_id, user_id, wallet, identity, expires_at }`
-- Application code keys all persistent data on `user_id`, never on `wallet`
-- Socket path passed as env var by wrapper; minimal dependency footprint - no `alloy` or `wry`
-- Needed early for the MCP-server beachhead (a wrapped server checks its session/heartbeat).
+The library a wrapped application links so it can ask the wrapper who is running it. Two calls, `rub3::heartbeat()` and `rub3::session()`, over a per-launch local endpoint the wrapper publishes in one environment variable. New workspace member `crates/rub3-sdk/`, package `rub3` so the call reads `rub3::session()`; the wrapper's half is `crates/rub3-wrapper/src/sdk.rs` behind a new `sdk` feature.
+
+**The threat-model conclusion, settled before the transport was chosen: `heartbeat()` is an honest-integration and liveness aid, and nothing more.** It is stated that way in the crate's own documentation, in `architecture.md`, and in `sdk.rs`'s header, rather than implied away.
+- The wrapper enforces licensing *before* it launches anything, and runs the application as its own child. By the time the endpoint exists the gate has already run, so what a live heartbeat establishes is that a wrapper is there and answering - not that anything it decided was correct
+- The failures it does catch are the common ones and worth catching: an application run directly instead of through its wrapper, a wrapper that died mid-run, a stale address, a wrapper and an application built against different protocol versions
+- **The other reading, a defence against a determined local attacker, a local socket cannot deliver, and building toward it would have been theatre.** Anyone who can run the wrapped binary outside its wrapper controls the machine: they can publish a socket of their own and answer every request however they like. Any credential this channel could demand would have to ship inside the binary they already control. So the channel carries no authentication, deliberately, and the documentation says why rather than leaving the absence to be read as an oversight
+- The panic-on-absence contract survives that conclusion unchanged, which is why this shipped rather than coming back as a product question. A panic is what an assertion about a broken integration should do; it is not being sold as enforcement. `try_heartbeat()` and `try_session()` are the same checks returning an `Error`, for an application that would rather degrade than die
+
+**The `user_id` rule is enforced by the type system, not by a comment** - `crates/rub3-sdk/src/info.rs`
+- `SessionInfo::user_id` is a `UserId` implementing `Hash`, `Eq`, `Ord`, `Display` and `AsRef<str>`, so a `HashMap` key, a `BTreeMap` key, a sort or a path segment is the path of least resistance
+- `SessionInfo::wallet` is a `Wallet` implementing `Display` and nothing else. Keying anything on it does not compile, and a `compile_fail` doctest asserts exactly that, so the guarantee is executable rather than asserted. What is left is what a wallet is legitimately for: showing it to a human and naming an address to the chain
+- A licence can be sold or moved to a fresh key, so the wallet on the next session is a different address for the same licence and the same user. `user_id` is the wallet under the access model and the ERC-6551 account address under the account model, and the wrapper resolves that difference before the application sees it - application code never branches on the model
+
+**`SessionInfo` carries exactly the six fields this section names, and a test pins that.** The signature, the nonce, the activation transaction and the device key stay on the wrapper's side: an application that could read the session signature could replay the session somewhere the wrapper never launched it, and one that never receives it cannot leak it either. `session_info_carries_exactly_the_six_specified_fields` compares the serialized key set against the literal list, and the e2e asserts the signature and nonce are absent from what a real wrapped process actually printed.
+
+**Transport** - line-delimited JSON, one request per line, either side may send several over one connection
+- Unix domain socket in a 0700 directory under `TMPDIR`, falling back to `/tmp` when `sockaddr_un`'s 104-byte path limit would be exceeded. The directory's mode is the access control; the name only has to be unique per launch
+- Windows named pipe. **Implemented and type-checked for `x86_64-pc-windows-msvc`, never executed** - CI is macOS-only and no test has run one of those calls. That cross-check is not decoration: it caught a missing `windows-sys` feature and a wrong import path. Only the *server* needs `windows-sys`; a named-pipe client is an ordinary file handle, so the SDK crate opens one with no dependency at all
+- The unix client sets a 2-second read and write timeout. The Windows client sets none, and says so: a byte-mode pipe `File` has no equivalent, and overlapped I/O or a watchdog thread per call would each buy a bound on one failure mode at a real cost in machinery
+- `RUB3_SDK_SOCKET` carries the address, and the wrapper *clears* it from every child's environment before setting it - in every bundle, including the ones that serve no channel. An address inherited from the wrapper's own environment would point the application at somebody else's channel, and it would be answered. The variable's name is a second copy of `rub3::wire::ADDRESS_ENV`, in `supervisor.rs`, because a build without the `sdk` feature cannot name that constant; a unit test fails when the two disagree
+- Minimal dependency footprint as specified: the SDK crate's whole tree is `serde`, `serde_json` and `chrono`. No `alloy`, no `wry`, no async runtime, no HTTP client. The wrapper reads the wire types from the SDK crate rather than keeping a second copy to drift
+
+**`sdk` is an orthogonal feature, named by no tier bundle** - what an application may ask about itself does not depend on how hard the launch was gated, so it composes with any tier exactly as `binary-encryption` does. Tier-0 gets heartbeats and no session, which is honest: there is no session model compiled in to report. A launch served from the legacy `LicenseProof` also reports no session, because that record predates the identity model and has no `user_id`; synthesising one from the wallet would invent a second identity notion next to the one `session.rs` already owns properly. In practice a session is reportable from tier-3 up, since `ensure`'s session fast path and the window's `SessionSuccess` are both gated on `cooldown`.
+
+**The channel never gates a launch.** A channel that fails to start is two warning lines on stderr and the wrapped binary runs anyway. Refusing to start a program the user has already paid for because a socket could not be created would be a de-facto revocation surface, which §2.4 rules out - the same fail-open-on-launch posture as §2.6's attestation. Whether the application requires the channel is the developer's call, expressed by calling `heartbeat()` or not.
+
+**Plumbing** - `activation::ensure` now returns a `Launch` instead of `()`, carrying whatever authorised the launch, and `supervisor::run` takes it. That is what stops the channel inventing a second session notion: it reports the session the launch was actually served from rather than re-reading the store and possibly picking a different one. `Launch` is empty in a bundle without `session`, so the launch path reads the same in every tier.
+
+**Files** - `crates/rub3-sdk/` (`lib.rs`, `info.rs`, `wire.rs`, `transport.rs`), `crates/rub3-wrapper/src/sdk.rs` (new), `supervisor.rs` (`Launch`, `SDK_ADDRESS_ENV`, the channel's lifetime), `activation.rs` + `main.rs` (the `Launch` return), `lib.rs` (`pub mod sdk` gated on `sdk`), `src/bin/rub3-sdk-probe.rs` (new), `tests/sdk_e2e.rs` (new), `tests/helpers/mod.rs` (`create_session_json`), root `Cargo.toml` (the new member)
+
+**Tests** - 13 in the SDK crate plus 3 doctests, 12 in `sdk`, 10 end-to-end
+- The e2e suite launches a **real wrapper process** whose child is a **real application linking the SDK**, and asserts only what that application printed: a live heartbeat, and the session field for field including an account-model `user_id` that differs from its signer
+- The negative case is executable and was run: the same probe binary with no wrapper exits 101, and the panic text is asserted to name `RUB3_SDK_SOCKET` and to say `rub3-wrapper --binary`. An address pointing at nothing is asserted to report a *dead* wrapper rather than *no* wrapper, because a developer needs to tell a binary run directly from a wrapper that died
+- Also covered end to end: the endpoint and its directory gone once the wrapper exits, the directory's mode asserted `drwx------` rather than assumed, a stale `RUB3_SDK_SOCKET` in the wrapper's own environment never reaching the child, and a legacy-proof launch reporting a heartbeat and no session
+- `sdk`'s unit tests drive the request handler over a loopback stream: several requests on one connection, an unknown operation answered as an error rather than a dropped connection, a foreign protocol version told which two versions are in play, and a malformed line answered once before the connection ends. One more serves a real socket and asserts a dropped channel stops answering
+- Full 11-bundle matrix green, clippy and fmt clean across it. `--lib` counts: `tier-0` 51, `tier-1` 81, `tier-2` 96, `tier-3`/`tier-4` 106, `tier-2,webview` 97, `tier-3,webview` 117, `tier-3,headless` 169, and the two new entries `tier-0,sdk` 58 and `tier-3,sdk` 118. The `sdk` delta is +7 at tier-0 and +12 at tier-3, the difference being the five session-projection tests that need a session model to project
+
+**Deliberately not built here**
+- **No periodic push from the wrapper.** `architecture.md` sketched a 5-second heartbeat pushed at the application, which would have needed a policy for what the wrapper does when the application stops answering - and the only honest answers are "nothing" or "kill a paid-for launch". The application asks when it wants to know; that doc's runtime block now describes what exists
+- **No session renewal over the channel.** An application cannot ask the wrapper to re-activate. That is a front-door decision and both doors already own it
+- **No revocation channel.** Nothing on this channel can invalidate a running launch, by construction rather than by omission
+- **Nothing for the MCP beachhead itself** (§3.3): this section is the dependency that section named, not that section
+
+**Fixed in passing** - `architecture.md`'s defence-layer summary listed the heartbeat as "app cannot run without wrapper", which is precisely the claim the transport cannot support and the reason this section wrote its threat model down first. It now says what the channel proves.
 
 **Phase 3 deliverable:** an agent that has never heard of rub3 can find a wrapped app via the registry/docs surface, buy it in USDC, fetch and verify the binary, and run it - headlessly, end to end.
 
@@ -1011,7 +1050,7 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 
 ### 5.4 - Polish `[not started]` *(was old Phase 4, minus deferred items)*
 - Background session renewal with OS notification before expiry
-- Windows support: named pipes for heartbeat IPC, MSVC target, WebView2 testing
+- Windows support: MSVC target and WebView2 testing. The SDK channel's named-pipe half is written and type-checked for `x86_64-pc-windows-msvc` (§3.5) but has never been executed - a Windows runner is what it is waiting for
 - Subscription renewal UI (view expiry, renew from tray/menu)
 - Multi-wallet delegation (hardware wallet owns, hot wallet signs sessions - EIP-7702 or delegation registry; exploratory)
 
@@ -1056,6 +1095,7 @@ Current (implemented). The per-module map is not repeated here: README.md →
 rub3/
 ├── crates/
 │   ├── rub3-wrapper/                 # Wrapper runtime (src/, assets/activation.html, tests/)
+│   ├── rub3-sdk/                     # §3.5 - the `rub3` crate a wrapped app links (heartbeat, session)
 │   └── rub3-docs-mcp/                # §3.3 - docs MCP server, off the wrapper's dependency path
 ├── contracts/                        # Foundry project (§1.5, §1.6)
 │   ├── src/
@@ -1080,7 +1120,6 @@ Planned (not yet created):
 
 ```text
 ├── crates/
-│   ├── rub3-sdk/                # §3.5 - heartbeat, session info
 │   ├── rub3-cli/                # §2.5 - pack, deploy, fetch, register
 │   └── tauri-plugin-rub3/       # §5.3
 ├── contracts/src/
