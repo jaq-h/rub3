@@ -712,6 +712,45 @@ fn the_item_cap_cuts_the_listing_short_and_reports_it() {
     assert_eq!(served(&exact), served(&whole));
 }
 
+/// A module that derives no items keeps its own documentation.
+///
+/// `//! What this crate is.` over nothing but `pub mod` declarations is an
+/// ordinary crate root, and the walk describes no `mod` item, so that module
+/// doc has nowhere else to surface. Dropping the module because it listed no
+/// items would delete derived content, which is the opposite of what the cap
+/// and the filters are cleaning up. No module in this workspace is that shape
+/// today, so the test builds one.
+#[test]
+fn a_module_that_derived_no_items_keeps_its_doc() {
+    let fixture = Fixture::new();
+    let server = fixture.server();
+    fixture.write(
+        "crates/demo/src/lib.rs",
+        "//! What the demo crate is.\n\npub mod widget;\n",
+    );
+
+    let crates = server
+        .rust_api(Parameters(RustApi {
+            crate_name: None,
+            module: None,
+            name: None,
+            limit: None,
+        }))
+        .expect("widget still carries the crate's public items")
+        .0
+        .crates;
+    let root = crates
+        .iter()
+        .flat_map(|crate_api| crate_api.modules.iter())
+        .find(|module| module.name == "lib")
+        .expect("the crate root is a real answer even with no items of its own");
+    assert!(
+        root.items.is_empty(),
+        "the root declares only modules, so it derives no items"
+    );
+    assert_eq!(root.doc, "What the demo crate is.");
+}
+
 /// A module that exists and exposes nothing refuses, like the three typos do.
 ///
 /// No `pub mod` of this workspace is empty today, so the condition is built

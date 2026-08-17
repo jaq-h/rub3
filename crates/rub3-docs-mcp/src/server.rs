@@ -74,8 +74,9 @@ pub struct RustApi {
     /// item. A substring nothing matches is refused with the names in scope,
     /// rather than answered with an empty listing.
     pub name: Option<String>,
-    /// Most items to return. Defaults to 100, capped at 500. The response says
-    /// whether the cap cut it short.
+    /// Most items to return. Defaults to 100, capped at 500. Counts top-level
+    /// items rather than bytes, since each carries its members and its doc
+    /// comment. The response says whether the cap cut it short.
     pub limit: Option<usize>,
 }
 
@@ -272,8 +273,10 @@ impl DocsServer {
                        its doc comment, its line, and the #[cfg(...)] feature gate that governs \
                        it. Filter by crate, module or name. An unfiltered call is capped at `limit` \
                        items (100 by default, 500 at most) and sets `truncated`, so start from a \
-                       filter rather than from the whole surface. The feature gate matters: whole \
-                       modules of rub3-wrapper do not exist under lower tier bundles."
+                       filter rather than from the whole surface. `limit` counts top-level items, \
+                       not bytes: each one carries its members and its doc comment, and the doc \
+                       comments are most of the payload. The feature gate matters: whole modules \
+                       of rub3-wrapper do not exist under lower tier bundles."
     )]
     pub fn rust_api(
         &self,
@@ -334,7 +337,11 @@ impl DocsServer {
                 .collect();
             let needle = wanted.to_lowercase();
             for api in &mut crates {
-                for module in &mut api.modules {
+                // A module the filter emptied is noise and goes. A module that
+                // had nothing to begin with stays: it is a real answer, and its
+                // `//!` is derived documentation this tool exists to serve.
+                api.modules.retain_mut(|module| {
+                    let described = !module.items.is_empty();
                     module.items.retain(|item| {
                         item.name.to_lowercase().contains(&needle)
                             || item.signature.to_lowercase().contains(&needle)
@@ -343,7 +350,8 @@ impl DocsServer {
                                 .iter()
                                 .any(|member| member.name.to_lowercase().contains(&needle))
                     });
-                }
+                    !described || !module.items.is_empty()
+                });
             }
             if crates
                 .iter()
@@ -396,18 +404,30 @@ fn scope(request: &RustApi) -> String {
 /// of JSON, doc comments included, and an agent pays for all of it in context.
 /// Truncation is reported rather than silent, so a caller can tell a whole
 /// surface from a first page and narrow the filter instead of believing it.
+///
+/// It counts items and not bytes, so it bounds how much of the surface comes
+/// back rather than the size of the answer: an item's members and its doc
+/// comment ride along with it, and the doc comments are the bulk of the
+/// payload.
+///
+/// A module the cap emptied is dropped, the way one the name filter emptied is.
+/// A module that derived no items in the first place is kept: a crate root of
+/// `//! What this is.` over nothing but `pub mod` declarations is an ordinary
+/// shape, and that documentation is derived content with nowhere else to
+/// surface, since the walk describes no `mod` item.
 fn truncate(crates: &mut Vec<rustapi::CrateApi>, limit: usize) -> bool {
     let mut left = limit;
     let mut truncated = false;
     for api in crates.iter_mut() {
-        for module in &mut api.modules {
+        api.modules.retain_mut(|module| {
+            let described = !module.items.is_empty();
             if module.items.len() > left {
                 module.items.truncate(left);
                 truncated = true;
             }
             left -= module.items.len();
-        }
-        api.modules.retain(|module| !module.items.is_empty());
+            !described || !module.items.is_empty()
+        });
     }
     crates.retain(|api| !api.modules.is_empty());
     truncated
