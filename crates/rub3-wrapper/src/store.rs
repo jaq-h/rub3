@@ -78,6 +78,41 @@ pub fn save_proof(app_id: &str, proof: &LicenseProof) -> Result<(), StoreError> 
 mod tests {
     use super::*;
 
+    /// Points the proof store at a tmpdir for the duration of one test.
+    ///
+    /// These tests resolve their path from `RUB3_LICENSE_DIR`, which is
+    /// process-global, so they hold [`crate::ENV_LOCK`] for the whole body:
+    /// another test setting or clearing that variable between a save and the
+    /// load that follows it would send the two at different directories, and
+    /// the lock is only exclusive if the readers take it too. Holding the
+    /// variable also keeps the suite out of the developer's real data
+    /// directory, which is where these used to write, and where they left a
+    /// file behind whenever an assertion failed ahead of the cleanup line.
+    struct LicenseDir {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl LicenseDir {
+        fn set_up() -> Self {
+            let guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::env::set_var("RUB3_LICENSE_DIR", dir.path());
+            Self {
+                _guard: guard,
+                _dir: dir,
+            }
+        }
+    }
+
+    impl Drop for LicenseDir {
+        fn drop(&mut self) {
+            // Runs before the fields, so the variable is cleared while the
+            // lock is still held.
+            std::env::remove_var("RUB3_LICENSE_DIR");
+        }
+    }
+
     fn test_proof(app_id: &str) -> LicenseProof {
         LicenseProof {
             app_id: app_id.into(),
@@ -93,6 +128,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
+        let _license_dir = LicenseDir::set_up();
         let app_id = "com.rub3.store_test_round_trip";
         let original = test_proof(app_id);
 
@@ -103,13 +139,11 @@ mod tests {
         assert_eq!(original.token_id, loaded.token_id);
         assert_eq!(original.wallet_address, loaded.wallet_address);
         assert_eq!(original.signature, loaded.signature);
-
-        // cleanup
-        let _ = fs::remove_file(proof_path(app_id).unwrap());
     }
 
     #[test]
     fn load_missing_returns_not_found() {
+        let _license_dir = LicenseDir::set_up();
         let err = load_proof("com.rub3.store_test_does_not_exist").unwrap_err();
         match err {
             StoreError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
@@ -119,21 +153,22 @@ mod tests {
 
     #[test]
     fn save_creates_missing_directories() {
+        let _license_dir = LicenseDir::set_up();
         // Use a deeply nested app_id to ensure intermediate dirs are created.
         let app_id = "com.rub3.store_test_mkdir";
         let proof = test_proof(app_id);
 
         save_proof(app_id, &proof).expect("save failed");
 
-        let path = proof_path(app_id).unwrap();
-        assert!(path.exists(), "proof file should exist after save");
-
-        // cleanup
-        let _ = fs::remove_file(&path);
+        assert!(
+            proof_path(app_id).unwrap().exists(),
+            "proof file should exist after save",
+        );
     }
 
     #[test]
     fn save_overwrites_existing_proof() {
+        let _license_dir = LicenseDir::set_up();
         let app_id = "com.rub3.store_test_overwrite";
 
         let mut proof = test_proof(app_id);
@@ -144,13 +179,11 @@ mod tests {
 
         let loaded = load_proof(app_id).expect("load failed");
         assert_eq!(loaded.token_id, 99);
-
-        // cleanup
-        let _ = fs::remove_file(proof_path(app_id).unwrap());
     }
 
     #[test]
     fn paid_by_round_trips() {
+        let _license_dir = LicenseDir::set_up();
         let app_id = "com.rub3.store_test_paid_by";
         let mut proof = test_proof(app_id);
         proof.paid_by = Some("0xpayer".into());
@@ -159,8 +192,5 @@ mod tests {
         let loaded = load_proof(app_id).expect("load failed");
 
         assert_eq!(loaded.paid_by, Some("0xpayer".into()));
-
-        // cleanup
-        let _ = fs::remove_file(proof_path(app_id).unwrap());
     }
 }

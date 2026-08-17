@@ -935,6 +935,12 @@ struct FinalizeArgs {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/// The §1.8 activation flows, driven through this module's IPC handler with
+/// channels standing in for the view. See the module's own header for the seam
+/// and its limits.
+#[cfg(test)]
+mod session_flow;
+
 /// The purchase gate, and the words it puts in front of a person.
 ///
 /// Compiled only where a purchase can be made from this window, which is the

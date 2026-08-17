@@ -112,16 +112,32 @@ fn interactive_slow_path(
         session_ttl_secs,
     };
 
-    match webview::run_activation_window(ctx) {
+    persist_activation(app_id, webview::run_activation_window(ctx))
+}
+
+/// Writes whatever the activation window returned to the place the matching
+/// fast path will look for it, and turns the non-success outcomes into this
+/// module's error type.
+///
+/// Split out of [`interactive_slow_path`] because the window and the record it
+/// produces are testable at very different costs. `run_activation_window` needs
+/// the main thread, a real event loop and a WebKit view; everything that
+/// decides whether a launch survives a restart - which of the two records is
+/// written, and to which store - happens after it returns, and is reached from
+/// here with a value the IPC handler can be driven to produce.
+#[cfg(feature = "webview")]
+pub(crate) fn persist_activation(
+    app_id: &str,
+    result: ActivationResult,
+) -> Result<(), ActivationError> {
+    match result {
         ActivationResult::LegacySuccess { proof } => {
-            store::save_proof(app_id, &proof).map_err(|e| ActivationError::Error(e.to_string()))?;
-            Ok(())
+            store::save_proof(app_id, &proof).map_err(|e| ActivationError::Error(e.to_string()))
         }
         #[cfg(feature = "cooldown")]
         ActivationResult::SessionSuccess { session } => {
             crate::session_store::save_session(&session)
-                .map_err(|e| ActivationError::Error(e.to_string()))?;
-            Ok(())
+                .map_err(|e| ActivationError::Error(e.to_string()))
         }
         ActivationResult::Cancelled => Err(ActivationError::Cancelled),
         ActivationResult::Error(msg) => Err(ActivationError::Error(msg)),
@@ -170,7 +186,7 @@ fn interactive_slow_path(
 /// matters once a signer holds several licenses: the requested token's session
 /// is reused even when another token was activated more recently.
 #[cfg(feature = "cooldown")]
-fn try_session_fast_path(
+pub(crate) fn try_session_fast_path(
     app_id: &str,
     rpc_url: &str,
     require_wallet: Option<Address>,

@@ -151,7 +151,7 @@ surfaces it to the user, and polls the receipt they paste back.
 - `forge test` (contracts/): 33 pass
 - Anvil-gated e2e (`session_verify_onchain_e2e`): passes with the new purchase-path assertions
 
-### 1.8 - On-chain cooldown + session model (tier 3) `[partial]`
+### 1.8 - On-chain cooldown + session model (tier 3) `[complete]`
 
 Replaces the legacy `LicenseProof` flow with a full session model backed by an on-chain cooldown. An NFT holder can otherwise run a signing oracle to distribute fresh sessions to non-holders; a contract-enforced `activate()` cooldown rate-limits how many sessions a single token can mint. The wrapper reads cooldown state and encodes calldata - it never sends txs or holds keys.
 
@@ -201,7 +201,27 @@ function cooldownReady(uint256 tokenId)
 - All five tier bundles (`tier-0`/`1`/`2`/`3`/`4`) compile clean
 - Phase B `rpc` additions covered by pure tests: selector + calldata layout for `encode_activate_calldata(uint256)`, invalid-hash transport errors for `get_tx_receipt` and `get_block_number`
 - Phase C anvil-gated integration test (`tests/session_onchain_e2e.rs`, `#[ignore]`): spawns `anvil`, deploys `Rub3Access` via `forge create`, runs `purchase(address)` + `activate(uint256)` via `cast send`, extracts the real block hash, and exercises `verify_onchain` on (a) the happy path, (b) a tampered contract field, (c) a tampered block hash, and (d) a non-existent tx hash. Gracefully skips when the Foundry toolchain is unavailable. Run with `cargo test -p rub3-wrapper --no-default-features --features tier-3 -- --ignored session_verify_onchain_e2e`
-- Still to do separately from Phase C: end-to-end against anvil of the full connect → tx → sign → persistence-across-restarts webview flow (that belongs in §1.7's manual testing), cooldown enforcement path, short-TTL expiry re-activation, zero-contract legacy backward-compat test
+- Everything Phase C left open is now covered by Phase D below
+
+**Phase D - the deferred regression net `[complete]`**
+
+This is what the section was `[partial]` for. Phases A, B and C were each complete on their own terms; what was outstanding was that four behaviours the flow depends on had no test that would go red if they broke. They do now, so the section is complete.
+
+The four behaviours Phase C listed as "still to do" have named tests. They live in `crates/rub3-wrapper/src/webview/session_flow.rs` rather than under `tests/`, because the seam they drive is `webview::IpcState` - the window's IPC handler - which is private to `src/webview.rs` and out of reach of an integration test binary. `activation::persist_activation` was split out of `interactive_slow_path` in the same pass, so a test writes the record through the production call instead of a copy of it, and `try_session_fast_path` became `pub(crate)` so the expiry test asserts against the launch path itself.
+
+- **The full flow, end to end against anvil** - `a_connected_wallet_activates_signs_and_the_session_survives_a_restart_e2e`. `ready` → `connect` → the wallet broadcasts the cooldown screen's own calldata → `activate_tx_sent` → the poller's `onTxConfirmed`, checked against the receipt's real block hash → the wallet signs that preimage → `session_signed` → `SessionSuccess`, then `persist_activation` and a relaunch through `activation::ensure` that returns from the session fast path with no window and no second `activate()`
+- **Cooldown enforcement** - `a_second_activation_inside_the_cooldown_is_refused_and_the_window_says_how_long_e2e`. The contract refuses a second `activate()` with `CooldownActive` and leaves `lastActivationBlock` where it was; the window's cooldown screen reports `ready: false` with the blocks the contract is still counting, holds that answer two blocks out, and clears at the boundary. Two blocks rather than one on purpose: `cooldownReady` is a view evaluated at the head while a transaction broadcast against it executes in the next block, so a send at one block remaining lands exactly on the boundary and is accepted
+- **Short-TTL expiry re-activation** - `an_expired_session_is_refused_and_a_fresh_activation_replaces_it_e2e`. A two-second TTL, then `try_session_fast_path` declines the lapsed session rather than honouring it, and a second pass through the flow issues session id 2 with a fresh nonce
+- **Zero-contract legacy backward compatibility** - `a_zero_contract_build_still_issues_and_serves_a_legacy_licence_proof`. Neither anvil-gated nor gated on `cooldown`, so it runs under `tier-2,webview` as well: the window issues a `LicenseProof` and a later `ensure` is served from it against an RPC URL nothing answers on, which is what turns "this path reads no chain" into an assertion
+
+**What is still §1.7's manual testing**, and is deliberately not claimed above: the `wry`/`tao` layer itself - creating a view, pumping the event loop, evaluating a script in it - and `assets/activation.html`, the JS that renders each screen, carries `pendingSessionCtx` across the cooldown → confirm → sign hand-offs, and posts the messages back. The tests post those messages directly. Everything between the two - every branch, chain read and screen on the Rust side of the flow - is covered.
+
+CI runs the three anvil-gated tests as a third step of the `onchain-e2e` job under `tier-3,webview`, the only bundle that compiles all of them; the fourth runs in the ordinary matrix. Locally:
+
+```bash
+cargo test -p rub3-wrapper --no-default-features --features tier-3,webview \
+    --lib -- --ignored webview::session_flow
+```
 
 ### 1.9 - Tier scaffold + feature flags `[complete]`
 
