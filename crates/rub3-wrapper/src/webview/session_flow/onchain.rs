@@ -346,6 +346,7 @@ fn wallet_sends(wallet: &Wallet, contract: &str, calldata: &str) -> Result<Strin
 
 /// Mines `n` blocks so a cooldown window can elapse without waiting.
 fn mine(n: u64) {
+    let before = current_block();
     let output = Command::new("cast")
         .args([
             "rpc",
@@ -358,8 +359,19 @@ fn mine(n: u64) {
         .expect("failed to run cast rpc anvil_mine");
     assert!(
         output.status.success(),
-        "anvil_mine failed:\n{}",
+        "test setup failed: anvil_mine could not be sent:\n{}",
         String::from_utf8_lossy(&output.stderr),
+    );
+
+    // `anvil_mine` answers with a bare `null` on success, so the only proof the
+    // blocks exist is the height. A cooldown window that silently did not
+    // elapse would otherwise fail later as a wrapper bug.
+    let after = current_block();
+    assert_eq!(
+        after,
+        before + n,
+        "test setup failed: mining {n} blocks left the chain at height {after}, up from \
+         {before} - any cooldown this was meant to clear has not elapsed",
     );
 }
 
