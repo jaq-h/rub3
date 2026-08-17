@@ -101,6 +101,14 @@ Each test provisions a valid license proof in a temp directory via `RUB3_LICENSE
 
 - `wrapper_forwards_sigterm` - spawn wrapper with `/bin/sleep`, send SIGTERM, assert clean exit
 
+**The three anvil-gated suites below are count-checked in CI.** Each `onchain-e2e`
+step pipes cargo's output through `scripts/assert-e2e-ran.sh`, which fails the
+step unless exactly the number of tests that step's `EXPECTED_TESTS` names
+passed: cargo exits 0 both for a filter that selects nothing and for a suite
+that self-skips on a missing toolchain, so neither the exit code nor a green
+step means anything on its own. Adding or removing a test in any of the three
+means updating that count in `.github/workflows/ci.yml`.
+
 ### Tier-3 on-chain session E2E (`tests/session_onchain_e2e.rs`)
 
 Exercises `session::verify_onchain` against a live EVM node. Requires the Foundry toolchain (`anvil`, `forge`, `cast`) on PATH; gracefully prints `SKIP:` and returns when any of those are missing. Marked `#[ignore]` so default `cargo test` runs skip it.
