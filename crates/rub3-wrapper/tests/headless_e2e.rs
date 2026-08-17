@@ -338,33 +338,41 @@ fn forge_create(target: &str, constructor_args: &[&str]) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix("Deployed to: ") {
-            return rest.trim().to_string();
+            let address = rest.trim().to_string();
+            // The address is parsed out of forge's own report, so re-read the
+            // chain to prove code is actually there: a deploy whose creation
+            // transaction reverted would otherwise be handed on as a live
+            // contract, and every read against it would fail as if the wrapper
+            // were at fault.
+            let code = cast_call_raw_code(&address);
+            assert!(
+                code.len() > 2,
+                "test setup failed: deploying {target} reported {address}, but that \
+                 address holds no code - the deployment did not land",
+            );
+            return address;
         }
     }
     panic!("could not find 'Deployed to:' in forge output:\n{stdout}");
 }
 
+/// Reads the deployed code at `address` through `cast`, used to confirm a
+/// deployment actually landed.
+fn cast_call_raw_code(address: &str) -> String {
+    let output = Command::new("cast")
+        .args(["code", address, "--rpc-url", &rpc_url()])
+        .output()
+        .expect("failed to run cast code");
+    assert!(output.status.success(), "cast code failed");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 /// Mints mock USDC to `to` through the token's test faucet.
 fn mint_usdc(token: &str, to: Address, amount: &str) {
     let to_hex = format!("0x{}", hex::encode(to.as_slice()));
-    let output = Command::new("cast")
-        .args([
-            "send",
-            token,
-            "mint(address,uint256)",
-            &to_hex,
-            amount,
-            "--private-key",
-            DEPLOYER_KEY,
-            "--rpc-url",
-            &rpc_url(),
-        ])
-        .output()
-        .expect("failed to run cast send mint");
-    assert!(
-        output.status.success(),
-        "minting USDC to {to_hex} failed:\n{}",
-        String::from_utf8_lossy(&output.stderr),
+    cast_send_from_deployer(
+        &format!("minting mock USDC to {to_hex}"),
+        &[token, "mint(address,uint256)", &to_hex, amount],
     );
 }
 
@@ -427,24 +435,7 @@ fn usdc_balance(token: &str, who: Address) -> u128 {
 /// Sends ETH from anvil's faucet account to `to`.
 fn fund(to: Address, amount: &str) {
     let to_hex = format!("0x{}", hex::encode(to.as_slice()));
-    let output = Command::new("cast")
-        .args([
-            "send",
-            &to_hex,
-            "--value",
-            amount,
-            "--private-key",
-            DEPLOYER_KEY,
-            "--rpc-url",
-            &rpc_url(),
-        ])
-        .output()
-        .expect("failed to run cast send");
-    assert!(
-        output.status.success(),
-        "funding {to_hex} failed:\n{}",
-        String::from_utf8_lossy(&output.stderr),
-    );
+    cast_send_from_deployer(&format!("funding {to_hex}"), &[&to_hex, "--value", amount]);
 }
 
 /// Buys a licence for `recipient` on the ETH rail without going through the
@@ -458,31 +449,30 @@ fn fund(to: Address, amount: &str) {
 fn seed_licence(contract: &str, recipient: Address, price_wei: &str) -> u64 {
     let minted_before = cast_call_uint(contract, "nextTokenId()(uint256)", &[]);
     let to_hex = format!("0x{}", hex::encode(recipient.as_slice()));
-    let output = Command::new("cast")
-        .args([
-            "send",
-            contract,
-            "purchase(address)",
-            &to_hex,
-            "--value",
-            price_wei,
-            "--private-key",
-            DEPLOYER_KEY,
-            "--rpc-url",
-            &rpc_url(),
-        ])
-        .output()
-        .expect("failed to run cast send purchase");
-    assert!(
-        output.status.success(),
-        "seeding a licence for {to_hex} failed:\n{}",
-        String::from_utf8_lossy(&output.stderr),
+    let step = format!("seeding a licence for {to_hex}");
+    cast_send_from_deployer(
+        &step,
+        &[contract, "purchase(address)", &to_hex, "--value", price_wei],
+    );
+
+    // The receipt status alone proves *a* transaction succeeded; this proves
+    // the mint this helper promises actually happened, and that the id it is
+    // about to hand back is the one that was minted.
+    let minted_after = cast_call_uint(contract, "nextTokenId()(uint256)", &[]);
+    assert_eq!(
+        minted_after,
+        minted_before + 1,
+        "test setup failed: {step} did not mint - nextTokenId went {minted_before} -> \
+         {minted_after}, so token id {minted_before} was never minted and every \
+         assertion after this point would be testing the wrapper against a licence \
+         that does not exist",
     );
     minted_before as u64
 }
 
 /// Mines `n` blocks so a cooldown window can elapse without waiting.
 fn mine(n: u32) {
+    let before = block_number();
     let output = Command::new("cast")
         .args([
             "rpc",
@@ -495,9 +485,33 @@ fn mine(n: u32) {
         .expect("failed to run cast rpc anvil_mine");
     assert!(
         output.status.success(),
-        "anvil_mine failed:\n{}",
+        "test setup failed: anvil_mine could not be sent:\n{}",
         String::from_utf8_lossy(&output.stderr),
     );
+
+    // `anvil_mine` answers with a bare `null` on success, so the only proof the
+    // blocks exist is the height. A cooldown window that silently did not
+    // elapse would otherwise fail later as a wrapper bug.
+    let after = block_number();
+    assert_eq!(
+        after,
+        before + u64::from(n),
+        "test setup failed: mining {n} blocks left the chain at height {after}, up from \
+         {before} - any cooldown this was meant to clear has not elapsed",
+    );
+}
+
+/// The current block height, read through `cast`.
+fn block_number() -> u64 {
+    let output = Command::new("cast")
+        .args(["block-number", "--rpc-url", &rpc_url()])
+        .output()
+        .expect("failed to run cast block-number");
+    assert!(output.status.success(), "cast block-number failed");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("cast block-number did not return a number")
 }
 
 // ── The protocol fee (§2.3) ───────────────────────────────────────────────────
@@ -544,26 +558,57 @@ fn factory_deploy_access(
     let params = format!(
         "(\"Rub3 Headless Test\",\"RUB3H\",{NO_TBA_IDENTITY},{WRAPPER_HASHES},({price_wei},{price_token},{price_amount}),0,15,{ZERO_ADDR},{ZERO_ADDR})"
     );
-    let output = Command::new("cast")
-        .args([
-            "send",
+    cast_send_from_deployer(
+        "deploying a Rub3Access through the factory",
+        &[
             factory,
             "deployAccess((string,string,(uint8,address),bytes32[],(uint256,address,uint256),uint256,uint256,address,address))",
             &params,
-            "--private-key",
-            DEPLOYER_KEY,
-            "--rpc-url",
-            &rpc_url(),
-        ])
-        .output()
-        .expect("failed to run cast send deployAccess");
-    assert!(
-        output.status.success(),
-        "deployAccess failed:\n{}",
-        String::from_utf8_lossy(&output.stderr),
+        ],
     );
 
     cast_call(factory, "deploymentAt(uint256)(address)", &["0"])
+}
+
+/// Runs one `cast send` from the deployer key and **proves the transaction
+/// landed**, returning its receipt.
+///
+/// `cast send` exits zero for a transaction that reverted on-chain: the
+/// process succeeded, the transaction did not. Trusting the exit code lets a
+/// failed setup step run silently and surface much later as a failure of the
+/// code under test, which is exactly the misdiagnosis these suites must not
+/// produce. So every send here goes through `--json` and asserts the receipt
+/// status is `0x1`, and every failure names the step that did not land.
+fn cast_send_from_deployer(step: &str, args: &[&str]) -> serde_json::Value {
+    let url = rpc_url();
+    let mut argv = vec!["send"];
+    argv.extend_from_slice(args);
+    argv.extend_from_slice(&["--private-key", DEPLOYER_KEY, "--rpc-url", &url, "--json"]);
+
+    let output = Command::new("cast")
+        .args(&argv)
+        .output()
+        .expect("failed to run cast send");
+    assert!(
+        output.status.success(),
+        "test setup failed: `cast send` for {step} could not be sent:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let receipt: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("test setup failed: {step} receipt was not JSON ({e}):\n{stdout}")
+    });
+    let status = receipt["status"].as_str().unwrap_or_default();
+    assert_eq!(
+        status, "0x1",
+        "test setup failed: the transaction for {step} reverted on-chain \
+         (receipt status {status}); `cast send` still exited zero, so nothing \
+         downstream of this step ran against the state it was meant to create.\n\
+         receipt:\n{receipt:#}",
+    );
+    receipt
 }
 
 /// Reads a `uint256` getter through `cast`, so the fee assertions do not go
@@ -601,20 +646,9 @@ fn cast_call(contract: &str, sig: &str, args: &[&str]) -> String {
 /// Sends a transaction from the deployer key, used to settle the two halves of
 /// a split after the agent has bought.
 fn cast_send(contract: &str, sig: &str, args: &[&str]) {
-    let url = rpc_url();
-    let mut argv = vec!["send", contract, sig];
+    let mut argv = vec![contract, sig];
     argv.extend_from_slice(args);
-    argv.extend_from_slice(&["--private-key", DEPLOYER_KEY, "--rpc-url", &url]);
-
-    let output = Command::new("cast")
-        .args(&argv)
-        .output()
-        .expect("failed to run cast send");
-    assert!(
-        output.status.success(),
-        "cast send {sig} failed:\n{}",
-        String::from_utf8_lossy(&output.stderr),
-    );
+    cast_send_from_deployer(&format!("`{sig}` on {contract}"), &argv);
 }
 
 // ── Test fixture ──────────────────────────────────────────────────────────────
@@ -900,23 +934,9 @@ fn headless_sold_out_e2e() {
 
     // Cap of 1, and the deployer takes it.
     let contract = deploy_access("0", "1", "15");
-    let output = Command::new("cast")
-        .args([
-            "send",
-            &contract,
-            "purchase(address)",
-            DEPLOYER_ADDR,
-            "--private-key",
-            DEPLOYER_KEY,
-            "--rpc-url",
-            &rpc_url(),
-        ])
-        .output()
-        .expect("cast send purchase");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    cast_send_from_deployer(
+        "taking the only licence in supply, to sell the contract out",
+        &[&contract, "purchase(address)", DEPLOYER_ADDR],
     );
 
     let agent = Agent::new();
