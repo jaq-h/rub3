@@ -259,7 +259,7 @@ must be unable to answer from a stored copy of anything.
   predicate that decides what is test scaffolding: `test`, `any(test, ..)` and
   `all(test, ..)` are dropped from the served surface, `not(test)` and a plain
   feature gate are not
-- **`tests/derivation.rs`** (13) - the provenance proofs. Six of them build a
+- **`tests/derivation.rs`** (14) - the provenance proofs. Six of them build a
   throwaway checkout, ask a question, edit the file the answer came from, and ask
   again *through the same server*: a renamed function, a feature gate added to a
   crate root, an edited ABI entry, a selector removed from an artifact, a moved
@@ -274,13 +274,19 @@ must be unable to answer from a stored copy of anything.
   which is how a mis-expanded tuple parameter is caught rather than shipped with
   a plausible-looking wrong selector. A third asserts that no served signature
   carries an attribute or a doc comment, since `syn` spans cover both and a
-  signature a caller cannot paste is only half derived
+  signature a caller cannot paste is only half derived. Two refusals are in here
+  too, for the questions where an empty answer would be read as a fact: a
+  contract question with no artifacts names `forge build`, and a module name
+  that no crate declares names the modules that do exist rather than returning
+  an empty surface an agent would read as "nothing public lives there"
 - **`tests/docs_legibility.rs`** (8) - the gate: every code fence declares a
   language, every relative cross-reference resolves to a file *and* to a heading
   that exists, one title per document with no skipped heading level, a stated
   purpose under each title, no em dashes, and `llms.txt` conforming to the
   specification, linking only files that exist, and covering every document in
-  the inventory
+  the inventory. The gate holds the git-tracked Markdown, not the working tree
+  the server walks, so an uncommitted scratch file is not held to the
+  repository's documentation standard
 - **`tests/mcp_stdio.rs`** (1) - spawns the built binary and speaks
   newline-delimited JSON-RPC to it: `initialize` at protocol revision
   `2025-11-25`, `tools/list`, three `tools/call`s and one refusal. It is the only

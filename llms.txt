@@ -30,7 +30,7 @@ Foundry project, `forge test` from `contracts/`. Solidity 0.8.28, OpenZeppelin E
 
 ## Wrapper runtime
 
-Rust, one workspace member, `cargo` from the repository root.
+Rust, the workspace member that ships, `cargo` from the repository root.
 
 - [Cargo.toml](https://raw.githubusercontent.com/jaq-h/rub3/main/crates/rub3-wrapper/Cargo.toml): the five tier bundles over composable capability flags, and the two front doors. A build selects exactly one tier bundle and at least one front door; `--no-default-features` is mandatory, because Cargo features are additive and `--features tier-0` alone silently tests the tier-2 default.
 - [lib.rs](https://raw.githubusercontent.com/jaq-h/rub3/main/crates/rub3-wrapper/src/lib.rs): the authority on which modules exist under which feature. Whole modules are compiled away by tier, so code that builds under the default proves nothing about `tier-0` or `tier-3`.

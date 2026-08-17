@@ -122,6 +122,34 @@ fn only_signature(api: &[rustapi::CrateApi], module: &str, name: &str) -> Option
         .map(|item| item.signature.clone())
 }
 
+/// How many `#[cfg]` attributes a crate root puts on one `mod` declaration.
+///
+/// Parsed rather than counted textually, because the question is about the
+/// attributes attached to that declaration and a `#[cfg]` on the item beside it
+/// looks identical to a line scan. `lib` names the crate root itself, which no
+/// `mod` item declares and which therefore carries no gate.
+fn declared_cfg_count(root: &str, module: &str) -> usize {
+    if module == "lib" {
+        return 0;
+    }
+    let parsed = syn::parse_file(root).expect("the crate root parses");
+    parsed
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(declaration) if declaration.ident == module => Some(
+                declaration
+                    .attrs
+                    .iter()
+                    .filter(|attr| attr.path().is_ident("cfg"))
+                    .count(),
+            ),
+            _ => None,
+        })
+        .next()
+        .unwrap_or_default()
+}
+
 // ── Mutation: the Rust surface follows the source ─────────────────────────────
 
 #[test]
@@ -179,7 +207,8 @@ fn a_feature_gate_added_to_the_crate_root_reaches_the_served_module() {
         api.iter()
             .flat_map(|crate_api| crate_api.modules.iter())
             .find(|module| module.name == "widget")
-            .and_then(|module| module.cfg.clone())
+            .map(|module| module.cfg.clone())
+            .unwrap_or_default()
     };
     let ask = || {
         server
@@ -193,7 +222,7 @@ fn a_feature_gate_added_to_the_crate_root_reaches_the_served_module() {
             .crates
     };
 
-    assert_eq!(gate(&ask()), None);
+    assert!(gate(&ask()).is_empty());
 
     fixture.write(
         "crates/demo/src/lib.rs",
@@ -201,9 +230,25 @@ fn a_feature_gate_added_to_the_crate_root_reaches_the_served_module() {
     );
 
     assert_eq!(
-        gate(&ask()).as_deref(),
-        Some("#[cfg(feature = \"widgets\")]"),
+        gate(&ask()),
+        vec!["#[cfg(feature = \"widgets\")]".to_string()],
         "the module's feature gate is read from the crate root at call time"
+    );
+
+    // Rust ANDs stacked gates, so serving the first alone would tell an agent
+    // the module is reachable with `--features widgets` on any platform.
+    fixture.write(
+        "crates/demo/src/lib.rs",
+        "//! Demo crate.\n\n#[cfg(feature = \"widgets\")]\n#[cfg(target_os = \"macos\")]\npub mod widget;\n",
+    );
+
+    assert_eq!(
+        gate(&ask()),
+        vec![
+            "#[cfg(feature = \"widgets\")]".to_string(),
+            "#[cfg(target_os = \"macos\")]".to_string(),
+        ],
+        "every gate on the declaration is served, not the first"
     );
 }
 
@@ -330,6 +375,46 @@ fn a_contract_question_without_artifacts_names_the_build_command() {
     );
 }
 
+#[test]
+fn an_unknown_module_is_refused_with_the_modules_that_exist() {
+    // The other shape of "refusing is the answer": an empty result set for a
+    // misspelled module reads as "that module exposes no public API", and an
+    // agent believing it goes straight back to inventing the signature.
+    let fixture = Fixture::new();
+    let server = fixture.server();
+
+    let error = match server.rust_api(Parameters(RustApi {
+        crate_name: Some("demo".to_string()),
+        module: Some("widgt".to_string()),
+        name: None,
+    })) {
+        Err(error) => error,
+        Ok(served) => panic!(
+            "a module that does not exist must not answer, got {} crates",
+            served.0.crates.len()
+        ),
+    };
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("widgt") && message.contains("widget"),
+        "the refusal must name the modules that do exist, got: {message}"
+    );
+
+    let served = server
+        .rust_api(Parameters(RustApi {
+            crate_name: Some("demo".to_string()),
+            module: Some("widget".to_string()),
+            name: None,
+        }))
+        .expect("the module that does exist answers")
+        .0
+        .crates;
+    assert_eq!(
+        only_signature(&served, "widget", "alpha").as_deref(),
+        Some("pub fn alpha(count: u32) -> bool"),
+    );
+}
+
 // ── The real repository ───────────────────────────────────────────────────────
 
 /// Every signature served for the workspace appears verbatim in its own file.
@@ -382,16 +467,27 @@ fn every_served_rust_signature_is_a_verbatim_slice_of_its_file() {
                 }
                 checked += 1 + item.members.len();
             }
-            if let Some(cfg) = &module.cfg {
-                let root = repo
-                    .read(&format!("{}/src/lib.rs", crate_api.path))
-                    .expect("the crate root reads");
+            let root_path = format!("{}/src/lib.rs", crate_api.path);
+            let root = repo.read(&root_path).expect("the crate root reads");
+            for cfg in &module.cfg {
                 assert!(
                     root.contains(cfg),
                     "{} serves module cfg {cfg:?}, which is not in the crate root",
                     module.name
                 );
             }
+            // Completeness, not only verbatimness: a subset of a module's gates
+            // is a listing that understates what a build needs, and it is the
+            // half no containment check can see.
+            let declared = declared_cfg_count(&root, &module.name);
+            assert_eq!(
+                module.cfg.len(),
+                declared,
+                "{} declares {declared} cfg attributes on `mod {}` and {} were served",
+                root_path,
+                module.name,
+                module.cfg.len()
+            );
         }
     }
     assert!(

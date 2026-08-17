@@ -71,12 +71,15 @@ pub struct Module {
     pub name: String,
     /// Repository-relative path of the file it is declared in.
     pub path: String,
-    /// The `#[cfg(...)]` the crate root puts on this module, verbatim.
+    /// The `#[cfg(...)]` attributes the crate root puts on this module,
+    /// verbatim, ANDed together the way Rust reads them.
     ///
     /// This is the fact that catches people out most: under `tier-0` the
     /// `session`, `identity` and `session_store` modules do not exist at all, so
-    /// an API listing with no feature gate beside it is misleading.
-    pub cfg: Option<String>,
+    /// an API listing with no feature gate beside it is misleading. All of them
+    /// are served rather than the first, because a subset understates what a
+    /// build needs and reads as though the rest were satisfied.
+    pub cfg: Vec<String>,
     /// The module's own `//!` documentation.
     pub doc: String,
     /// Public items, in source order.
@@ -165,7 +168,7 @@ fn modules(repo: &Repo, crate_dir: &str, root_path: &str) -> Result<Vec<Module>,
     let mut modules = vec![Module {
         name: "lib".to_string(),
         path: root_path.to_string(),
-        cfg: None,
+        cfg: Vec::new(),
         doc: inner_doc(&file.attrs),
         items: items(&source, &lines, &file.items),
     }];
@@ -195,7 +198,7 @@ fn modules(repo: &Repo, crate_dir: &str, root_path: &str) -> Result<Vec<Module>,
         modules.push(Module {
             name,
             path,
-            cfg: cfgs(&source, &module.attrs).first().cloned(),
+            cfg: cfgs(&source, &module.attrs),
             doc: inner_doc(&module_file.attrs),
             items: items(&module_source, &module_lines, &module_file.items),
         });
@@ -541,10 +544,11 @@ fn cfgs(source: &str, attrs: &[syn::Attribute]) -> Vec<String> {
 
 /// True when an item exists only under `cfg(test)`.
 ///
-/// Test scaffolding is not API. `test_support` and `webview::session_flow` are
-/// both `#[cfg(test)]` in this workspace and are never shipped, so serving them
-/// as part of the surface would invite an integrator to call something that does
-/// not exist in their build.
+/// Test scaffolding is not API: serving it would invite an integrator to call
+/// something that does not exist in their build. Today's scaffolding never
+/// reaches this predicate, because visibility excludes it first and the walk
+/// never enters a private module, so what this guards is the `#[cfg(test)] pub`
+/// item a later change adds.
 ///
 /// The predicate is parsed rather than searched for a substring, because the
 /// substring reading is wrong in both directions and both directions are silent:

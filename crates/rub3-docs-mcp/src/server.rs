@@ -13,6 +13,7 @@
 //! start lying the moment an agent edited a file, which is the one thing an
 //! agent does constantly.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -286,8 +287,25 @@ impl DocsServer {
             }
         }
         if let Some(wanted) = &request.module {
+            // A misspelled module name has to refuse for the same reason the
+            // crate name above it does: an empty success reads as "that module
+            // exposes no public API", and an agent believing that goes back to
+            // inventing the signature this tool exists to hand it.
+            let known: BTreeSet<String> = crates
+                .iter()
+                .flat_map(|api| api.modules.iter().map(|module| module.name.clone()))
+                .collect();
             for api in &mut crates {
                 api.modules.retain(|module| &module.name == wanted);
+            }
+            if crates.iter().all(|api| api.modules.is_empty()) {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "no module named {wanted}. Modules in scope: {}",
+                        known.into_iter().collect::<Vec<_>>().join(", ")
+                    ),
+                    None,
+                ));
             }
         }
         if let Some(wanted) = &request.name {

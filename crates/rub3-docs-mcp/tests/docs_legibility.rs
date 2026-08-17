@@ -28,8 +28,46 @@ fn repo() -> Repo {
     Repo::compiled_in().expect("this crate lives in a rub3 checkout")
 }
 
+/// The documents this gate holds to the standard: the git-tracked ones.
+///
+/// The server walks the working tree on purpose, because a document written a
+/// moment ago has to be served. A gate that did the same would hold an
+/// untracked scratch file to the repository's documentation standard and then
+/// tell its author to link their own working notes from `llms.txt`, which is a
+/// red suite that means nothing. Committing the file is what puts it in scope.
+///
+/// When git cannot answer (a source tarball, a sandbox with no git binary) the
+/// whole inventory is held instead: that is the stricter of the two, so the
+/// gate never quietly checks less than it should.
 fn inventory(repo: &Repo) -> Vec<docs::Document> {
-    docs::inventory(repo).expect("the documents read")
+    let all = docs::inventory(repo).expect("the documents read");
+    let Some(tracked) = tracked_documents(repo) else {
+        return all;
+    };
+    all.into_iter()
+        .filter(|document| tracked.contains(&document.path))
+        .collect()
+}
+
+fn tracked_documents(repo: &Repo) -> Option<BTreeSet<String>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.root())
+        .args(["ls-files", "-z", "--", "*.md"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let listing = String::from_utf8(output.stdout).ok()?;
+    let tracked: BTreeSet<String> = listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect();
+    // An empty listing is git answering "nothing is tracked here", which in a
+    // real checkout means the question was asked in the wrong place.
+    (!tracked.is_empty()).then_some(tracked)
 }
 
 // ── The documents ─────────────────────────────────────────────────────────────

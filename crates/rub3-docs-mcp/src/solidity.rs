@@ -154,10 +154,15 @@ pub struct Entry {
 
 /// Resolves the contracts source and artifact directories.
 ///
-/// Read from `contracts/foundry.toml` rather than assumed, because the
-/// fingerprint gate resolves the same two directories from the active config and
-/// a docs server reading a different pair would describe a different build.
-/// Forge's own defaults apply when the file names neither.
+/// Read out of the committed `[profile.default]` in `contracts/foundry.toml`
+/// rather than hardcoded, with forge's own defaults when the file names neither.
+/// `FOUNDRY_PROFILE` and the `FOUNDRY_*` directory overrides are deliberately
+/// not honoured, and neither is a non-default profile: shelling out to `forge
+/// config` would put Foundry on the critical path of a tool whose whole point is
+/// answering inside an editor that may have none. A build made under an override
+/// is out of scope, and the failure is safe rather than wrong, since the server
+/// finds no artifacts where the committed profile says they go and asks for
+/// `forge build` instead of answering from somewhere else.
 pub fn directories(repo: &Repo) -> Result<(String, String), SolidityError> {
     let text = repo.read("contracts/foundry.toml")?;
     let config: toml::Value = toml::from_str(&text).map_err(|e| SolidityError::Malformed {

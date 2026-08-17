@@ -260,8 +260,6 @@ fn the_binary_serves_its_tools_over_stdio() {
         "the wrong item came back: {served:?}"
     );
 
-    // A refusal, through the wire: an unknown document is an error result with
-    // the inventory named, not an empty success.
     // A refusal, through the wire: an unreachable path comes back as an
     // `invalid params` error naming the inventory, not as an empty success that
     // an agent would read as "that document is empty".
