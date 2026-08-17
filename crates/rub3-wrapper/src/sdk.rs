@@ -18,6 +18,11 @@
 //! application launched directly, a wrapper that died mid-run, a stale address,
 //! a version-skewed pair.
 //!
+//! **What it leaves behind.** Nothing, on any exit it can see: the endpoint goes
+//! with the [`Channel`], and one that outlived its wrapper - killed, Ctrl-C'd,
+//! crashed - is collected by the next `serve` on the machine, which only ever
+//! removes a directory it can name and whose pid is gone.
+//!
 //! **What crosses it.** Exactly the six fields of [`rub3::SessionInfo`]. The
 //! signature, the nonce, the activation transaction and the device public key
 //! stay on this side: an application that could read the session signature could
@@ -228,12 +233,11 @@ mod platform {
     const MAX_SOCKET_PATH: usize = 100;
 
     pub(super) fn serve(offer: Offer, shutdown: Arc<AtomicBool>) -> io::Result<Channel> {
-        let dir = endpoint_dir()?;
-        let path = dir.join("s");
+        let dir = EndpointDir::create()?;
+        let path = dir.path().join("s");
+        sweep_stale_endpoints(dir.parent());
 
-        let listener = UnixListener::bind(&path).inspect_err(|_| {
-            let _ = std::fs::remove_dir_all(&dir);
-        })?;
+        let listener = UnixListener::bind(&path)?;
         listener.set_nonblocking(true)?;
 
         let offer = Arc::new(offer);
@@ -245,8 +249,130 @@ mod platform {
         Ok(Channel {
             address: path.into_os_string(),
             shutdown,
-            dir,
+            dir: dir.keep(),
         })
+    }
+
+    /// Owns the endpoint directory until the [`Channel`] that will remove it
+    /// exists.
+    ///
+    /// Everything in [`serve`] after the directory is created can fail, and
+    /// `Channel::drop` is the only other thing that removes it, so a `?` on any
+    /// of those steps would leave a 0700 directory holding a socket with no
+    /// owner and no reaper. One guard covers all of them, and covers a fallible
+    /// step added here later without that step having to remember to.
+    pub(super) struct EndpointDir {
+        path: Option<PathBuf>,
+    }
+
+    impl EndpointDir {
+        pub(super) fn create() -> io::Result<Self> {
+            Ok(Self {
+                path: Some(endpoint_dir()?),
+            })
+        }
+
+        pub(super) fn path(&self) -> &std::path::Path {
+            self.path.as_deref().expect("armed until `keep` takes it")
+        }
+
+        /// The directory the endpoints live in, which is what the sweep reads.
+        fn parent(&self) -> &std::path::Path {
+            self.path()
+                .parent()
+                .expect("an endpoint directory is created inside a base directory")
+        }
+
+        /// Hands the directory to the caller, so dropping the guard no longer
+        /// removes it. Called only where a [`Channel`] takes over that job.
+        pub(super) fn keep(mut self) -> PathBuf {
+            self.path.take().expect("armed until `keep` takes it")
+        }
+    }
+
+    impl Drop for EndpointDir {
+        fn drop(&mut self) {
+            if let Some(path) = &self.path {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+    }
+
+    /// Removes endpoint directories whose wrapper is gone.
+    ///
+    /// `Channel::drop` is the ordinary reaper, and it does not run when the
+    /// wrapper is killed: Ctrl-C on a wrapped CLI is a SIGINT to the whole
+    /// foreground group, which takes its default action and skips every
+    /// destructor, as do SIGHUP and SIGKILL. Sweeping at [`serve`] time covers
+    /// those exits and a hard crash alike, which is why it is here rather than
+    /// in another signal handler - a handler cannot run for the exits that
+    /// matter most.
+    ///
+    /// It deletes directories under a temporary directory shared with the rest
+    /// of the machine, so it is deliberately narrow. A name that does not parse
+    /// as one [`endpoint_dir`] wrote is left alone, and so is one whose pid is
+    /// still running: several wrappers running at once is ordinary here, and one
+    /// of those directories is a live channel serving a live application.
+    ///
+    /// Non-fatal throughout. A temp directory that cannot be read or an entry
+    /// that will not delete must never stop a paid-for launch, which is the same
+    /// fail-open-on-launch posture as the rest of this module.
+    pub(super) fn sweep_stale_endpoints(base: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(base) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Some(pid) = endpoint_owner(&name) else {
+                continue;
+            };
+            if pid == std::process::id() || pid_is_alive(pid) {
+                continue;
+            }
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+
+    /// The pid inside an endpoint directory's own name, or `None` when the name
+    /// is not one [`endpoint_dir`] produced.
+    ///
+    /// Every field has to parse, and there has to be nothing after the last one:
+    /// the sweep removes what this accepts, so anything it cannot account for is
+    /// somebody else's and stays.
+    fn endpoint_owner(name: &str) -> Option<u32> {
+        let mut parts = name.split('-');
+        if parts.next()? != "rub3" {
+            return None;
+        }
+        let pid = parts.next()?.parse::<u32>().ok()?;
+        parts.next()?.parse::<u32>().ok()?;
+        parts.next()?.parse::<u64>().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        // `getpid` never returns 0, so a name carrying it is not ours - and 0
+        // means "this process group" to `kill`, which is not a question worth
+        // asking on the way to a delete.
+        (pid != 0).then_some(pid)
+    }
+
+    /// Whether a pid still names a running process. Unknowable answers count as
+    /// alive: `EPERM` is another user's process, and the sweep only ever deletes
+    /// on a definite "gone".
+    fn pid_is_alive(pid: u32) -> bool {
+        let Ok(raw) = i32::try_from(pid) else {
+            return true;
+        };
+        !matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(raw), None),
+            Err(nix::errno::Errno::ESRCH)
+        )
     }
 
     fn accept_loop(listener: UnixListener, offer: Arc<Offer>, shutdown: Arc<AtomicBool>) {
@@ -855,5 +981,104 @@ mod tests {
 
         assert_eq!(got[0]["result"], "alive", "{got:?}");
         assert_eq!(got[1]["result"], "no_session", "{got:?}");
+    }
+
+    // ── The endpoint's directory ─────────────────────────────────────────────
+
+    /// `serve` can fail after the directory exists - the bind, the listener's
+    /// mode, the accept thread - and the `Channel` that would remove it is never
+    /// built on those paths. The guard is what covers all of them, so it is
+    /// tested as what it is: armed it removes the directory, handed on it does
+    /// not.
+    #[cfg(unix)]
+    #[test]
+    fn an_endpoint_directory_outlives_its_guard_only_once_a_channel_owns_it() {
+        let guard = platform::EndpointDir::create().expect("the directory is created");
+        let abandoned = guard.path().to_path_buf();
+        assert!(abandoned.is_dir(), "the guard should have created it");
+        drop(guard);
+        assert!(
+            !abandoned.exists(),
+            "a `serve` that gave up left {abandoned:?} behind"
+        );
+
+        let guard = platform::EndpointDir::create().expect("the directory is created");
+        let kept = guard.keep();
+        assert!(
+            kept.is_dir(),
+            "the directory a Channel now owns must survive: {kept:?}"
+        );
+        std::fs::remove_dir_all(&kept).expect("cleanup");
+    }
+
+    /// The sweep collects what a killed wrapper left behind, and - the direction
+    /// that matters, because this code deletes directories - leaves everything
+    /// else exactly where it is: a live wrapper's endpoint, and any name it
+    /// cannot account for.
+    ///
+    /// Both pids are real ones. The dead one is a child that has been waited
+    /// for, so the kernel is certain it is gone rather than the test guessing at
+    /// an unused number; the live one is *another* running process rather than
+    /// this one, so the decoy is answered by the liveness check itself and not
+    /// by the separate "skip our own" rule. A third directory covers that rule.
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_collects_dead_endpoints_and_never_a_live_or_foreign_one() {
+        let base = tempfile::tempdir().expect("tempdir");
+
+        let dead = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("a child to outlive");
+        let dead_pid = dead.id();
+        dead.wait_with_output().expect("the child exits");
+
+        let mut other = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("a child to outlive the sweep");
+        let other_pid = other.id();
+
+        let concurrent = base.path().join(format!("rub3-{other_pid}-123-0"));
+        let ours = base
+            .path()
+            .join(format!("rub3-{}-123-0", std::process::id()));
+        let stale = base.path().join(format!("rub3-{dead_pid}-456-0"));
+        let foreign = base.path().join("rub3-notes");
+        for dir in [&concurrent, &ours, &stale, &foreign] {
+            std::fs::create_dir(dir).expect("the fixture directory is created");
+            std::fs::write(dir.join("s"), b"").expect("something inside it");
+        }
+
+        platform::sweep_stale_endpoints(base.path());
+        let _ = other.kill();
+        let _ = other.wait();
+
+        assert!(
+            !stale.exists(),
+            "a dead wrapper's endpoint should have been collected: {stale:?}"
+        );
+        assert!(
+            concurrent.is_dir(),
+            "another live wrapper's endpoint must survive the sweep: {concurrent:?}"
+        );
+        assert!(
+            ours.is_dir(),
+            "this process's own endpoint must survive the sweep: {ours:?}"
+        );
+        assert!(
+            foreign.is_dir(),
+            "a name this module did not write must survive the sweep: {foreign:?}"
+        );
+    }
+
+    /// A sweep is not allowed to be a reason a launch fails, so a base directory
+    /// that is not there is a no-op rather than a panic or an error.
+    #[cfg(unix)]
+    #[test]
+    fn a_sweep_of_a_directory_that_is_not_there_is_harmless() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let missing = base.path().join("gone");
+        platform::sweep_stale_endpoints(&missing);
     }
 }
