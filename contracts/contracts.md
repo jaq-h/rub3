@@ -752,7 +752,7 @@ cast send <CODE_REGISTRY> "deprecate(bytes32,string)" \
 
 ### Reading it, and the offsets bootstrap
 
-Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. `offsetTables()` breaks that circle: it returns the *distinct* tables any published release uses - one today, shared by `Rub3Access` and `Rub3Subscription` - so a verifier fetches the short candidate list once, hashes under each, and looks each result up.
+Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. `offsetTables()` breaks that circle: it returns the *distinct* tables any published release uses - one today, shared by `Rub3Access` and `Rub3Subscription` - so a verifier fetches the short candidate list once, hashes under each, and looks each result up. A verifier on a purchase path should bound how many it tries: each one costs a round trip, and the append-only bound on the owner key covers what it can publish, not how long a buyer waits for it. The wrapper caps this at `attest::MAX_CANDIDATE_OFFSET_TABLES`.
 
 ```bash
 cast call <CODE_REGISTRY> "offsetTables()((uint32,uint32)[][])" --rpc-url $RPC

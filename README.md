@@ -432,7 +432,7 @@ activation failure.
 | 20 | `--token-id` names a token this signer does not hold | Fix the id, or drop the flag to purchase |
 | 21 | Purchase broadcast but not confirmed - timed out, or the receipt query kept failing | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
 | 22 | The listed price is above the configured spend ceiling for the rail it was listed on. On the stablecoin rail the ceiling is weighed before anything is signed, so the rail was not exercised and this is no evidence it is otherwise usable; on the ETH rail it is weighed before the transaction is sent, so no gas was spent | Terminal - raise the variable the message names (`RUB3_AGENT_MAX_TOKEN_AMOUNT` or `RUB3_AGENT_MAX_ETH_WEI`) if the price is acceptable, or do not buy |
-| 23 | This build will not buy a licence from the contract at that address, either because the code is canonical rub3 code at an address that sells none (the factory or a deployer helper) or because it matched no fingerprint this build pins. Checked before anything is signed, so no transaction was sent and nothing was spent | Terminal - the same address holds the same code. The detail line below says which case it is: verify the address, or use a build packed with the release that contract came from |
+| 23 | This build will not buy a licence from the contract at that address, either because the code is canonical rub3 code at an address that sells none (the factory, a deployer helper, or the code registry) or because no authority it could reach vouches for it. Checked before anything is signed, so no transaction was sent and nothing was spent | Terminal - the same address holds the same code. The detail line below says which case it is: verify the address, or use a build packed with the release that contract came from |
 
 Failures with structured parameters also print one parseable line, carrying only
 parameters the wrapper actually measured:
@@ -447,13 +447,21 @@ because the two causes call for different responses:
 
 | Detail line | What happened | What to do |
 |---|---|---|
-| `contract=0x... canonical=NAME sells_licences=false` | The code **is** canonical rub3 code, at an address that sells no licences - the factory, or one of its deployer helpers | Wrong address. Check what the build is pointed at |
-| `contract=0x... code_bytes=N exposed=A\|B` | The code matched no fingerprint this build pins: a modified copy, or a template release newer than this binary | Verify the address, or use a build packed with that release |
+| `contract=0x... canonical=NAME sells_licences=false` | The code **is** canonical rub3 code, at an address that sells no licences - the factory, one of its deployer helpers, or the code registry | Wrong address. Check what the build is pointed at |
+| `contract=0x... code_bytes=N registry=WHO exposed=A\|B` | No authority vouched for the code: a modified copy, or a release newer than every authority this build could reach | Verify the address, or use a build packed with that release |
+
+`registry` says what the second authority contributed, and is three-valued
+because the three mean different things: `not_consulted` (the build knows no
+code registry on this chain, which is every chain today), `unknown` (asked, and
+it has no record), `unavailable` (it could not be asked). None of them is
+retryable, but only the last means the question went unanswered.
 
 `exposed` is a **pipe-separated** list, not comma-separated: an ABI signature
 contains commas of its own, so `burn(address,uint256)` would not survive a comma
 split. It reads `none` when the scan named nothing, which is a diagnostic and
-not a clean bill of health. Neither shape is an accusation.
+not a clean bill of health. It stays last on the line: its values carry commas
+and parentheses of their own, so it is terminated by the end of the line and
+every field added later goes in front of it. Neither shape is an accusation.
 
 Code 11's detail line carries `required_wei` and `required_covers`, which says
 what that figure includes:

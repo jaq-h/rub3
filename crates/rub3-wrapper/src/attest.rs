@@ -994,6 +994,26 @@ fn sanitised(record: RegistryRecord) -> RegistryRecord {
     }
 }
 
+/// How many candidate offset tables one consultation will try.
+///
+/// Every candidate that survives the shape check costs its own sequential
+/// `record` call, so an unbounded list lets whoever holds the registry's owner
+/// key turn each purchase into arbitrarily many round trips. The bound this
+/// project publishes on that key is that the damage is limited to additions,
+/// each one a permanent public event a watcher can alarm on; a purchase that
+/// takes minutes is not an addition anyone would alarm on, so the published
+/// bound did not cover it. This closes that gap. It bounds latency only: an
+/// uncapped loop was never able to produce a wrong verdict, only a slow one.
+///
+/// Sixteen is deliberately far above anything legitimate rather than tight. A
+/// table is per *code layout*, not per contract and not per release: today
+/// exactly one exists, and `Rub3Access` and `Rub3Subscription` share it. A
+/// second appears only when a future contract's immutables land at different
+/// offsets, so sixteen leaves room for many such releases live at once. Raise
+/// it when a real deployment needs more tables than this, never to accommodate
+/// a registry publishing tables no contract was deployed under.
+const MAX_CANDIDATE_OFFSET_TABLES: usize = 16;
+
 /// What the registry said about code the pinned table did not recognise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryVerdict {
@@ -1025,9 +1045,13 @@ pub enum RegistryVerdict {
 ///    comparison never looks at. Dropping every candidate is
 ///    [`RegistryVerdict::Unknown`], not a failure: it says no published release
 ///    is shaped like this code, which is what a lookup that missed says too.
-/// 3. **Look up the hash under each surviving candidate.** Today there is one,
-///    so this is one `eth_call`; the loop exists because a future contract that
-///    adds an immutable adds a second table.
+/// 3. **Look up the hash under each surviving candidate, up to
+///    [`MAX_CANDIDATE_OFFSET_TABLES`] of them.** Today there is one, so this is
+///    one `eth_call`; the loop exists because a future contract that adds an
+///    immutable adds a second table. Candidates past the cap are left untried
+///    and, like a dropped one, contribute nothing - so a registry that publishes
+///    more tables than any deployment uses costs a bounded number of round trips
+///    and yields [`RegistryVerdict::Unknown`], never a new outcome.
 /// 4. **Cross-check the record against the table that found it.** A record whose
 ///    own declared offsets differ from the table its hash was computed under is
 ///    a registry describing one layout while answering about another, which is
@@ -1085,9 +1109,14 @@ fn consult_registry_against(
     // the registry. If every candidate goes, the answer is that the registry
     // knows of no release shaped like this - the same `Unknown` a lookup that
     // simply missed would give, because it means the same thing.
+    //
+    // The cap is on the tables actually tried, because that is what costs a
+    // round trip each; the ones past it are untried rather than dropped, and
+    // both mean the same thing here - no answer came from them.
     let usable = tables
         .iter()
-        .filter(|table| ranges_are_immutable_slots(code, table).is_ok());
+        .filter(|table| ranges_are_immutable_slots(code, table).is_ok())
+        .take(MAX_CANDIDATE_OFFSET_TABLES);
 
     for table in usable {
         let Some(digest) = masked_code_digest(code, table) else {
@@ -2656,6 +2685,64 @@ mod tests {
             chain.calls().len(),
             4,
             "one code read, one table read, one lookup per candidate: {:?}",
+            chain.calls()
+        );
+    }
+
+    /// The purchase path spends money, and every surviving candidate costs its
+    /// own sequential round trip, so the list of them is capped.
+    ///
+    /// The scripted registry publishes one more usable table than the cap
+    /// allows and hides the record under the last of them - the arrangement an
+    /// owner key would choose to make a purchase as slow as it can while still,
+    /// eventually, answering. The verdict is `Unknown`, which is what a dropped
+    /// table already says, and the call log is the assertion that matters:
+    /// exactly the cap's worth of lookups, not one more.
+    #[test]
+    fn candidate_offset_tables_are_capped_on_the_purchase_path() {
+        let overflow = MAX_CANDIDATE_OFFSET_TABLES + 1;
+        // One immutable slot per candidate, each clear of its neighbours, so
+        // every published table describes real `PUSH32` immediates of this code
+        // and not one of them is dropped. The cap is then the only thing that
+        // can stop the loop.
+        let slots: Vec<ImmutableRange> = (0..overflow)
+            .map(|i| ImmutableRange {
+                start: 64 + i * 64,
+                length: 32,
+            })
+            .collect();
+        let code = code_with_immutables(128 + overflow * 64, &slots, 0x10);
+        let registry_code = fake_code(300, 0x77);
+        let table = registry_only_table(&registry_code);
+
+        // Each candidate masks a different slot, so no two digests collide and
+        // a lookup under one table cannot stumble onto another's record. The
+        // one published record sits under the last candidate, one past the cap.
+        let candidates: Vec<Vec<ImmutableRange>> = slots.iter().map(|r| vec![*r]).collect();
+        let beyond = candidates[overflow - 1].clone();
+        let hash = masked_code_digest(&code, &beyond).expect("ranges fit");
+        let mut record = record_for("Rub3Access", Some(Role::Licence), RecordStatus::Active);
+        record.offsets = beyond;
+
+        let chain = ScriptedChain::new()
+            .with_code(registry_address(), registry_code)
+            .with_tables(candidates)
+            .with_record(hash, record);
+
+        assert_eq!(
+            consult_registry_against(&chain, registry_address(), &code, table),
+            RegistryVerdict::Unknown,
+            "past the cap a candidate is untried, and untried says what dropped says"
+        );
+        let lookups = chain
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("record("))
+            .count();
+        assert_eq!(
+            lookups,
+            MAX_CANDIDATE_OFFSET_TABLES,
+            "the cap bounds the round trips a purchase pays for: {:?}",
             chain.calls()
         );
     }

@@ -936,9 +936,11 @@ mod headless {
                 HeadlessError::NotCanonicalContract { contract, refusal } => write!(
                     f,
                     "refusing to buy from {contract}: {refusal}. Nothing was signed and no \
-                     transaction was sent. This build compares a contract's deployed code \
-                     against the canonical fingerprints it was packed with, and buys only on a \
-                     match; a contract released after this build was packed will also land here"
+                     transaction was sent. This build buys only from code an authority it \
+                     trusts vouched for as a licence: the canonical fingerprints it was packed \
+                     with, and whichever on-chain code registry it knows of on this chain. Code \
+                     that no reachable authority has a record of lands here in the same words a \
+                     modified copy does, so a refusal is not an accusation"
                 ),
                 HeadlessError::Config { var, detail } => {
                     write!(f, "invalid configuration: {var} {detail}")
