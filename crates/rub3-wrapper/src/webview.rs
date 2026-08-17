@@ -236,7 +236,7 @@ impl IpcState {
                     .unwrap_or(alloy::primitives::Address::ZERO);
 
                 if contract_addr.is_zero() {
-                    // No contract configured — skip on-chain check, use token 1 (legacy).
+                    // No contract configured - skip on-chain check, use token 1 (legacy).
                     self.show_activate(&address, 1);
                     return;
                 }
@@ -498,7 +498,7 @@ impl IpcState {
             }
         };
         if cap != 0 && next_id >= cap {
-            self.eval_err("Sold out — no more tokens available for purchase");
+            self.eval_err("Sold out: no more tokens available for purchase");
             return;
         }
 

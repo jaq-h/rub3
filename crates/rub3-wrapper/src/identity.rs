@@ -3,11 +3,11 @@
 //! See `architecture.md` §"Identity Models" and §"TBA Address Derivation".
 //!
 //! Two identity models:
-//!   - access  (0): `user_id = wallet` — NFT gates access, wallet is identity.
-//!   - account (1): `user_id = TBA`    — NFT is an account, TBA is identity.
+//!   - access  (0): `user_id = wallet` - NFT gates access, wallet is identity.
+//!   - account (1): `user_id = TBA`    - NFT is an account, TBA is identity.
 //!
 //! TBA derivation is pure CREATE2 over the canonical ERC-6551 registry at
-//! `0x000000006551c19487814612e58FE06813775758`. No RPC is required — given
+//! `0x000000006551c19487814612e58FE06813775758`. No RPC is required - given
 //! `(implementation, chainId, contract, tokenId)` the account address is
 //! deterministic regardless of whether the TBA has been deployed.
 
@@ -24,7 +24,7 @@ pub enum IdentityModel {
 }
 
 impl IdentityModel {
-    /// Maps the on-chain `uint8` to the enum. Unknown values return `None` —
+    /// Maps the on-chain `uint8` to the enum. Unknown values return `None`:
     /// the contract constructor rejects anything > 1, so this only fires for
     /// wire-format corruption.
     pub fn from_u8(v: u8) -> Option<Self> {
@@ -55,10 +55,10 @@ pub const ERC6551_SALT: B256 = B256::ZERO;
 
 // Reference account-proxy init code as fixed in the ERC-6551 registry.
 // The implementation address is spliced in between the two halves.
-//   0x3d60ad80600a3d3981f3  — constructor that returns the runtime code
-//   363d3d373d3d3d363d73    — runtime prefix up to the DELEGATECALL target
+//   0x3d60ad80600a3d3981f3  - constructor that returns the runtime code
+//   363d3d373d3d3d363d73    - runtime prefix up to the DELEGATECALL target
 //   <20 bytes implementation>
-//   5af43d82803e903d91602b57fd5bf3 — runtime suffix
+//   5af43d82803e903d91602b57fd5bf3 - runtime suffix
 const INIT_CODE_PREFIX: &[u8] = &[
     0x3d, 0x60, 0xad, 0x80, 0x60, 0x0a, 0x3d, 0x39, 0x81, 0xf3, 0x36, 0x3d, 0x3d, 0x37, 0x3d, 0x3d,
     0x3d, 0x36, 0x3d, 0x73,
@@ -71,16 +71,16 @@ const INIT_CODE_SUFFIX: &[u8] = &[
 
 /// Derives the ERC-6551 token-bound account address for a token.
 ///
-/// Pure — computed locally via CREATE2 with the canonical registry, `salt = 0`,
+/// Pure - computed locally via CREATE2 with the canonical registry, `salt = 0`,
 /// and the standard account-proxy init code. Does not depend on whether the
 /// account contract has been deployed.
 ///
 /// # Arguments
-/// * `implementation` — the ERC-6551 account implementation (set per contract
+/// * `implementation` - the ERC-6551 account implementation (set per contract
 ///   at deploy time as `tbaImplementation`).
-/// * `chain_id` — EVM chain id the token lives on.
-/// * `contract` — the NFT contract address.
-/// * `token_id` — the NFT token id.
+/// * `chain_id` - EVM chain id the token lives on.
+/// * `contract` - the NFT contract address.
+/// * `token_id` - the NFT token id.
 pub fn derive_tba(
     implementation: Address,
     chain_id: u64,

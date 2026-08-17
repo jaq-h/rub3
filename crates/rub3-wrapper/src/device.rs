@@ -2,7 +2,7 @@
 //!
 //! Generates an ephemeral secp256k1 keypair at activation. The public key is
 //! registered on-chain via `activateDevice(tokenId, devicePubKey)`. The private
-//! key is stored locally — via file, OS keychain, or hardware enclave per the
+//! key is stored locally, via file, OS keychain, or hardware enclave per the
 //! developer's `device_key_storage` config.
 //!
 //! At every launch the wrapper signs the current block hash with the device
@@ -19,7 +19,7 @@ pub enum StorageBackend {
     /// via the `keyring` crate. Extractable with the user's OS password.
     Keychain,
     /// Hardware-backed key storage. macOS Secure Enclave or Windows TPM.
-    /// Non-extractable — signing happens inside the secure chip.
+    /// Non-extractable - signing happens inside the secure chip.
     Enclave,
 }
 

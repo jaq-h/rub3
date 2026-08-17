@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 ///   4:   adds device_pubkey; omits expires_at (device challenge replaces TTL)
 ///
 /// `identity` is the wire string ("access" | "account"). `user_id` is the
-/// stable identity key the app sees — wallet address for access model, TBA
+/// stable identity key the app sees: wallet address for access model, TBA
 /// address for account model. `tba` is populated only for the account model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -305,7 +305,7 @@ pub fn verify_onchain(session: &Session, rpc_url: &str) -> Result<(), VerifyErro
     Ok(())
 }
 
-/// Returns `true` with probability ~1/5 — the sampling gate for tier-3
+/// Returns `true` with probability ~1/5 - the sampling gate for tier-3
 /// probabilistic on-chain re-verification.
 ///
 /// Amortises the network cost across cold starts: legitimate sessions see a
@@ -814,7 +814,7 @@ mod tests {
         assert!(matches!(verify_local(&s), Err(VerifyError::Expired)));
     }
 
-    // ── verify_onchain — pre-flight error paths (no network needed) ──────────
+    // ── verify_onchain - pre-flight error paths (no network needed) ──────────
 
     #[cfg(feature = "cooldown")]
     #[test]
@@ -850,7 +850,7 @@ mod tests {
     #[cfg(feature = "cooldown")]
     #[test]
     fn should_reverify_is_not_constant() {
-        // Probabilistic test — over many samples the result should not always be
+        // Probabilistic test - over many samples the result should not always be
         // the same. With p=0.2 the odds of all-true or all-false across 200 tries
         // is ~4e-20, so flakes are effectively impossible.
         let mut saw_true = false;

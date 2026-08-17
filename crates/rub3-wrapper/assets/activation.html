@@ -165,18 +165,18 @@
 <div class="card">
   <h1>Activate License</h1>
 
-  <!-- App metadata — populated by Rust via onAppInfo() -->
+  <!-- App metadata - populated by Rust via onAppInfo() -->
   <div class="meta">
     <label>Application</label>
-    <div class="value" id="app-id">—</div>
+    <div class="value" id="app-id">-</div>
   </div>
   <div class="meta hidden" id="ens-row">
     <label>Developer</label>
-    <div class="value" id="developer-ens">—</div>
+    <div class="value" id="developer-ens">-</div>
   </div>
   <div class="meta">
     <label>Contract</label>
-    <div class="value mono" id="contract-address">—</div>
+    <div class="value mono" id="contract-address">-</div>
   </div>
 
   <hr />
@@ -206,29 +206,29 @@
     </p>
     <div class="token-box">
       <div class="tl">Price</div>
-      <div class="tv" id="p-price">—</div>
+      <div class="tv" id="p-price">-</div>
     </div>
     <div class="token-box">
       <div class="tl">Supply</div>
-      <div class="tv" id="p-supply">—</div>
+      <div class="tv" id="p-supply">-</div>
     </div>
     <div class="token-box">
       <div class="tl">Recipient <span style="color:#444;font-size:10px;text-transform:none">(your wallet)</span></div>
-      <div class="tv" id="p-owner" style="word-break:break-all;font-size:11px">—</div>
+      <div class="tv" id="p-owner" style="word-break:break-all;font-size:11px">-</div>
     </div>
     <div class="field">
       <label>Send this tx from your wallet</label>
       <div class="token-box" style="margin-bottom:6px">
         <div class="tl">To</div>
-        <div class="tv" id="p-to" style="word-break:break-all;font-size:11px">—</div>
+        <div class="tv" id="p-to" style="word-break:break-all;font-size:11px">-</div>
       </div>
       <div class="token-box" style="margin-bottom:6px">
         <div class="tl">Value (wei, hex)</div>
-        <div class="tv" id="p-value" style="word-break:break-all;font-size:11px">—</div>
+        <div class="tv" id="p-value" style="word-break:break-all;font-size:11px">-</div>
       </div>
       <div class="token-box" style="margin-bottom:0">
         <div class="tl">Calldata</div>
-        <div class="tv" id="p-calldata" style="word-break:break-all;font-size:11px">—</div>
+        <div class="tv" id="p-calldata" style="word-break:break-all;font-size:11px">-</div>
       </div>
     </div>
     <div class="field">
@@ -243,7 +243,7 @@
   <!-- ── Screen: purchase blocked (contract code did not verify) ── -->
   <div id="screen-blocked" class="hidden">
     <div class="notice">
-      <div class="nt" id="b-title">—</div>
+      <div class="nt" id="b-title">-</div>
       <p class="nb" id="b-body"></p>
     </div>
     <p class="next-step" id="b-next"></p>
@@ -251,7 +251,7 @@
       <div class="tl">What the check found</div>
       <!-- Unlike the hex fields elsewhere, this is a sentence with one long
            token in it, so it breaks only where a word will not fit. -->
-      <div class="tv" id="b-detail" style="overflow-wrap:anywhere;font-size:11px">—</div>
+      <div class="tv" id="b-detail" style="overflow-wrap:anywhere;font-size:11px">-</div>
     </div>
     <button class="btn-primary hidden" id="btn-b-retry">Try Again</button>
     <button class="btn-ghost" id="btn-b-cancel">Cancel</button>
@@ -261,16 +261,16 @@
   <div id="screen-activate" class="hidden">
     <div class="token-box">
       <div class="tl">License Token</div>
-      <div class="tv" id="token-id-display">—</div>
+      <div class="tv" id="token-id-display">-</div>
     </div>
     <div class="token-box">
       <div class="tl">Owner</div>
-      <div class="tv" id="owner-display">—</div>
+      <div class="tv" id="owner-display">-</div>
     </div>
     <div class="field">
       <label>Message to Sign <span style="color:#444;font-size:10px;text-transform:none">(use personal_sign / Sign Message in your wallet)</span></label>
       <div class="token-box" style="margin-bottom:0">
-        <div class="tv" id="activation-message" style="word-break:break-all;font-size:11px">—</div>
+        <div class="tv" id="activation-message" style="word-break:break-all;font-size:11px">-</div>
       </div>
     </div>
     <div class="field">
@@ -286,20 +286,20 @@
   <div id="screen-cooldown" class="hidden">
     <div class="token-box">
       <div class="tl">License Token</div>
-      <div class="tv" id="cd-token-id">—</div>
+      <div class="tv" id="cd-token-id">-</div>
     </div>
     <div class="token-box">
       <div class="tl">Owner</div>
-      <div class="tv" id="cd-owner">—</div>
+      <div class="tv" id="cd-owner">-</div>
     </div>
     <div id="cd-wait" class="token-box hidden" style="background:#2a1a1a;border-color:#4a2a2a">
       <div class="tl" style="color:#a65a5a">Cooldown Active</div>
-      <div class="tv" id="cd-blocks-remaining" style="color:#f0a0a0">—</div>
+      <div class="tv" id="cd-blocks-remaining" style="color:#f0a0a0">-</div>
     </div>
     <div class="field">
       <label>Send this tx from your wallet <span style="color:#444;font-size:10px;text-transform:none">(to the contract above)</span></label>
       <div class="token-box" style="margin-bottom:0">
-        <div class="tv" id="cd-calldata" style="word-break:break-all;font-size:11px">—</div>
+        <div class="tv" id="cd-calldata" style="word-break:break-all;font-size:11px">-</div>
       </div>
     </div>
     <div class="field">
@@ -315,32 +315,32 @@
   <div id="screen-sign-session" class="hidden">
     <div class="token-box">
       <div class="tl">Activation confirmed</div>
-      <div class="tv" id="ss-tx-hash" style="word-break:break-all;font-size:11px">—</div>
+      <div class="tv" id="ss-tx-hash" style="word-break:break-all;font-size:11px">-</div>
     </div>
     <div class="token-box">
       <div class="tl">Block</div>
-      <div class="tv" id="ss-block">—</div>
+      <div class="tv" id="ss-block">-</div>
     </div>
     <div class="token-box">
       <div class="tl">Session ID</div>
-      <div class="tv" id="ss-session-id">—</div>
+      <div class="tv" id="ss-session-id">-</div>
     </div>
     <div class="token-box">
       <div class="tl">Identity Model</div>
-      <div class="tv" id="ss-identity">—</div>
+      <div class="tv" id="ss-identity">-</div>
     </div>
     <div class="token-box">
       <div class="tl">User ID <span style="color:#444;font-size:10px;text-transform:none">(stable identity key your app sees)</span></div>
-      <div class="tv" id="ss-user-id" style="word-break:break-all;font-size:11px">—</div>
+      <div class="tv" id="ss-user-id" style="word-break:break-all;font-size:11px">-</div>
     </div>
     <div class="token-box hidden" id="ss-tba-row">
       <div class="tl">Token-Bound Account</div>
-      <div class="tv" id="ss-tba" style="word-break:break-all;font-size:11px">—</div>
+      <div class="tv" id="ss-tba" style="word-break:break-all;font-size:11px">-</div>
     </div>
     <div class="field">
       <label>Session Message to Sign <span style="color:#444;font-size:10px;text-transform:none">(personal_sign, same wallet as before)</span></label>
       <div class="token-box" style="margin-bottom:0">
-        <div class="tv" id="ss-message" style="word-break:break-all;font-size:11px">—</div>
+        <div class="tv" id="ss-message" style="word-break:break-all;font-size:11px">-</div>
       </div>
     </div>
     <div class="field">
@@ -410,7 +410,7 @@
   let pendingOwner      = null;
   let pendingTokenOwner = null;
 
-  // State for the tier-3 session flow — populated across onShowCooldown,
+  // State for the tier-3 session flow - populated across onShowCooldown,
   // ActivateTxSent, onTxConfirmed, SessionSigned. The wrapper is stateless
   // between IPC messages, so JS echoes these back in the final payload.
   let pendingSessionCtx = null;
@@ -434,7 +434,7 @@
       }
     },
 
-    // Multiple tokens found — show selection list.
+    // Multiple tokens found - show selection list.
     // data: { ownerAddress, tokens: number[] }
     onShowTokenSelect(data) {
       pendingTokenOwner = data.ownerAddress;
@@ -455,7 +455,7 @@
       show('token-select');
     },
 
-    // Wallet owns no token — show the purchase prompt.
+    // Wallet owns no token - show the purchase prompt.
     // data: { ownerAddress, contractAddress, chainId, priceWei, valueHex,
     //         supplyCap, nextTokenId, calldata }
     onShowPurchase(data) {
@@ -504,7 +504,7 @@
       show('blocked');
     },
 
-    // Wallet owns a token — show the signature prompt.
+    // Wallet owns a token - show the signature prompt.
     // data: { tokenId, ownerAddress, activationMessage }
     onShowActivate(data) {
       pendingTokenId = data.tokenId;
@@ -512,14 +512,14 @@
 
       document.getElementById('token-id-display').textContent = '#' + data.tokenId;
       document.getElementById('owner-display').textContent    = data.ownerAddress;
-      document.getElementById('activation-message').textContent = data.activationMessage || '—';
+      document.getElementById('activation-message').textContent = data.activationMessage || '-';
       document.getElementById('sig-input').value = '';
       clearError('sig-error');
 
       show('activate');
     },
 
-    // Tier 3 — ownership confirmed, show cooldown + calldata.
+    // Tier 3 - ownership confirmed, show cooldown + calldata.
     // data: { tokenId, ownerAddress, contractAddress, chainId, ready,
     //         blocksRemaining, calldata }
     onShowCooldown(data) {
@@ -549,7 +549,7 @@
       show('cooldown');
     },
 
-    // Tier 3 — activate() tx confirmed; switch to session-signing screen.
+    // Tier 3 - activate() tx confirmed; switch to session-signing screen.
     // data: { tokenId, ownerAddress, identity, userId, tba,
     //         txHash, blockNumber, blockHash,
     //         sessionId, nonce, expiresAt, sessionMessage }
@@ -600,7 +600,7 @@
       show('processing');
     },
 
-    // Something went wrong — surface the error on the connect screen.
+    // Something went wrong - surface the error on the connect screen.
     onError(msg) {
       show('connect');
       setError('connect-error', typeof msg === 'string' ? msg : msg.message);
