@@ -216,6 +216,45 @@ fn deploy_access_with_rail(
     )
 }
 
+/// Deploys the deliberately non-canonical licence fixture,
+/// `test/mocks/NonCanonicalRub3Access.sol`.
+///
+/// Constructor args are `Rub3Access`'s, forwarded unchanged, so a fixture
+/// deploy and a canonical deploy are configured identically and differ only in
+/// compiled semantics: the fixture carries one extra owner-only function,
+/// `reconcileLedger(uint256,address)`, an admin seizure under an accounting
+/// name that `attest::FORBIDDEN_SIGNATURES` does not list.
+///
+/// It lives under `test/`, never `src/`, and the fixture's own header says why
+/// at length: `scripts/canonical-bytecode-hashes.sh` fingerprints everything
+/// under the resolved source directory, so a copy in `src/` would be published
+/// as canonical rub3 code and the wrapper would come to accept the very
+/// contract these tests prove it refuses.
+fn deploy_non_canonical_access(
+    price_wei: &str,
+    price_token: &str,
+    price_amount: &str,
+    supply_cap: &str,
+    cooldown_blocks: &str,
+) -> String {
+    let sale = format!("({price_wei},{price_token},{price_amount})");
+    forge_create(
+        "test/mocks/NonCanonicalRub3Access.sol:NonCanonicalRub3Access",
+        &[
+            "Rub3 Headless Test",
+            "RUB3H",
+            NO_TBA_IDENTITY,
+            WRAPPER_HASHES,
+            &sale,
+            NO_FEE,
+            supply_cap,
+            cooldown_blocks,
+            ZERO_ADDR,
+            DEPLOYER_ADDR,
+        ],
+    )
+}
+
 /// The `IdentityTerms` tuple for the access model: model 0, no TBA
 /// implementation (the constructor forbids one for that model).
 const NO_TBA_IDENTITY: &str = "(0,0x0000000000000000000000000000000000000000)";
@@ -406,6 +445,40 @@ fn fund(to: Address, amount: &str) {
         "funding {to_hex} failed:\n{}",
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+/// Buys a licence for `recipient` on the ETH rail without going through the
+/// wrapper, paying from the deployer key.
+///
+/// `purchase(address recipient)` is callable by anyone and mints to whoever is
+/// named, which is what makes this possible: a licence can be put in an
+/// agent's hands on a contract the wrapper itself would refuse to buy from, so
+/// the launch path can then be driven against it. Returns the id minted, read
+/// off `nextTokenId` rather than out of the receipt.
+fn seed_licence(contract: &str, recipient: Address, price_wei: &str) -> u64 {
+    let minted_before = cast_call_uint(contract, "nextTokenId()(uint256)", &[]);
+    let to_hex = format!("0x{}", hex::encode(recipient.as_slice()));
+    let output = Command::new("cast")
+        .args([
+            "send",
+            contract,
+            "purchase(address)",
+            &to_hex,
+            "--value",
+            price_wei,
+            "--private-key",
+            DEPLOYER_KEY,
+            "--rpc-url",
+            &rpc_url(),
+        ])
+        .output()
+        .expect("failed to run cast send purchase");
+    assert!(
+        output.status.success(),
+        "seeding a licence for {to_hex} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    minted_before as u64
 }
 
 /// Mines `n` blocks so a cooldown window can elapse without waiting.
@@ -939,13 +1012,13 @@ fn headless_refuses_a_contract_whose_code_is_not_canonical_e2e() {
 /// code under test.
 ///
 /// **What this does not prove**: behaviour when the check *cannot complete*.
-/// Constructing that needs a licence contract whose code is deliberately not
-/// canonical, which means a Solidity change, and `contracts/` is off limits in
-/// this change because a separate lane is editing it. Recorded as follow-up
-/// work in `implementation.md` §2.6 under "Deliberately not built here". Nor
-/// can it separate "the launch path never runs the gate" from "it runs it and
-/// passes", since the fixture contract is canonical either way; that half is
-/// what `attest`'s reachability unit test covers.
+/// The fixture is canonical either way, so this cannot separate "the launch
+/// path never runs the gate" from "it runs it and passes". Both halves are
+/// covered now, against a licence contract that is deliberately not canonical:
+/// [`headless_launch_of_an_already_paid_licence_survives_a_contract_the_gate_refuses_e2e`]
+/// for code that would fail the comparison, and
+/// [`headless_launch_survives_a_node_that_will_not_answer_a_code_read_e2e`] for
+/// a read that never returns.
 ///
 /// It knowingly repeats the setup of the second half of
 /// [`headless_cooldown_active_then_ready_e2e`] - the overlap is the setup, not
@@ -1006,6 +1079,303 @@ fn headless_launch_of_a_held_licence_never_enters_the_purchase_path_e2e() {
         cast_call_uint(&contract, "nextTokenId()(uint256)", &[]),
         minted,
         "a launch must not mint a second token",
+    );
+}
+
+// ── The modified licence: refused on purchase, served on launch ──────────────
+
+/// A contract that *is* a rub3 licence in every observable respect, and differs
+/// only in compiled semantics, is refused - and nothing is signed, broadcast or
+/// disclosed on either rail.
+///
+/// This is the case the fingerprint check exists for, and the one
+/// [`headless_refuses_a_contract_whose_code_is_not_canonical_e2e`] cannot
+/// reach: that fixture is an unrelated contract, so refusing it would also
+/// follow from a much weaker check. `NonCanonicalRub3Access` inherits the whole
+/// of `Rub3Access`, so it answers every read the wrapper makes with the same
+/// values a canonical deploy of the same arguments would - asserted below
+/// rather than asserted about - and it carries one extra owner-only seizure
+/// under a name no blacklist guessed. **The selector scan therefore passes it
+/// in silence and the masked hash catches it**, which is the asymmetry
+/// `implementation.md` §2.6 calls the whole justification for the work, pinned
+/// here against a deployed contract instead of synthetic bytes.
+///
+/// The witnesses are chosen for the stablecoin rail, not just the ETH one. The
+/// fixture advertises a `priceToken` the agent holds and can afford, so a run
+/// that got past the gate would sign an EIP-3009 authorization and hand it to
+/// the RPC endpoint as pre-flight calldata before any transaction existed.
+/// **Disclosure is the spend** (§2.6), so an unmoved nonce proves nothing on
+/// its own: the `CountingSigner` is what says no authorization was ever
+/// produced.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_refuses_a_modified_licence_that_passes_the_selector_scan_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let usdc = deploy_mock_usdc();
+    // The same constructor arguments deployed twice: once as the fixture, once
+    // as the real thing. Everything an agent can read off the two agrees.
+    let modified = deploy_non_canonical_access(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    let canonical = deploy_access_with_rail(PRICE_WEI, &usdc, USDC_PRICE, "0", "15");
+    for getter in [
+        "price()(uint256)",
+        "priceAmount()(uint256)",
+        "supplyCap()(uint256)",
+        "cooldownBlocks()(uint256)",
+        "nextTokenId()(uint256)",
+        "priceToken()(address)",
+        "owner()(address)",
+        "identityModel()(uint8)",
+    ] {
+        assert_eq!(
+            cast_call(&modified, getter, &[]),
+            cast_call(&canonical, getter, &[]),
+            "the fixture must be indistinguishable from a canonical deploy on {getter}",
+        );
+    }
+
+    let modified_addr: Address = modified.parse().expect("malformed fixture address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+    mint_usdc(&usdc, agent.address(), USDC_FUNDING);
+    set_spend_ceiling(USDC_PRICE);
+
+    let nonce_before = tx_count(agent.address());
+    let eth_before = eth_balance(agent.address());
+    let usdc_before = usdc_balance(&usdc, agent.address());
+
+    let counting = CountingSigner::wrapping(agent.signer.as_ref());
+    let err = ensure_headless(&counting, &ctx(&modified, None))
+        .expect_err("a modified copy of the licence template must not be bought from");
+
+    match &err {
+        HeadlessError::NotCanonicalContract { contract, .. } => assert_eq!(
+            contract.to_lowercase(),
+            modified.to_lowercase(),
+            "the refusal must name the address it refused",
+        ),
+        other => panic!("expected NotCanonicalContract, got {other:?}"),
+    }
+    assert_eq!(err.exit_code(), 23);
+
+    let detail = err
+        .machine_detail()
+        .expect("a refusal carries a detail line");
+    assert!(
+        detail.contains("exposed=none"),
+        "the selector scan must pass this contract in silence - it is the hash \
+         that catches it, and a fixture the blacklist happened to name would \
+         prove the weaker claim instead: {detail}",
+    );
+    let code_bytes: usize = detail
+        .split("code_bytes=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no code_bytes in the detail line: {detail}"));
+    assert!(
+        code_bytes > 0,
+        "the refusal is about code that is there, not about an empty address: {detail}",
+    );
+
+    // ── Nothing was spent, on either rail ────────────────────────────────────
+    assert_eq!(
+        counting.calls(),
+        0,
+        "a refused purchase must sign nothing: an EIP-3009 authorization is \
+         spendable by whoever receives it, so disclosing one is the spend",
+    );
+    assert_eq!(
+        tx_count(agent.address()),
+        nonce_before,
+        "a refusal must not send a transaction",
+    );
+    assert_eq!(
+        eth_balance(agent.address()),
+        eth_before,
+        "a refusal must not spend gas",
+    );
+    assert_eq!(
+        usdc_balance(&usdc, agent.address()),
+        usdc_before,
+        "and must not move a unit of the payment token",
+    );
+    assert_eq!(
+        rpc::next_token_id(&rpc_url(), modified_addr).unwrap(),
+        0,
+        "nothing was minted",
+    );
+}
+
+/// A licence the agent already holds still launches on a contract the purchase
+/// gate refuses. The fail-open half of the posture, observed rather than
+/// inferred.
+///
+/// §2.4 rules out a revocation surface, and refusing to *start* a program
+/// somebody already paid for because an integrity check could not complete
+/// would be one. Both outcomes are driven against **the same deployed
+/// address**: the held licence activates, and a second agent holding nothing is
+/// refused at the gate on that identical contract. One contract, two answers,
+/// which is the whole design.
+///
+/// [`headless_launch_of_a_held_licence_never_enters_the_purchase_path_e2e`] is
+/// the sibling and not a duplicate: there the contract is canonical, so it
+/// cannot tell "the launch path never attests" from "it attests and passes".
+/// Here the contract would fail attestation, so a launch path that consulted
+/// the module at all could not reach `Activated`.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_launch_of_an_already_paid_licence_survives_a_contract_the_gate_refuses_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    // Cooldown 15 blocks = the contract's enforced floor (MIN_COOLDOWN_BLOCKS).
+    let contract = deploy_non_canonical_access(PRICE_WEI, ZERO_ADDR, "0", "0", "15");
+    let contract_addr: Address = contract.parse().expect("malformed fixture address");
+
+    let holder = Agent::new();
+    fund(holder.address(), FUNDING_ETH);
+
+    // Paid for outside the wrapper, because the wrapper would refuse to buy it
+    // - which is precisely the state this test is about.
+    let token_id = seed_licence(&contract, holder.address(), PRICE_WEI);
+    assert_eq!(
+        rpc::tokens_of_owner(&rpc_url(), contract_addr, holder.address()).unwrap(),
+        vec![token_id],
+        "the agent must start already holding the licence",
+    );
+    let minted = cast_call_uint(&contract, "nextTokenId()(uint256)", &[]);
+
+    // Nothing cached: `Agent::new` gives a fresh `RUB3_SESSION_DIR`, so the
+    // fast path cannot answer and the run has to go back on-chain.
+    assert!(
+        !session_store::session_path(APP_ID, token_id)
+            .unwrap()
+            .exists(),
+        "the fast path must not be able to short-circuit this launch",
+    );
+    // The seeding transaction did not activate, so no cooldown is running; step
+    // past one anyway, so the assertion below is about attestation and not
+    // about timing.
+    mine(16);
+
+    let (session, outcome) = ensure_headless(holder.signer.as_ref(), &ctx(&contract, None))
+        .expect("a licence already paid for must launch, whatever its code hashes to");
+
+    assert_eq!(
+        outcome,
+        HeadlessOutcome::Activated,
+        "the token is already held, so no purchase - and therefore no gate - may run",
+    );
+    assert_eq!(session.token_id, token_id);
+    session::verify_local(&session).expect("the activated session must verify");
+    assert_eq!(
+        cast_call_uint(&contract, "nextTokenId()(uint256)", &[]),
+        minted,
+        "a launch must not mint",
+    );
+
+    // ── The same address, the other door ─────────────────────────────────────
+    drop(holder);
+    let buyer = Agent::new();
+    fund(buyer.address(), FUNDING_ETH);
+    let err = ensure_headless(buyer.signer.as_ref(), &ctx(&contract, None))
+        .expect_err("the contract that just served a launch must still refuse a purchase");
+    assert!(
+        matches!(err, HeadlessError::NotCanonicalContract { .. }),
+        "expected NotCanonicalContract on the purchase door, got {err:?}",
+    );
+    assert_eq!(err.exit_code(), 23);
+    assert_eq!(
+        cast_call_uint(&contract, "nextTokenId()(uint256)", &[]),
+        minted,
+        "and still minted nothing",
+    );
+}
+
+/// A launch completes against a node that will not answer `eth_getCode`, and a
+/// purchase against that same node does not.
+///
+/// The other way verification fails to complete: not code that hashes wrong,
+/// but a chain read that never returns. §2.6 makes a failed read a refusal on
+/// purchase and forbids it being one on launch, and this is that sentence made
+/// executable in both directions at once.
+///
+/// The launch arm is not vacuous, which is what the purchase arm is here to
+/// show: the same proxy, the same dead method, and the purchase stops at the
+/// gate. The recorded request log is the stronger statement of the two - the
+/// launch did not merely survive the missing answer, it never asked the
+/// question.
+///
+/// The contract is canonical on purpose. This arm is about the *read*, so a
+/// fixture whose code would also fail the comparison would leave two reasons a
+/// refusal could have been avoided.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_launch_survives_a_node_that_will_not_answer_a_code_read_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let contract = deploy_access(PRICE_WEI, "0", "15");
+    let holder = Agent::new();
+    fund(holder.address(), FUNDING_ETH);
+    let token_id = seed_licence(&contract, holder.address(), PRICE_WEI);
+    let minted = cast_call_uint(&contract, "nextTokenId()(uint256)", &[]);
+    mine(16);
+
+    let proxy = RecordingProxy::refusing_method("eth_getCode");
+    let mut through_proxy = ctx(&contract, None);
+    through_proxy.rpc_url = proxy.url.clone();
+
+    let (session, outcome) = ensure_headless(holder.signer.as_ref(), &through_proxy)
+        .expect("a launch must not depend on a code read the node will not answer");
+    assert_eq!(outcome, HeadlessOutcome::Activated);
+    assert_eq!(session.token_id, token_id);
+    session::verify_local(&session).expect("the activated session must verify");
+
+    let asked_for_code = proxy
+        .requests()
+        .iter()
+        .any(|body| body.to_ascii_lowercase().contains("eth_getcode"));
+    assert!(
+        !asked_for_code,
+        "the launch path must not read the contract's code at all - an \
+         integrity check a launch can fail is a revocation surface",
+    );
+
+    // ── The control: the same node, the purchase door ────────────────────────
+    drop(holder);
+    let buyer = Agent::new();
+    fund(buyer.address(), FUNDING_ETH);
+    let err = ensure_headless(buyer.signer.as_ref(), &through_proxy)
+        .expect_err("a purchase must not proceed on a code read that did not complete");
+    assert!(
+        matches!(err, HeadlessError::Rpc(_)),
+        "a read that never returned is a chain error, not a verdict: got {err:?}",
+    );
+    assert!(
+        proxy
+            .requests()
+            .iter()
+            .any(|body| body.to_ascii_lowercase().contains("eth_getcode")),
+        "the purchase door really did try the read this proxy refuses, so the \
+         launch arm above is a fact about the launch path and not about the proxy",
+    );
+    assert_eq!(
+        cast_call_uint(&contract, "nextTokenId()(uint256)", &[]),
+        minted,
+        "and bought nothing",
     );
 }
 
@@ -2315,17 +2685,20 @@ fn headless_transport_failure_on_the_domain_separator_read_is_a_hard_error_e2e()
 // ── A node that answers the pre-flight with a revert it invented ─────────────
 
 /// Forwards JSON-RPC to anvil, keeps a copy of every request body, and
-/// optionally answers one selector's `eth_call` with a revert the chain never
-/// gave.
+/// optionally intervenes on one call: answering a selector's `eth_call` with a
+/// revert the chain never gave, or refusing to answer a method at all.
 ///
 /// This is the endpoint the pre-flight actually talks to, modelled honestly:
-/// it sees every byte the wrapper sends it, and it decides what to answer. The
-/// two capabilities are one fixture on purpose, because they are one threat -
-/// the party that receives a signed authorization is the same party that says
-/// whether it executes, so "the revert was transient" and "the revert was a
-/// lie" are indistinguishable from the wrapper's side and have the same
+/// it sees every byte the wrapper sends it, and it decides what to answer.
+/// Watching and reverting are one fixture on purpose, because they are one
+/// threat - the party that receives a signed authorization is the same party
+/// that says whether it executes, so "the revert was transient" and "the revert
+/// was a lie" are indistinguishable from the wrapper's side and have the same
 /// consequence: a valid authorization is now in someone else's hands and the
-/// buyer has been sent down the ETH rail.
+/// buyer has been sent down the ETH rail. Refusing a method joins them because
+/// it is the same endpoint failing in the other direction, and the launch path
+/// has to survive that (see
+/// [`headless_launch_survives_a_node_that_will_not_answer_a_code_read_e2e`]).
 struct RecordingProxy {
     url: String,
     seen: Arc<Mutex<Vec<String>>>,
@@ -2333,19 +2706,45 @@ struct RecordingProxy {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+/// What [`RecordingProxy`] does to a request instead of forwarding it.
+///
+/// Recording is unconditional in every mode: what a test asserts about a call
+/// the wrapper never made is as load-bearing as what it asserts about one it
+/// did.
+#[derive(Clone)]
+enum Intercept {
+    /// Forward everything. The proxy only watches.
+    Nothing,
+    /// Answer every `eth_call` carrying this 4-byte selector with
+    /// `execution reverted`, a revert the chain never gave.
+    RevertCall(String),
+    /// Close the connection with no reply on any request naming this JSON-RPC
+    /// method, which is what a node that will not answer one call looks like
+    /// from the client.
+    DropMethod(String),
+}
+
 impl RecordingProxy {
     /// A faithful relay that only watches.
     fn watching() -> Self {
-        Self::new(None)
+        Self::new(Intercept::Nothing)
     }
 
     /// A relay that answers every `eth_call` carrying `selector` with
     /// `execution reverted`, and forwards everything else untouched.
     fn reverting(selector: &str) -> Self {
-        Self::new(Some(selector))
+        Self::new(Intercept::RevertCall(
+            selector.trim_start_matches("0x").to_ascii_lowercase(),
+        ))
     }
 
-    fn new(revert_selector: Option<&str>) -> Self {
+    /// A relay that will not answer `method` at all, and answers everything
+    /// else faithfully.
+    fn refusing_method(method: &str) -> Self {
+        Self::new(Intercept::DropMethod(method.to_ascii_lowercase()))
+    }
+
+    fn new(intercept: Intercept) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy");
         let url = format!("http://{}", listener.local_addr().expect("proxy addr"));
         // Same reason as `BlockingProxy`: the accept loop polls a shutdown flag
@@ -2353,7 +2752,6 @@ impl RecordingProxy {
         listener.set_nonblocking(true).expect("proxy non-blocking");
 
         let upstream = format!("127.0.0.1:{PORT}");
-        let needle = revert_selector.map(|s| s.trim_start_matches("0x").to_ascii_lowercase());
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -2364,10 +2762,10 @@ impl RecordingProxy {
                 match listener.accept() {
                     Ok((client, _)) => {
                         let upstream = upstream.clone();
-                        let needle = needle.clone();
+                        let intercept = intercept.clone();
                         let recorder = Arc::clone(&recorder);
                         std::thread::spawn(move || {
-                            record_and_relay(client, &upstream, recorder, needle.as_deref())
+                            record_and_relay(client, &upstream, recorder, &intercept)
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2411,7 +2809,7 @@ fn record_and_relay(
     mut client: TcpStream,
     upstream_addr: &str,
     seen: Arc<Mutex<Vec<String>>>,
-    revert_selector: Option<&str>,
+    intercept: &Intercept,
 ) {
     // See `relay`: the accepted stream inherits the listener's non-blocking
     // flag, which would make the first read fail before the request arrives.
@@ -2431,13 +2829,23 @@ fn record_and_relay(
             .push(body.clone());
 
         let lowered = body.to_ascii_lowercase();
-        let intercept = revert_selector
-            .is_some_and(|selector| lowered.contains("\"eth_call\"") && lowered.contains(selector));
-        if intercept {
-            if client.write_all(revert_response(&body).as_bytes()).is_err() {
-                return;
+        match intercept {
+            Intercept::Nothing => {}
+            Intercept::RevertCall(selector) => {
+                if lowered.contains("\"eth_call\"") && lowered.contains(selector.as_str()) {
+                    if client.write_all(revert_response(&body).as_bytes()).is_err() {
+                        return;
+                    }
+                    continue;
+                }
             }
-            continue;
+            // No reply, and no more requests on this connection either: a node
+            // that goes away mid-call does not come back for the next one.
+            Intercept::DropMethod(method) => {
+                if lowered.contains(method.as_str()) {
+                    return;
+                }
+            }
         }
 
         if upstream.is_none() {
