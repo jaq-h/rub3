@@ -74,6 +74,9 @@ pub struct RustApi {
     /// item. A substring nothing matches is refused with the names in scope,
     /// rather than answered with an empty listing.
     pub name: Option<String>,
+    /// Most items to return. Defaults to 100, capped at 500. The response says
+    /// whether the cap cut it short.
+    pub limit: Option<usize>,
 }
 
 /// The document inventory.
@@ -116,6 +119,8 @@ pub struct SearchHits {
 pub struct WorkspaceApi {
     /// Every workspace member with a library, after filtering.
     pub crates: Vec<rustapi::CrateApi>,
+    /// True when the item cap cut the result short.
+    pub truncated: bool,
 }
 
 #[tool_router(router = tool_router)]
@@ -265,7 +270,9 @@ impl DocsServer {
         description = "Derive the public Rust API of the workspace's crates from their source: \
                        every signature is sliced verbatim out of the file it is declared in, with \
                        its doc comment, its line, and the #[cfg(...)] feature gate that governs \
-                       it. Filter by crate, module or name. The feature gate matters: whole \
+                       it. Filter by crate, module or name. An unfiltered call is capped at `limit` \
+                       items (100 by default, 500 at most) and sets `truncated`, so start from a \
+                       filter rather than from the whole surface. The feature gate matters: whole \
                        modules of rub3-wrapper do not exist under lower tier bundles."
     )]
     pub fn rust_api(
@@ -273,9 +280,10 @@ impl DocsServer {
         Parameters(request): Parameters<RustApi>,
     ) -> Result<Json<WorkspaceApi>, ErrorData> {
         let mut crates = rustapi::workspace(&self.repo).map_err(internal)?;
+        let members: Vec<String> = crates.iter().map(|api| api.name.clone()).collect();
 
         if let Some(wanted) = &request.crate_name {
-            let known: Vec<String> = crates.iter().map(|api| api.name.clone()).collect();
+            let known = members.clone();
             crates.retain(|api| &api.name == wanted);
             if crates.is_empty() {
                 return Err(ErrorData::invalid_params(
@@ -351,8 +359,58 @@ impl DocsServer {
             }
         }
         crates.retain(|api| api.modules.iter().any(|module| !module.items.is_empty()));
-        Ok(Json(WorkspaceApi { crates }))
+        if crates.is_empty() {
+            // The residual of the three guards above: a module that exists and
+            // exposes nothing passes all of them, and the retain then empties
+            // the listing. `{"crates": []}` reads the same way here as it does
+            // for a typo, so it refuses the same way rather than answering.
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "no public items{}. Members with a library: {}",
+                    scope(&request),
+                    members.join(", ")
+                ),
+                None,
+            ));
+        }
+
+        let truncated = truncate(&mut crates, request.limit.unwrap_or(100).clamp(1, 500));
+        Ok(Json(WorkspaceApi { crates, truncated }))
     }
+}
+
+/// What the caller asked for, for a refusal that has to name it.
+fn scope(request: &RustApi) -> String {
+    match (&request.crate_name, &request.module) {
+        (Some(krate), Some(module)) => format!(" in {krate}::{module}"),
+        (Some(krate), None) => format!(" in {krate}"),
+        (None, Some(module)) => format!(" in module {module}"),
+        (None, None) => String::new(),
+    }
+}
+
+/// Caps the listing at `limit` items, in the order they were derived.
+///
+/// The same bound `search_documents` puts on hits, for the same reason: an
+/// unfiltered call over this workspace is on the order of a hundred kilobytes
+/// of JSON, doc comments included, and an agent pays for all of it in context.
+/// Truncation is reported rather than silent, so a caller can tell a whole
+/// surface from a first page and narrow the filter instead of believing it.
+fn truncate(crates: &mut Vec<rustapi::CrateApi>, limit: usize) -> bool {
+    let mut left = limit;
+    let mut truncated = false;
+    for api in crates.iter_mut() {
+        for module in &mut api.modules {
+            if module.items.len() > left {
+                module.items.truncate(left);
+                truncated = true;
+            }
+            left -= module.items.len();
+        }
+        api.modules.retain(|module| !module.items.is_empty());
+    }
+    crates.retain(|api| !api.modules.is_empty());
+    truncated
 }
 
 #[tool_handler(router = self.tool_router)]

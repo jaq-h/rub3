@@ -229,6 +229,7 @@ fn a_renamed_function_moves_the_served_signature() {
             crate_name: None,
             module: None,
             name: None,
+            limit: None,
         }))
         .expect("the fixture crate derives")
         .0
@@ -251,6 +252,7 @@ fn a_renamed_function_moves_the_served_signature() {
             crate_name: None,
             module: None,
             name: None,
+            limit: None,
         }))
         .expect("the edited crate derives")
         .0
@@ -283,6 +285,7 @@ fn a_feature_gate_added_to_the_crate_root_reaches_the_served_module() {
                 crate_name: None,
                 module: None,
                 name: None,
+                limit: None,
             }))
             .expect("derives")
             .0
@@ -454,6 +457,7 @@ fn an_unknown_module_is_refused_with_the_modules_that_exist() {
         crate_name: Some("demo".to_string()),
         module: Some("widgt".to_string()),
         name: None,
+        limit: None,
     })) {
         Err(error) => error,
         Ok(served) => panic!(
@@ -472,6 +476,7 @@ fn an_unknown_module_is_refused_with_the_modules_that_exist() {
             crate_name: Some("demo".to_string()),
             module: Some("widget".to_string()),
             name: None,
+            limit: None,
         }))
         .expect("the module that does exist answers")
         .0
@@ -500,6 +505,7 @@ fn a_reexport_out_of_a_private_module_serves_the_declaration_it_points_at() {
                 crate_name: None,
                 module: None,
                 name: None,
+                limit: None,
             }))
             .expect("the fixture crate derives")
             .0
@@ -545,6 +551,7 @@ fn a_reexport_of_an_already_listed_declaration_is_not_repeated() {
             crate_name: None,
             module: None,
             name: None,
+            limit: None,
         }))
         .expect("the fixture crate derives")
         .0
@@ -570,6 +577,7 @@ fn an_unmatched_name_is_refused_with_the_names_that_exist() {
         crate_name: Some("demo".to_string()),
         module: None,
         name: Some("alpah".to_string()),
+        limit: None,
     })) {
         Err(error) => error,
         Ok(served) => panic!(
@@ -588,6 +596,7 @@ fn an_unmatched_name_is_refused_with_the_names_that_exist() {
             crate_name: Some("demo".to_string()),
             module: None,
             name: Some("alpha".to_string()),
+            limit: None,
         }))
         .expect("the name that does exist answers")
         .0
@@ -645,6 +654,115 @@ fn a_missing_fingerprint_manifest_leaves_the_contract_surface_answering() {
     assert!(
         format!("{error:?}").contains("Demo"),
         "the refusal still names the contracts that do exist"
+    );
+}
+
+/// An unfiltered call is capped, and says so.
+///
+/// The whole public surface of this workspace is on the order of a hundred
+/// kilobytes of JSON with the doc comments in it, and `rust_api {}` is a
+/// legitimate first call. A caller that cannot tell a first page from the whole
+/// surface would read the page as the API, which is the same wrong belief the
+/// refusals guard against.
+#[test]
+fn the_item_cap_cuts_the_listing_short_and_reports_it() {
+    let fixture = Fixture::new();
+    let server = fixture.server();
+    let ask = |limit: Option<usize>| {
+        server
+            .rust_api(Parameters(RustApi {
+                crate_name: None,
+                module: None,
+                name: None,
+                limit,
+            }))
+            .expect("the fixture crate derives")
+            .0
+    };
+
+    let whole = ask(None);
+    assert!(
+        !whole.truncated,
+        "the fixture is smaller than the default cap"
+    );
+    let served = |api: &rub3_docs_mcp::server::WorkspaceApi| -> usize {
+        api.crates
+            .iter()
+            .flat_map(|crate_api| crate_api.modules.iter())
+            .map(|module| module.items.len())
+            .sum()
+    };
+    assert!(served(&whole) > 1, "the fixture has items to cut");
+
+    let capped = ask(Some(1));
+    assert!(
+        capped.truncated,
+        "one item out of several is a truncated answer"
+    );
+    assert_eq!(served(&capped), 1);
+    assert_eq!(
+        capped.crates[0].modules[0].items[0].signature,
+        whole.crates[0].modules[0].items[0].signature,
+        "the cap takes a prefix of the derivation, not a different answer"
+    );
+
+    // A limit at or above the whole surface is not truncation.
+    let exact = ask(Some(served(&whole)));
+    assert!(!exact.truncated);
+    assert_eq!(served(&exact), served(&whole));
+}
+
+/// A module that exists and exposes nothing refuses, like the three typos do.
+///
+/// No `pub mod` of this workspace is empty today, so the condition is built
+/// rather than found: without it the module guard passes, the name guard is
+/// skipped, and the caller gets `{"crates": []}`, which reads as "no public API
+/// here" and sends an agent back to inventing the signature.
+#[test]
+fn a_module_with_no_public_items_is_refused_rather_than_answered_empty() {
+    let fixture = Fixture::new();
+    let server = fixture.server();
+    fixture.write(
+        "crates/demo/src/lib.rs",
+        "//! Demo crate.\n\npub mod widget;\npub mod plumbing;\n",
+    );
+    fixture.write(
+        "crates/demo/src/plumbing.rs",
+        "//! Internals only.\n\nfn helper() -> u8 {\n    1\n}\n",
+    );
+
+    let error = match server.rust_api(Parameters(RustApi {
+        crate_name: None,
+        module: Some("plumbing".to_string()),
+        name: None,
+        limit: None,
+    })) {
+        Err(error) => error,
+        Ok(served) => panic!(
+            "a module with no public API must not answer, got {} crates",
+            served.0.crates.len()
+        ),
+    };
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("plumbing") && message.contains("demo"),
+        "the refusal must name what was asked and what has an API, got: {message}"
+    );
+
+    // The module that does have a surface still answers.
+    let served = server
+        .rust_api(Parameters(RustApi {
+            crate_name: None,
+            module: Some("widget".to_string()),
+            name: None,
+            limit: None,
+        }))
+        .expect("widget exposes public items")
+        .0
+        .crates;
+    assert_eq!(
+        only_signature(&served, "widget", "alpha").as_deref(),
+        Some("pub fn alpha(count: u32) -> bool"),
     );
 }
 

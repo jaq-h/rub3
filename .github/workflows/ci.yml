@@ -210,6 +210,30 @@ jobs:
           RUB3_DOCS_MCP_REQUIRE_ARTIFACTS: 1
         run: cargo test -p rub3-docs-mcp
 
+      # A developer-facing docs server has no business adding weight to the
+      # shipped binary, and four documents state that as a hard constraint and
+      # name this command as the check. Nothing ran it, so a wrapper dependency
+      # on this crate - or on anything that pulls its dependencies in - would
+      # have gone green while the prose said otherwise. Cargo's own resolver
+      # answers, rather than a manifest read, because the constraint is about
+      # what the wrapper *reaches* and not about what it names.
+      - name: rub3-docs-mcp stays off the wrapper's dependency path
+        run: |
+          set -euo pipefail
+          fail=0
+          for bundle in "" "--no-default-features --features tier-3,headless"; do
+            # shellcheck disable=SC2086
+            tree=$(cargo tree -p rub3-wrapper -e normal $bundle)
+            for crate in rub3-docs-mcp rmcp pulldown-cmark schemars; do
+              if printf '%s\n' "$tree" | grep -qE "(^|[^[:alnum:]_-])$crate v[0-9]"; then
+                echo "FAIL: rub3-wrapper ${bundle:-(default bundle)} reaches $crate."
+                echo "      The docs server must stay off the shipped binary's dependency path."
+                fail=1
+              fi
+            done
+          done
+          [ "$fail" -eq 0 ]
+
   # ---------------------------------------------------------------------------
   # Canonical bytecode fingerprints. BLOCKING, not advisory.
   #
