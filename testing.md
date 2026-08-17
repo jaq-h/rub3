@@ -298,9 +298,10 @@ must be unable to answer from a stored copy of anything.
   `rust_api` is capped at `limit` items and reports `truncated` with the capped
   answer a prefix of the whole one, and the cap drops a crate it emptied while
   keeping one that had nothing to cut. All of them build the shape they need in
-  the fixture, since no module of this workspace has it. Two tolerances are here for the same reason inverted: a
-  document that is not readable UTF-8 costs that document and not the other two
-  document tools, which share the inventory with it, and a missing
+  the fixture, since no module of this workspace has it. Two tolerances are here
+  for the same reason inverted: a document that is not readable UTF-8 costs that
+  document and not the other two document tools, which share the inventory with
+  it, and a missing
   `contracts/canonical-bytecode.json` costs the fingerprints and not the whole
   contract surface, which is derived from the artifacts instead
 - **`tests/docs_legibility.rs`** (8) - the gate: every code fence declares a

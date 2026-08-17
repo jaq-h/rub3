@@ -35,7 +35,7 @@
 //! - [`repo`] resolves the repository root and is the only thing that reads files
 //! - [`docs`] parses the Markdown documents (inventory, sections, search)
 //! - [`solidity`] derives the deployable contract set and ABIs from forge artifacts
-//! - [`rustapi`] derives the wrapper's public Rust API from its source
+//! - [`rustapi`] derives the workspace's public Rust API from its source
 //! - [`server`] is the MCP surface over the four above
 
 pub mod docs;
