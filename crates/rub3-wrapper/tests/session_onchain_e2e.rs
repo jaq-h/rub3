@@ -5,7 +5,7 @@
 //! and the three tampered-field failure modes of `verify_onchain`.
 //!
 //! Requires the Foundry toolchain (`anvil`, `forge`, `cast`) on PATH.
-//! Ignored by default — run with:
+//! Ignored by default - run with:
 //!
 //!     cargo test -p rub3-wrapper --no-default-features --features tier-3 \
 //!         -- --ignored session_verify_onchain_e2e
@@ -156,7 +156,7 @@ fn forge_create_rub3_access() -> String {
         );
     }
 
-    // forge prints "Deployed to: 0x..." — parse that line.
+    // forge prints "Deployed to: 0x..." - parse that line.
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix("Deployed to: ") {
@@ -246,7 +246,7 @@ fn session_verify_onchain_e2e() {
         "nextTokenId should be 0 before any mint"
     );
 
-    // 2) purchase(address) — mints token_id 0 to DEPLOYER_ADDR.
+    // 2) purchase(address) - mints token_id 0 to DEPLOYER_ADDR.
     //    `price` is 0, so msg.value = 0.
     let purchase_tx = cast_send(&contract, "purchase(address)", &[DEPLOYER_ADDR]);
 
@@ -262,7 +262,7 @@ fn session_verify_onchain_e2e() {
         "nextTokenId should be 1 after one mint"
     );
 
-    // 3) activate(uint256) — records cooldown, assigns session id 1.
+    // 3) activate(uint256) - records cooldown, assigns session id 1.
     let activate_tx = cast_send(&contract, "activate(uint256)", &["0"]);
 
     // 4) Pull the block hash the receipt recorded.
@@ -273,7 +273,7 @@ fn session_verify_onchain_e2e() {
     );
 
     // 5) Build a Session referencing the real on-chain values. Signature/nonce
-    //    are irrelevant here — `verify_onchain` never touches them.
+    //    are irrelevant here - `verify_onchain` never touches them.
     let session = Session {
         app_id: "com.rub3.test".into(),
         token_id: 0,

@@ -6,19 +6,19 @@ use alloy::sol_types::SolCall;
 // ── Contract interface ────────────────────────────────────────────────────────
 
 // Minimal ABI surface needed for activation + session flow (tiers 2-3):
-//   ownerOf(tokenId)              — ERC-721 standard
-//   price()                       — rub3 license contract
-//   balanceOf(owner)              — ERC-721 standard
-//   tokenOfOwnerByIndex(...)      — ERC-721Enumerable
-//   activate(tokenId)             — tier-3 session activation (returns sessionId)
-//   cooldownReady(tokenId)        — tier-3 view helper
-//   lastActivationBlock(tokenId)  — tier-3 read
-//   cooldownBlocks()              — tier-3 read
-//   activeSessionId(tokenId)      — tier-3 revocation check
-//   identityModel()               — 0 = access, 1 = account (read at session creation)
-//   tbaImplementation()           — ERC-6551 impl for account-model TBA derivation
-//   supplyCap()                   — immutable mint cap (0 = unlimited)
-//   nextTokenId()                 — next id to be minted
+//   ownerOf(tokenId)              - ERC-721 standard
+//   price()                       - rub3 license contract
+//   balanceOf(owner)              - ERC-721 standard
+//   tokenOfOwnerByIndex(...)      - ERC-721Enumerable
+//   activate(tokenId)             - tier-3 session activation (returns sessionId)
+//   cooldownReady(tokenId)        - tier-3 view helper
+//   lastActivationBlock(tokenId)  - tier-3 read
+//   cooldownBlocks()              - tier-3 read
+//   activeSessionId(tokenId)      - tier-3 revocation check
+//   identityModel()               - 0 = access, 1 = account (read at session creation)
+//   tbaImplementation()           - ERC-6551 impl for account-model TBA derivation
+//   supplyCap()                   - immutable mint cap (0 = unlimited)
+//   nextTokenId()                 - next id to be minted
 //   purchase(recipient)           - payable; calldata only in interactive mode
 //   priceToken() / priceAmount()  - the EIP-3009 stablecoin rail (§2.2), and how
 //                                   a contract advertises it: a zero token, or a
@@ -91,14 +91,14 @@ sol! {
 const RECEIVE_WITH_AUTHORIZATION_TYPEHASH: B256 =
     b256!("d099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8");
 
-/// `keccak256("Transfer(address,address,uint256)")` — the ERC-721 Transfer
+/// `keccak256("Transfer(address,address,uint256)")` - the ERC-721 Transfer
 /// event topic0. Mint events have `from == address(0)`.
 const ERC721_TRANSFER_SIG: B256 =
     b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 
 // ── Receipt ───────────────────────────────────────────────────────────────────
 
-/// Minimal tx receipt — the fields the wrapper cares about.
+/// Minimal tx receipt - the fields the wrapper cares about.
 #[derive(Debug, Clone)]
 pub struct TxReceipt {
     pub status: bool,
@@ -384,7 +384,7 @@ pub fn tokens_of_owner(
 
 /// Resolves an ENS name to an Ethereum address.
 ///
-/// Stub — full implementation in Phase 1.6.
+/// Stub - full implementation in Phase 1.6.
 pub fn resolve_ens(_rpc_url: &str, _name: &str) -> Result<Address, RpcError> {
     Err(RpcError::EnsNotSupported)
 }
@@ -458,7 +458,7 @@ pub fn active_session_id(rpc_url: &str, contract: Address, token_id: u64) -> Res
 
 /// Returns the 0x-prefixed ABI-encoded calldata for `activate(tokenId)`.
 ///
-/// Pure — no RPC. The wrapper shows this to the user so they can paste it
+/// Pure - no RPC. The wrapper shows this to the user so they can paste it
 /// into their wallet to send the tx themselves.
 pub fn encode_activate_calldata(token_id: u64) -> String {
     let call = IRub3License::activateCall {
@@ -659,7 +659,7 @@ pub fn identity_model(rpc_url: &str, contract: Address) -> Result<u8, RpcError> 
     })
 }
 
-/// Reads the contract's `tbaImplementation()` getter — the ERC-6551 account
+/// Reads the contract's `tbaImplementation()` getter - the ERC-6551 account
 /// implementation address used to derive token-bound account addresses.
 ///
 /// Returns `Address::ZERO` for access-model deploys (enforced on-chain).
@@ -734,7 +734,7 @@ pub fn supply_cap(rpc_url: &str, contract: Address) -> Result<u64, RpcError> {
     })
 }
 
-/// Reads `nextTokenId()` — the id the next `purchase()` will mint.
+/// Reads `nextTokenId()` - the id the next `purchase()` will mint.
 pub fn next_token_id(rpc_url: &str, contract: Address) -> Result<u64, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
@@ -750,7 +750,7 @@ pub fn next_token_id(rpc_url: &str, contract: Address) -> Result<u64, RpcError> 
 
 /// Returns the 0x-prefixed ABI-encoded calldata for `purchase(recipient)`.
 ///
-/// Pure — no RPC. The wrapper shows this to the user so they can paste it
+/// Pure - no RPC. The wrapper shows this to the user so they can paste it
 /// into their wallet to send the tx themselves. `msg.value` is handled
 /// separately in the UI.
 pub fn encode_purchase_calldata(recipient: Address) -> String {
@@ -1259,7 +1259,7 @@ mod tests {
     }
 
     /// Verifies that a non-existent token_id produces a Contract error (revert),
-    /// not a Transport error. Requires network access — skipped in offline CI.
+    /// not a Transport error. Requires network access - skipped in offline CI.
     #[test]
     #[ignore = "requires network"]
     fn owner_of_unminted_token_returns_contract_error() {

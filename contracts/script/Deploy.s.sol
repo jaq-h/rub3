@@ -10,14 +10,14 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 /// @notice Deploys either Rub3Access or Rub3Subscription from environment variables.
 ///
 /// Required env vars:
-///   CONTRACT_TYPE      — "access" | "subscription"
-///   TOKEN_NAME         — ERC-721 name  (e.g. "My App License")
-///   TOKEN_SYMBOL       — ERC-721 symbol (e.g. "MAL")
-///   IDENTITY_MODEL     — 0 (access: user_id = wallet) | 1 (account: user_id = TBA)
-///   PRICE              — purchase price in wei
+///   CONTRACT_TYPE      - "access" | "subscription"
+///   TOKEN_NAME         - ERC-721 name  (e.g. "My App License")
+///   TOKEN_SYMBOL       - ERC-721 symbol (e.g. "MAL")
+///   IDENTITY_MODEL     - 0 (access: user_id = wallet) | 1 (account: user_id = TBA)
+///   PRICE              - purchase price in wei
 ///
 /// Conditionally required:
-///   TBA_IMPLEMENTATION — ERC-6551 account implementation address. Required
+///   TBA_IMPLEMENTATION - ERC-6551 account implementation address. Required
 ///                        when IDENTITY_MODEL=1 (account); must be 0x0 when
 ///                        IDENTITY_MODEL=0 (access).
 ///
@@ -34,9 +34,9 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 ///   PRICE_AMOUNT    - purchase price in PRICE_TOKEN's smallest unit (USDC has 6
 ///                     decimals, so 5000000 = 5 USDC). Must be 0 when PRICE_TOKEN
 ///                     is unset. 0 with a token set is a free stablecoin tier.
-///   SUPPLY_CAP      — max mintable tokens; 0 = uncapped (default: 0)
-///   OWNER           — contract owner address; defaults to the broadcaster
-///   COOLDOWN_BLOCKS — blocks between activations per token (default: 1800, ~1hr on Base;
+///   SUPPLY_CAP      - max mintable tokens; 0 = uncapped (default: 0)
+///   OWNER           - contract owner address; defaults to the broadcaster
+///   COOLDOWN_BLOCKS - blocks between activations per token (default: 1800, ~1hr on Base;
 ///                     floor is 15 ≈ 30s, enforced in the contract)
 ///   PREDECESSOR     - address of a license contract whose holders may migrate onto
 ///                     this one via `claimFromPredecessor` (default: 0x0 = no
@@ -47,7 +47,7 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 ///                     or the deploy reverts `PredecessorNotCanonical(address)` -
 ///                     see contracts.md -> "A factory deploy may only succeed a
 ///                     canonical predecessor".
-///   PERIOD          — subscription length in seconds (required for "subscription")
+///   PERIOD          - subscription length in seconds (required for "subscription")
 ///   FACTORY         - address of a deployed Rub3Factory to deploy through
 ///                     (default: 0x0 = deploy directly). Going through a factory
 ///                     is what stamps the protocol fee and records the contract
@@ -57,11 +57,11 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 ///                     are the factory's own immutables and cannot be chosen
 ///                     here - see contracts.md -> "Protocol fee".
 ///
-/// Usage — dry run (no broadcast):
+/// Usage - dry run (no broadcast):
 ///   source .env && forge script script/Deploy.s.sol \
 ///     --rpc-url $BASE_SEPOLIA_RPC_URL
 ///
-/// Usage — broadcast + verify:
+/// Usage - broadcast + verify:
 ///   source .env && forge script script/Deploy.s.sol \
 ///     --rpc-url $BASE_SEPOLIA_RPC_URL \
 ///     --private-key $DEPLOYER_KEY \
@@ -253,7 +253,7 @@ contract Deploy is Script {
     }
 
     // Returns a copy of `s` with the first character uppercased.
-    // Must copy — `bytes(s)` aliases the original memory and would mutate the caller's string.
+    // Must copy - `bytes(s)` aliases the original memory and would mutate the caller's string.
     function _capitalize(string memory s) internal pure returns (string memory) {
         bytes memory src = bytes(s);
         if (src.length == 0) return s;

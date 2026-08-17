@@ -30,7 +30,7 @@ pub struct LicenseProof {
 /// message = SHA-256(app_id || token_id_be_bytes)
 ///
 /// The token_id is encoded as a big-endian u64 (8 bytes) to give it a fixed
-/// width — prevents ambiguity between e.g. token 1 + "2..." vs token 12 + "...".
+/// width, which prevents ambiguity between e.g. token 1 + "2..." vs token 12 + "...".
 pub fn activation_message(app_id: &str, token_id: u64) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -148,7 +148,7 @@ pub(crate) fn public_key_to_address(key: &k256::ecdsa::VerifyingKey) -> String {
     // Uncompressed encoding: 0x04 || x (32 bytes) || y (32 bytes)
     let uncompressed = key.to_encoded_point(false);
     let bytes = uncompressed.as_bytes();
-    // Drop the 0x04 prefix — Keccak is taken over the 64-byte x||y payload
+    // Drop the 0x04 prefix - Keccak is taken over the 64-byte x||y payload
     let hash = Keccak256::digest(&bytes[1..]);
     // Address is the last 20 bytes
     format!("0x{}", hex::encode(&hash[12..]))

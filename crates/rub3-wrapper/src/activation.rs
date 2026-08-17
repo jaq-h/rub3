@@ -206,7 +206,7 @@ fn try_session_fast_path(
         }
     }
 
-    // Re-verify probabilistically — only when the session carries the fields
+    // Re-verify probabilistically - only when the session carries the fields
     // (session_id present ⇒ tier-3 session that went through activate()).
     if session.session_id.is_some() && crate::session::should_reverify() {
         match crate::session::verify_onchain(&session, rpc_url) {

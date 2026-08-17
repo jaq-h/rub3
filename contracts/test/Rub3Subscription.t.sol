@@ -88,7 +88,7 @@ contract Rub3SubscriptionTest is Test {
         uint256 id = nft.purchase{value: PRICE}(alice);
         uint256 originalExpiry = nft.expiresAt(id);
 
-        // Advance half a period, renew — expiry should be original + PERIOD.
+        // Advance half a period, renew - expiry should be original + PERIOD.
         vm.warp(block.timestamp + PERIOD / 2);
         vm.prank(alice);
         nft.renew{value: PRICE}(id);

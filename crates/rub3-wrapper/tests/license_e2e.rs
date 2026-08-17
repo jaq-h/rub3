@@ -32,7 +32,7 @@ const APP_ID: &str = "com.rub3.example";
 const TOKEN_ID: u64 = 1;
 
 // Deterministic test keypair (32 bytes, hex-encoded).
-// This is a throwaway key used only for testing — it holds no value.
+// This is a throwaway key used only for testing - it holds no value.
 const STATIC_PRIVKEY_HEX: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 fn static_signing_key() -> SigningKey {

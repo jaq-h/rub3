@@ -1,6 +1,6 @@
 //! Session persistence at `~/.rub3/sessions/<app_id>/<token_id>.json`.
 //!
-//! Env override: `RUB3_SESSION_DIR` replaces `~/.rub3/sessions` — used by
+//! Env override: `RUB3_SESSION_DIR` replaces `~/.rub3/sessions` - used by
 //! integration tests to point at a tmpdir.
 
 use std::path::PathBuf;
@@ -75,7 +75,7 @@ pub fn save_session(session: &Session) -> Result<(), StoreError> {
 /// returns the most recently issued one.
 ///
 /// Solves the "don't know token_id at startup" problem: the fast path doesn't
-/// need to know which token to load — it just asks for the best available session.
+/// need to know which token to load - it just asks for the best available session.
 pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
     latest_session_where(app_id, |_| true)
 }

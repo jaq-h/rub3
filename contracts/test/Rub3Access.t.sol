@@ -294,7 +294,7 @@ contract Rub3AccessTest is Test {
         vm.prank(alice);
         nft.activate(id);
 
-        // Advance one block — still inside cooldown window.
+        // Advance one block - still inside cooldown window.
         vm.roll(block.number + 1);
 
         vm.prank(alice);

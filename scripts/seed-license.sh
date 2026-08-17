@@ -20,7 +20,7 @@ TOKEN_ID=1
 # Anvil's default account 0
 PRIVKEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
-command -v cast >/dev/null 2>&1 || { echo "error: cast not found — install Foundry: curl -L https://foundry.paradigm.xyz | bash && foundryup"; exit 1; }
+command -v cast >/dev/null 2>&1 || { echo "error: cast not found - install Foundry: curl -L https://foundry.paradigm.xyz | bash && foundryup"; exit 1; }
 
 ADDRESS=$(cast wallet address --private-key "$PRIVKEY")
 

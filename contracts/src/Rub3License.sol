@@ -182,7 +182,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
 
     /// @notice ERC-6551 account implementation that token-bound accounts for
     ///         this collection resolve to. Only meaningful when
-    ///         `identityModel == 1` — the wrapper derives each token's TBA
+    ///         `identityModel == 1` - the wrapper derives each token's TBA
     ///         address by CREATE2 against the canonical ERC-6551 registry with
     ///         this implementation and `salt = 0`. Immutable so the developer
     ///         cannot silently reassign every user's identity.
@@ -312,7 +312,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
 
     // ── Cooldown / session state (tiers 3-4) ──────────────────────────────────
 
-    /// @notice Floor on `cooldownBlocks`. ~30s on Base — one TOTP window.
+    /// @notice Floor on `cooldownBlocks`. ~30s on Base - one TOTP window.
     ///         Anything smaller reduces the contract to tier 2 (no rate limit).
     uint256 public constant MIN_COOLDOWN_BLOCKS = 15;
 
@@ -321,7 +321,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     uint256 public immutable cooldownBlocks;
 
     /// @notice Block number of the last `activate()` call per token. `0` means
-    ///         never activated — the first call is always allowed.
+    ///         never activated - the first call is always allowed.
     mapping(uint256 => uint256) public lastActivationBlock;
 
     /// @notice Current active session id per token. Incremented on every
@@ -740,7 +740,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
 
     // ── Activation (tier 3) ───────────────────────────────────────────────────
 
-    /// @notice View helper — returns whether `tokenId` can be activated now,
+    /// @notice View helper - returns whether `tokenId` can be activated now,
     ///         and how many blocks remain if not.
     function cooldownReady(uint256 tokenId)
         external
