@@ -752,10 +752,14 @@ cast send <CODE_REGISTRY> "deprecate(bytes32,string)" \
 
 ### Reading it, and the offsets bootstrap
 
-Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. `offsetTables()` breaks that circle: it returns the *distinct* tables any published release uses - one today, shared by `Rub3Access` and `Rub3Subscription` - so a verifier fetches the short candidate list once, hashes under each, and looks each result up. A verifier on a purchase path should bound how many it tries: each one costs a round trip, and the append-only bound on the owner key covers what it can publish, not how long a buyer waits for it. The wrapper caps this at `attest::MAX_CANDIDATE_OFFSET_TABLES`.
+Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. The registry breaks that circle by publishing the *distinct* tables its releases use - one today, shared by `Rub3Access` and `Rub3Subscription` - so a verifier fetches the short candidate list once, hashes under each, and looks each result up.
+
+**On a purchase path, read a window rather than the set.** How many tables exist is the owner key's to choose, and the append-only bound on that key covers what it can publish, not how long a buyer waits for it. `offsetTableWindow(start, count)` returns at most `count` tables from `start`, clamped, so a verifier asks for the number of candidates it is willing to try and never pays to transfer or decode more; each surviving candidate then costs its own `record` round trip, so hold the same bound over the loop as well - a node need not honour the window it was asked for. The wrapper reads `offsetTableWindow(0, attest::MAX_CANDIDATE_OFFSET_TABLES)` and caps the lookups at the same number. This is latency and nothing else: reading the whole set could only ever be slow, never wrong. `offsetTables()` returns everything and is for a watcher or an indexer with no deadline.
 
 ```bash
-cast call <CODE_REGISTRY> "offsetTables()((uint32,uint32)[][])" --rpc-url $RPC
+cast call <CODE_REGISTRY> "offsetTableWindow(uint256,uint256)((uint32,uint32)[][])" 0 16 --rpc-url $RPC
+cast call <CODE_REGISTRY> "offsetTableCount()(uint256)" --rpc-url $RPC
+cast call <CODE_REGISTRY> "offsetTables()((uint32,uint32)[][])" --rpc-url $RPC   # the whole set
 cast call <CODE_REGISTRY> "record(bytes32)((uint8,uint8,string,string,bytes32,string,uint64,(uint32,uint32)[]))" \
   "0x$MCH" --rpc-url $RPC
 ```

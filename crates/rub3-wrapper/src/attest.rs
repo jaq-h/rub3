@@ -307,7 +307,7 @@ pub static CANONICAL: &[CanonicalContract] = &[
         source: "contracts/src/Rub3CodeRegistry.sol",
         role: Role::CodeRegistry,
         release: RELEASE,
-        masked_sha256: "2c5d60e1b5430a0b8531ebf91c39d09f6dc0f31b0562eabd4d96cfb0f79032b4",
+        masked_sha256: "7056af5f447f578f8b4de8de1a4b0ec9e0a0da387c6679f72c987ccdc8382f7c",
         immutable_ranges: &[],
     },
     CanonicalContract {
@@ -581,11 +581,12 @@ const PUSH32: u8 = 0x7f;
 ///    and that is what turns "we did not look at these bytes" into "these bytes
 ///    cannot execute". It holds by construction on compiler output: solc
 ///    compiles every read of an immutable to a `PUSH32` whose operand the
-///    deployer fills in. Measured on all four of this repository's contracts
-///    that have immutables, not assumed. Should a future compiler emit them
-///    another way, this rejects the registry's table and the gate falls back to
-///    refusing - fail-closed, on the path that spends money, which is the right
-///    direction to be wrong in.
+///    deployer fills in. Measured on all three of this repository's contracts
+///    that have immutables - `Rub3Access`, `Rub3Subscription` and `Rub3Factory`;
+///    the two deployer helpers and the registry have none - not assumed. Should
+///    a future compiler emit them another way, this rejects the registry's table
+///    and the gate falls back to refusing - fail-closed, on the path that spends
+///    money, which is the right direction to be wrong in.
 ///
 /// **What the one-byte lookback does not establish**, said plainly because the
 /// claim above is the one this module publishes: it does not prove the `PUSH32`
@@ -845,8 +846,20 @@ pub struct RegistryRecord {
 pub trait ChainReader {
     /// The runtime code deployed at `address`, empty when there is none.
     fn code(&self, address: Address) -> Result<Vec<u8>, RpcError>;
-    /// The distinct immutable-offset tables the registry publishes.
-    fn offset_tables(&self, registry: Address) -> Result<Vec<Vec<ImmutableRange>>, RpcError>;
+    /// At most `limit` of the distinct immutable-offset tables the registry
+    /// publishes, in publication order.
+    ///
+    /// The limit is part of the request rather than something the caller trims
+    /// off the answer: a purchase only ever tries a fixed number of candidates,
+    /// so it asks for that many and never pays to transfer or decode a set the
+    /// registry's owner key made arbitrarily long. An implementation may return
+    /// fewer, and a caller must still hold its own bound: nothing here can make
+    /// a remote node honest about a limit.
+    fn offset_tables(
+        &self,
+        registry: Address,
+        limit: usize,
+    ) -> Result<Vec<Vec<ImmutableRange>>, RpcError>;
     /// The release published for a masked code hash, or `None` for no record.
     fn record(
         &self,
@@ -867,11 +880,17 @@ impl ChainReader for RpcChain<'_> {
         rpc::get_code(self.rpc_url, address)
     }
 
-    fn offset_tables(&self, registry: Address) -> Result<Vec<Vec<ImmutableRange>>, RpcError> {
-        Ok(rpc::code_registry_offset_tables(self.rpc_url, registry)?
-            .into_iter()
-            .map(|table| table.into_iter().map(range_from_chain).collect())
-            .collect())
+    fn offset_tables(
+        &self,
+        registry: Address,
+        limit: usize,
+    ) -> Result<Vec<Vec<ImmutableRange>>, RpcError> {
+        Ok(
+            rpc::code_registry_offset_tables(self.rpc_url, registry, limit)?
+                .into_iter()
+                .map(|table| table.into_iter().map(range_from_chain).collect())
+                .collect(),
+        )
     }
 
     fn record(
@@ -994,7 +1013,7 @@ fn sanitised(record: RegistryRecord) -> RegistryRecord {
     }
 }
 
-/// How many candidate offset tables one consultation will try.
+/// How many candidate offset tables one consultation will read and try.
 ///
 /// Every candidate that survives the shape check costs its own sequential
 /// `record` call, so an unbounded list lets whoever holds the registry's owner
@@ -1004,6 +1023,13 @@ fn sanitised(record: RegistryRecord) -> RegistryRecord {
 /// takes minutes is not an addition anyone would alarm on, so the published
 /// bound did not cover it. This closes that gap. It bounds latency only: an
 /// uncapped loop was never able to produce a wrong verdict, only a slow one.
+///
+/// It bounds the read as well as the loop, which is one number doing two jobs
+/// because both costs come from the same published set. The registry is asked
+/// for this many tables through `offsetTableWindow`, so a set the owner key made
+/// arbitrarily long is never transferred, decoded or shape-checked in full; the
+/// same number then bounds the lookups, so a node that answers with more entries
+/// than it was asked for still cannot buy extra round trips.
 ///
 /// Sixteen is deliberately far above anything legitimate rather than tight. A
 /// table is per *code layout*, not per contract and not per release: today
@@ -1036,22 +1062,26 @@ pub enum RegistryVerdict {
 ///    before this would move the trust from "one hash the user chose to run"
 ///    onto "whoever put an address at that slot", which is the recursion this
 ///    whole module exists to terminate.
-/// 2. **Fetch the distinct offset tables.** A masked hash cannot be computed
+/// 2. **Fetch the distinct offset tables**, at most
+///    [`MAX_CANDIDATE_OFFSET_TABLES`] of them. A masked hash cannot be computed
 ///    without a table, and the table cannot be looked up without the hash, so
-///    the candidates come first in one call. Each is checked against the fetched
+///    the candidates come first in one call - a bounded one, because the number
+///    of tables published is the owner key's to choose and this call is on the
+///    path that spends money. Each is checked against the fetched
 ///    code by [`ranges_are_immutable_slots`] before anything is masked with it;
 ///    a table this build cannot confirm describes `PUSH32` immediates of *this*
 ///    code is dropped rather than trusted, because a masked byte is a byte the
 ///    comparison never looks at. Dropping every candidate is
 ///    [`RegistryVerdict::Unknown`], not a failure: it says no published release
 ///    is shaped like this code, which is what a lookup that missed says too.
-/// 3. **Look up the hash under each surviving candidate, up to
-///    [`MAX_CANDIDATE_OFFSET_TABLES`] of them.** Today there is one, so this is
-///    one `eth_call`; the loop exists because a future contract that adds an
-///    immutable adds a second table. Candidates past the cap are left untried
-///    and, like a dropped one, contribute nothing - so a registry that publishes
-///    more tables than any deployment uses costs a bounded number of round trips
-///    and yields [`RegistryVerdict::Unknown`], never a new outcome.
+/// 3. **Look up the hash under each surviving candidate**, holding the same cap
+///    locally so the bound does not rest on the node having honoured it. Today
+///    there is one table, so this is one `eth_call`; the loop exists because a
+///    future contract that adds an immutable adds a second table. Candidates
+///    past the cap are never read or never tried and, like a dropped one,
+///    contribute nothing - so a registry that publishes more tables than any
+///    deployment uses costs a bounded number of round trips and yields
+///    [`RegistryVerdict::Unknown`], never a new outcome.
 /// 4. **Cross-check the record against the table that found it.** A record whose
 ///    own declared offsets differ from the table its hash was computed under is
 ///    a registry describing one layout while answering about another, which is
@@ -1095,7 +1125,7 @@ fn consult_registry_against(
         }
     }
 
-    let tables = match chain.offset_tables(registry) {
+    let tables = match chain.offset_tables(registry, MAX_CANDIDATE_OFFSET_TABLES) {
         Ok(tables) => tables,
         Err(e) => {
             return RegistryVerdict::Unavailable(format!(
@@ -1110,9 +1140,11 @@ fn consult_registry_against(
     // knows of no release shaped like this - the same `Unknown` a lookup that
     // simply missed would give, because it means the same thing.
     //
-    // The cap is on the tables actually tried, because that is what costs a
-    // round trip each; the ones past it are untried rather than dropped, and
-    // both mean the same thing here - no answer came from them.
+    // The cap was already sent to the registry, which is what keeps an
+    // arbitrarily long published set off the wire. It is applied again here
+    // because a node is not obliged to honour it and a lookup per extra entry is
+    // exactly the cost being bounded; the ones past it are untried rather than
+    // dropped, and both mean the same thing here - no answer came from them.
     let usable = tables
         .iter()
         .filter(|table| ranges_are_immutable_slots(code, table).is_ok())
@@ -2158,6 +2190,11 @@ mod tests {
         code_error: Option<String>,
         tables: Vec<Vec<ImmutableRange>>,
         tables_error: Option<String>,
+        /// Whether the scripted registry honours the requested limit, as the
+        /// real `offsetTableWindow` does. Turned off to script a node that
+        /// answers with more than it was asked for, which is the case the
+        /// caller's own bound has to survive.
+        honour_limit: bool,
         records: HashMap<[u8; 32], RegistryRecord>,
         record_error: Option<String>,
         calls: RefCell<Vec<String>>,
@@ -2170,6 +2207,7 @@ mod tests {
                 code_error: None,
                 tables: Vec::new(),
                 tables_error: None,
+                honour_limit: true,
                 records: HashMap::new(),
                 record_error: None,
                 calls: RefCell::new(Vec::new()),
@@ -2193,6 +2231,13 @@ mod tests {
 
         fn failing_code_reads(mut self) -> Self {
             self.code_error = Some("the node did not answer".to_string());
+            self
+        }
+
+        /// Answers every published table regardless of the requested limit, the
+        /// way a node that ignores `offsetTableWindow`'s bound would.
+        fn ignoring_the_requested_limit(mut self) -> Self {
+            self.honour_limit = false;
             self
         }
 
@@ -2220,12 +2265,17 @@ mod tests {
             Ok(self.code.get(&address).cloned().unwrap_or_default())
         }
 
-        fn offset_tables(&self, registry: Address) -> Result<Vec<Vec<ImmutableRange>>, RpcError> {
+        fn offset_tables(
+            &self,
+            registry: Address,
+            limit: usize,
+        ) -> Result<Vec<Vec<ImmutableRange>>, RpcError> {
             self.calls
                 .borrow_mut()
-                .push(format!("offsetTables({registry})"));
+                .push(format!("offsetTableWindow({registry}, 0, {limit})"));
             match &self.tables_error {
                 Some(e) => Err(RpcError::Contract(e.clone())),
+                None if self.honour_limit => Ok(self.tables.iter().take(limit).cloned().collect()),
                 None => Ok(self.tables.clone()),
             }
         }
@@ -2690,14 +2740,18 @@ mod tests {
     }
 
     /// The purchase path spends money, and every surviving candidate costs its
-    /// own sequential round trip, so the list of them is capped.
+    /// own sequential round trip, so the list of them is capped - at the read as
+    /// well as at the loop.
     ///
     /// The scripted registry publishes one more usable table than the cap
     /// allows and hides the record under the last of them - the arrangement an
     /// owner key would choose to make a purchase as slow as it can while still,
-    /// eventually, answering. The verdict is `Unknown`, which is what a dropped
-    /// table already says, and the call log is the assertion that matters:
-    /// exactly the cap's worth of lookups, not one more.
+    /// eventually, answering. It honours the requested limit, as the deployed
+    /// `offsetTableWindow` does, so the table past the cap never reaches the
+    /// wrapper at all. The verdict is `Unknown`, which is what a dropped table
+    /// already says, and the call log is the assertion that matters: the cap is
+    /// what was asked of the registry, and exactly the cap's worth of lookups
+    /// followed, not one more.
     #[test]
     fn candidate_offset_tables_are_capped_on_the_purchase_path() {
         let overflow = MAX_CANDIDATE_OFFSET_TABLES + 1;
@@ -2743,6 +2797,125 @@ mod tests {
             lookups,
             MAX_CANDIDATE_OFFSET_TABLES,
             "the cap bounds the round trips a purchase pays for: {:?}",
+            chain.calls()
+        );
+        assert!(
+            chain.calls().iter().any(|call| call
+                == &format!(
+                    "offsetTableWindow({}, 0, {MAX_CANDIDATE_OFFSET_TABLES})",
+                    registry_address()
+                )),
+            "the cap must also be what the registry was asked for, so a long \
+             published set is never transferred or decoded: {:?}",
+            chain.calls()
+        );
+    }
+
+    /// The bound is asked of the registry, not trimmed off its answer.
+    ///
+    /// The published set is the owner key's to grow, and a purchase that pays to
+    /// transfer, decode and shape-check all of it is slow before the loop's cap
+    /// can engage. So the window is requested bounded: a registry holding many
+    /// more tables than the wrapper will try delivers only the ones asked for,
+    /// and the shape check never sees the rest. Latency only - reading the whole
+    /// set could never have produced a wrong verdict, only a slow one.
+    #[test]
+    fn the_offset_table_read_is_bounded_before_the_answer_is_decoded() {
+        let published = MAX_CANDIDATE_OFFSET_TABLES * 4;
+        let slots: Vec<ImmutableRange> = (0..published)
+            .map(|i| ImmutableRange {
+                start: 64 + i * 64,
+                length: 32,
+            })
+            .collect();
+        let code = code_with_immutables(128 + published * 64, &slots, 0x10);
+        let registry_code = fake_code(300, 0x77);
+        let table = registry_only_table(&registry_code);
+        let candidates: Vec<Vec<ImmutableRange>> = slots.iter().map(|r| vec![*r]).collect();
+
+        let chain = ScriptedChain::new()
+            .with_code(registry_address(), registry_code)
+            .with_tables(candidates);
+
+        assert_eq!(
+            consult_registry_against(&chain, registry_address(), &code, table),
+            RegistryVerdict::Unknown,
+            "no record is published, so no candidate answers"
+        );
+        assert_eq!(
+            chain
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("record("))
+                .count(),
+            MAX_CANDIDATE_OFFSET_TABLES,
+            "only the tables the registry was asked for exist to be tried: {:?}",
+            chain.calls()
+        );
+        assert_eq!(
+            chain.calls().first().map(String::as_str),
+            Some(format!("code({})", registry_address()).as_str()),
+            "verification still comes first"
+        );
+        assert_eq!(
+            chain.calls().get(1),
+            Some(&format!(
+                "offsetTableWindow({}, 0, {MAX_CANDIDATE_OFFSET_TABLES})",
+                registry_address()
+            )),
+            "one bounded window read, and the bound is the wrapper's cap: {:?}",
+            chain.calls()
+        );
+    }
+
+    /// A node is not obliged to honour the window it was asked for, so the cap
+    /// is held locally too.
+    ///
+    /// Same arrangement as the bounded read above, against a scripted registry
+    /// that answers with every table it has regardless of the limit. The extra
+    /// entries cost nothing beyond the one response they arrived in: the loop
+    /// still stops at the cap, so no additional round trip is paid for and the
+    /// verdict is the same `Unknown`.
+    #[test]
+    fn a_registry_that_ignores_the_requested_window_still_buys_no_extra_lookups() {
+        let published = MAX_CANDIDATE_OFFSET_TABLES * 4;
+        let slots: Vec<ImmutableRange> = (0..published)
+            .map(|i| ImmutableRange {
+                start: 64 + i * 64,
+                length: 32,
+            })
+            .collect();
+        let code = code_with_immutables(128 + published * 64, &slots, 0x10);
+        let registry_code = fake_code(300, 0x77);
+        let table = registry_only_table(&registry_code);
+        let candidates: Vec<Vec<ImmutableRange>> = slots.iter().map(|r| vec![*r]).collect();
+
+        // The record sits under the last table of all, well past the cap: an
+        // untried candidate contributes nothing, however the answer arrived.
+        let beyond = candidates[published - 1].clone();
+        let hash = masked_code_digest(&code, &beyond).expect("ranges fit");
+        let mut record = record_for("Rub3Access", Some(Role::Licence), RecordStatus::Active);
+        record.offsets = beyond;
+
+        let chain = ScriptedChain::new()
+            .with_code(registry_address(), registry_code)
+            .with_tables(candidates)
+            .ignoring_the_requested_limit()
+            .with_record(hash, record);
+
+        assert_eq!(
+            consult_registry_against(&chain, registry_address(), &code, table),
+            RegistryVerdict::Unknown,
+            "past the cap a candidate is untried, and untried says what dropped says"
+        );
+        assert_eq!(
+            chain
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("record("))
+                .count(),
+            MAX_CANDIDATE_OFFSET_TABLES,
+            "an over-long answer must not buy round trips the cap refused: {:?}",
             chain.calls()
         );
     }

@@ -61,6 +61,27 @@ contract Rub3CodeRegistryTest is Test {
         registry.publish(mch, role, "Rub3Access", VERSION, COMMIT, SOLC, _ranges(3, 64));
     }
 
+    /// `count` releases, each with an offset table no other release shares, so
+    /// interning cannot collapse them. One 32-byte range per table, `i` words
+    /// apart, which is the shape {publish} accepts and the shape a reader has to
+    /// decode.
+    function _publishDistinctTables(uint256 count) internal {
+        for (uint256 i = 0; i < count; i++) {
+            Rub3CodeRegistry.ByteRange[] memory table = new Rub3CodeRegistry.ByteRange[](1);
+            table[0] = Rub3CodeRegistry.ByteRange({start: uint32(64 + i * 64), length: 32});
+            vm.prank(owner);
+            registry.publish(
+                keccak256(abi.encode("a distinctly shaped release", i)),
+                Rub3CodeRegistry.Role.Licence,
+                "Rub3Access",
+                VERSION,
+                COMMIT,
+                SOLC,
+                table
+            );
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // 1. Publishing works, and records what it was told
     // ══════════════════════════════════════════════════════════════════════════
@@ -253,6 +274,12 @@ contract Rub3CodeRegistryTest is Test {
         assertTrue(
             _bytecodeHasSelector(address(registry), bytes4(keccak256("record(bytes32)")))
         );
+        assertTrue(
+            _bytecodeHasSelector(
+                address(registry),
+                bytes4(keccak256("offsetTableWindow(uint256,uint256)"))
+            )
+        );
         assertFalse(
             _bytecodeHasSelector(address(registry), bytes4(keccak256("thisIsNotAFunction()")))
         );
@@ -443,6 +470,61 @@ contract Rub3CodeRegistryTest is Test {
         assertEq(tables[0].length, 3);
         assertEq(tables[1].length, 4);
         assertEq(tables[1][3].start, 64 + 3 * 96);
+    }
+
+    /// The bootstrap on a path with a deadline. A verifier tries a fixed number
+    /// of candidates, so it must be able to *read* that many rather than read
+    /// every table published and throw the rest away: the published set is the
+    /// owner key's to grow, and the wrapper's own cap cannot bound a response it
+    /// has already paid to receive. This is latency and nothing else - reading
+    /// the whole set could only ever be slow, never wrong.
+    ///
+    /// Published here is four times what the wrapper's cap of 16 reads.
+    function test_offsetTableWindow_readsABoundedSliceOfALargerSet() public {
+        uint256 published = 64;
+        _publishDistinctTables(published);
+        assertEq(registry.offsetTableCount(), published, "each table is distinct");
+
+        Rub3CodeRegistry.ByteRange[][] memory window = registry.offsetTableWindow(0, 16);
+        assertEq(window.length, 16, "a bounded read returns the bound, not the set");
+        assertEq(registry.offsetTables().length, published, "the whole set is still readable");
+
+        // First-use order, and the ranges themselves, so a window is the same
+        // answer as the full read rather than a differently shaped one.
+        for (uint256 i = 0; i < window.length; i++) {
+            assertEq(window[i].length, 1);
+            assertEq(window[i][0].start, uint32(64 + i * 64));
+            assertEq(window[i][0].length, 32);
+        }
+    }
+
+    /// A window anywhere in the set, so a reader that wants the tables past its
+    /// first bound can walk them without ever asking for the whole thing.
+    function test_offsetTableWindow_startsWhereItIsAskedTo() public {
+        _publishDistinctTables(8);
+
+        Rub3CodeRegistry.ByteRange[][] memory window = registry.offsetTableWindow(5, 2);
+        assertEq(window.length, 2);
+        assertEq(window[0][0].start, uint32(64 + 5 * 64));
+        assertEq(window[1][0].start, uint32(64 + 6 * 64));
+    }
+
+    /// Clamped, not strict: a reader asks for the bound it can afford and needs
+    /// no count first, and no window can revert a purchase's only bootstrap read.
+    function test_offsetTableWindow_clampsRatherThanReverting() public {
+        assertEq(registry.offsetTableWindow(0, 16).length, 0, "nothing published yet");
+
+        _publishDistinctTables(3);
+        assertEq(registry.offsetTableWindow(0, 16).length, 3, "a count past the end is clamped");
+        assertEq(registry.offsetTableWindow(2, 16).length, 1);
+        assertEq(registry.offsetTableWindow(3, 16).length, 0, "a start at the end is empty");
+        assertEq(registry.offsetTableWindow(99, 16).length, 0, "and past it, too");
+        assertEq(registry.offsetTableWindow(0, 0).length, 0, "a zero window asks for nothing");
+        assertEq(
+            registry.offsetTableWindow(1, type(uint256).max).length,
+            2,
+            "start + count must not be computed, so the largest count cannot overflow"
+        );
     }
 
     function test_offsetTables_emitOnFirstUseOnly() public {

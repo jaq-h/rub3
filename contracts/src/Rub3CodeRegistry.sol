@@ -245,11 +245,46 @@ contract Rub3CodeRegistry is Ownable2Step {
     /// @notice Every distinct offset table any published release uses.
     ///
     ///         The bootstrap: computing a masked code hash needs a table, and
-    ///         finding the record needs the hash. An agent fetches this short
-    ///         list in one call, computes the hash under each candidate, and
-    ///         looks up each result. Today it returns exactly one table.
+    ///         finding the record needs the hash. A reader fetches the candidate
+    ///         tables in one call, computes the hash under each candidate, and
+    ///         looks up each result. Today there is exactly one table.
+    ///
+    ///         This returns the whole set, which is what a watcher or an indexer
+    ///         wants and what no caller should use on a path with a deadline: the
+    ///         set only grows, and the owner key decides how fast. A verifier
+    ///         with money on the line reads {offsetTableWindow} instead.
     function offsetTables() external view returns (ByteRange[][] memory) {
         return _offsetTables;
+    }
+
+    /// @notice At most `count` offset tables, starting at `start`, in the same
+    ///         first-use order {offsetTables} returns them in.
+    ///
+    ///         The bounded form of the bootstrap, and the one a purchase path
+    ///         uses. A verifier only ever tries a fixed number of candidates, so
+    ///         it asks for that many and the response it pays to transfer and
+    ///         decode is bounded by its own limit rather than by how many tables
+    ///         the owner key has published. This is a latency bound: an
+    ///         unbounded read could only ever be slow, never wrong.
+    ///
+    ///         Clamped rather than strict, so a reader needs no second call to
+    ///         find out how many exist: a `start` past the end returns nothing
+    ///         and a `count` past the end returns what is left. {offsetTableCount}
+    ///         is there for a reader that wants the total anyway.
+    function offsetTableWindow(uint256 start, uint256 count)
+        external
+        view
+        returns (ByteRange[][] memory window)
+    {
+        uint256 total = _offsetTables.length;
+        if (start >= total) return new ByteRange[][](0);
+
+        uint256 available = total - start;
+        uint256 taken = count < available ? count : available;
+        window = new ByteRange[][](taken);
+        for (uint256 i = 0; i < taken; i++) {
+            window[i] = _offsetTables[start + i];
+        }
     }
 
     /// @notice How many distinct offset tables {offsetTables} would return.

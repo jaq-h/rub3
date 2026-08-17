@@ -106,7 +106,7 @@
     },
     "Rub3CodeRegistry": {
       "source": "src/Rub3CodeRegistry.sol",
-      "deployed_bytecode_sha256": "2c5d60e1b5430a0b8531ebf91c39d09f6dc0f31b0562eabd4d96cfb0f79032b4",
+      "deployed_bytecode_sha256": "7056af5f447f578f8b4de8de1a4b0ec9e0a0da387c6679f72c987ccdc8382f7c",
       "immutable_ranges": []
     },
     "Rub3Factory": {

@@ -829,25 +829,37 @@ sol! {
         }
 
         function record(bytes32 maskedCodeHash) external view returns (Release memory);
-        function offsetTables() external view returns (ByteRange[][] memory);
+        function offsetTableWindow(uint256 start, uint256 count)
+            external
+            view
+            returns (ByteRange[][] memory);
     }
 }
 
-/// Reads the distinct immutable-offset tables the code registry publishes.
+/// Reads up to `limit` of the distinct immutable-offset tables the code registry
+/// publishes.
 ///
 /// The bootstrap for a masked-hash lookup: computing the hash needs a table, and
 /// finding the record needs the hash, so the candidate tables are fetched first
-/// in one call and every one of them is tried. Today the registry holds exactly
-/// one, shared by both licence templates.
+/// in one call. Today the registry holds exactly one, shared by both licence
+/// templates.
+///
+/// The registry's own `offsetTableWindow` does the bounding, so the response this
+/// pays to transfer and decode is capped by the caller's `limit` rather than by
+/// how many tables the registry's owner key has published. `limit` is clamped by
+/// the contract, so asking for more than exists returns what exists. This is a
+/// latency bound only: reading the whole set could only ever be slow, never
+/// wrong.
 pub fn code_registry_offset_tables(
     rpc_url: &str,
     registry: Address,
+    limit: usize,
 ) -> Result<Vec<Vec<CodeRange>>, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
         let instance = IRub3CodeRegistry::new(registry, provider);
         let tables = instance
-            .offsetTables()
+            .offsetTableWindow(U256::ZERO, U256::from(limit))
             .call()
             .await
             .map_err(RpcError::contract)?;
