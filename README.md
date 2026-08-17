@@ -88,6 +88,7 @@ rub3/
 ├── licenses/
 │   └── com.rub3.example.json         # Example license proof with valid signature
 ├── scripts/
+│   ├── assert-e2e-ran.sh             # CI guard: an anvil suite that ran nothing is not green
 │   ├── canonical-bytecode-hashes.sh  # check/update/print the canonical fingerprints
 │   ├── check-deployments.sh          # Schema gate for contracts/deployments.json (CI runs it)
 │   ├── seed-license.sh               # Generate a signed license proof for local testing
