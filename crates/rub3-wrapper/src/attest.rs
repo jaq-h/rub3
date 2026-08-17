@@ -807,8 +807,9 @@ fn classify_against(code: &[u8], table: &'static [CanonicalContract]) -> Verdict
 
 /// Whether a release is recommended for new purchases.
 ///
-/// **Neither value can invalidate anything.** `Deprecated` means "prefer a newer
-/// release", never "stop honouring": a purchase against deprecated code proceeds
+/// **Neither value can invalidate anything.** `Deprecated` means "not
+/// recommended for a new purchase", never "stop honouring": a purchase against
+/// deprecated code proceeds
 /// with a warning, a held token is untouched, and nothing on the launch path
 /// reads any of this. A status that could strand a paid licence would be a
 /// revocation surface by the back door, which this project rules out, and the
@@ -817,8 +818,9 @@ fn classify_against(code: &[u8], table: &'static [CanonicalContract]) -> Verdict
 pub enum RecordStatus {
     /// Current. Buy from it without comment.
     Active,
-    /// Superseded. Still genuine rub3 code, still honoured, no longer
-    /// recommended for a new purchase.
+    /// No longer recommended for a new purchase. Still genuine rub3 code,
+    /// still honoured. The record carries no reason and names no replacement,
+    /// so nothing downstream may claim one exists.
     Deprecated,
 }
 
@@ -1245,9 +1247,9 @@ impl Attestation {
                 status: RecordStatus::Deprecated,
                 ..
             } => Some(format!(
-                "the code registry marks {} ({}) as superseded and no longer recommended for new \
-                 purchases; it is still genuine rub3 code and licences bought from it are \
-                 unaffected",
+                "the code registry no longer recommends {} ({}) for new purchases; it does not \
+                 say why and does not say a replacement exists; it is still genuine rub3 code \
+                 and licences bought from it are unaffected",
                 self.contract, self.release
             )),
             _ => None,
@@ -2521,11 +2523,23 @@ mod tests {
         let advisory = attested
             .advisory()
             .expect("a deprecated release warns rather than passing in silence");
-        assert!(advisory.contains("no longer recommended"), "{advisory}");
+        assert!(advisory.contains("no longer recommends"), "{advisory}");
         assert!(
             advisory.contains("licences bought from it are unaffected"),
             "the warning must not read as a threat to a held licence: {advisory}"
         );
+        for promise in [
+            "later release",
+            "newer release",
+            "newer version",
+            "updated copy",
+        ] {
+            assert!(
+                !advisory.to_lowercase().contains(promise),
+                "a record carries no successor pointer, so the warning must not assert one \
+                 exists: {advisory}"
+            );
+        }
     }
 
     /// Canonical code that sells nothing is refused whichever authority vouched

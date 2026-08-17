@@ -147,7 +147,8 @@
     }
     .notice .nb { color: #c8a4a4; font-size: 12px; line-height: 1.55; }
 
-    /* A superseded release, said beside the purchase and never in place of it.
+    /* A release the registry stopped recommending, said beside the purchase
+       and never in place of it.
        Amber rather than the refusal's red, and no border-left accent bar, so it
        reads as a note on a screen that still works - the purchase is not
        blocked and the licence is not at risk. Wraps anywhere because the
@@ -228,10 +229,11 @@
     <p style="font-size:13px;color:#999;margin-bottom:14px">
       This wallet doesn't own a license token yet. Purchase one to continue.
     </p>
-    <!-- Shown only when the on-chain code registry says a later release exists.
-         Advice, not a warning: the purchase below still works. -->
+    <!-- Shown only when the on-chain code registry has stopped recommending
+         this release. Advice, not a warning: the purchase below still works,
+         and the record names no replacement, so this must not promise one. -->
     <div class="advisory hidden" id="p-advisory">
-      <div class="at">A newer release is available</div>
+      <div class="at">No longer recommended for new purchases</div>
       <p class="ab" id="p-advisory-body"></p>
     </div>
     <div class="token-box">

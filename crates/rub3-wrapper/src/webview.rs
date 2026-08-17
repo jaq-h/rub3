@@ -466,8 +466,8 @@ impl IpcState {
         ) {
             // One line, on the one path in this file that spends money, naming
             // what the money is about to go to. Mirrors the agent door, warning
-            // included: a superseded release is still genuine code and still
-            // buyable, so it is said and not refused - and it is said to the
+            // included: a release the registry stopped recommending is still
+            // genuine code and still buyable, so it is said and not refused - and it is said to the
             // person too, on the screen below, because a buyer does not read
             // stderr.
             Ok(canonical) => {
@@ -763,10 +763,15 @@ impl IpcState {
 /// printing it precisely so each door can say it in its own voice; this is the
 /// window's.
 ///
-/// **It is advice and never a refusal.** A superseded release is genuine rub3
-/// code, the purchase is not blocked, and a licence bought from it stays valid,
-/// so the words carry that reassurance and the screen renders them beside the
-/// price rather than in place of it. A version authority able to stop a
+/// **It is advice and never a refusal.** A release the registry stopped
+/// recommending is genuine rub3 code, the purchase is not blocked, and a licence
+/// bought from it stays valid, so the words carry that reassurance and the
+/// screen renders them beside the price rather than in place of it.
+///
+/// **It claims only what the record carries.** `Deprecated` is a status with no
+/// reason field and no successor pointer, so the sentence must not promise a
+/// newer version or send the buyer off to fetch one: a deprecation issued for a
+/// defect with no fix yet would send them after something that does not exist. A version authority able to stop a
 /// purchase would be a revocation surface with an extra step, and neither the
 /// contract nor this screen gives it one. Emitted as `"advisory"`, written into
 /// `#p-advisory-body`, which stays hidden when this is `None`.
@@ -774,11 +779,11 @@ impl IpcState {
 fn purchase_advisory(canonical: &crate::attest::Attestation) -> Option<String> {
     canonical.advisory().map(|_| {
         format!(
-            "A later release of this contract has been published, so {} ({}) is no longer the \
-             one recommended for a new purchase. Its code is genuine rub3 code, this purchase \
-             works normally, and the licence you buy from it stays valid. If you would rather \
-             have the newer version, cancel and ask whoever published this software for an \
-             updated copy.",
+            "The on-chain code registry no longer recommends {} ({}) for a new purchase. Its \
+             code is genuine rub3 code, this purchase works normally, and the licence you buy \
+             from it stays valid. The registry does not say why, and it does not say that a \
+             replacement exists. Go ahead, or cancel and check with whoever published this \
+             software first.",
             canonical.contract, canonical.release
         )
     })
@@ -1160,7 +1165,7 @@ mod tests {
 
     // ── The words ────────────────────────────────────────────────────────────
 
-    /// A superseded release reaches the person, and reaches them as advice.
+    /// A deprecated release reaches the person, and reaches them as advice.
     ///
     /// The premise of this whole screen is that a person cannot read bytecode,
     /// and a person does not read stderr either: an advisory that only ever
@@ -1168,9 +1173,10 @@ mod tests {
     /// human one. The second half is that it must not read as a refusal. The
     /// purchase completes, the code is genuine, and the licence stays valid, so
     /// the reassurance the sentence carries is asserted as tightly as its
-    /// presence is.
+    /// presence is. The third is that it may claim no more than the record
+    /// carries: a `Deprecated` status has no reason and no successor pointer.
     #[test]
-    fn a_superseded_release_advises_the_buyer_rather_than_alarming_them() {
+    fn a_deprecated_release_advises_the_buyer_rather_than_alarming_them() {
         use crate::attest::{Attestation, Authority, RecordStatus};
 
         let attested = |status| Attestation {
@@ -1204,6 +1210,18 @@ mod tests {
             "the licence being unaffected is the half that keeps this advice rather than a \
              warning: {advisory}"
         );
+        for promise in [
+            "later release",
+            "newer release",
+            "newer version",
+            "updated copy",
+        ] {
+            assert!(
+                !advisory.to_lowercase().contains(promise),
+                "the record carries no successor pointer, so the advisory must not send the \
+                 buyer after one: {advisory}"
+            );
+        }
         assert!(
             purchase_advisory(&Attestation {
                 contract: "Rub3Access".to_string(),
