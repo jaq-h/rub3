@@ -252,7 +252,7 @@ contract Rub3CodeRegistry is Ownable2Step {
     ///         This returns the whole set, which is what a watcher or an indexer
     ///         wants and what no caller should use on a path with a deadline: the
     ///         set only grows, and the owner key decides how fast. A verifier
-    ///         with money on the line reads {offsetTableWindow} instead.
+    ///         with money on the line reads {latestOffsetTables} instead.
     function offsetTables() external view returns (ByteRange[][] memory) {
         return _offsetTables;
     }
@@ -271,6 +271,11 @@ contract Rub3CodeRegistry is Ownable2Step {
     ///         find out how many exist: a `start` past the end returns nothing
     ///         and a `count` past the end returns what is left. {offsetTableCount}
     ///         is there for a reader that wants the total anyway.
+    ///
+    ///         This walks the set from an arbitrary point in first-use order,
+    ///         which is what an indexer backfilling wants. A verifier on a
+    ///         purchase path wants the newest layouts instead and reads
+    ///         {latestOffsetTables}.
     function offsetTableWindow(uint256 start, uint256 count)
         external
         view
@@ -284,6 +289,45 @@ contract Rub3CodeRegistry is Ownable2Step {
         window = new ByteRange[][](taken);
         for (uint256 i = 0; i < taken; i++) {
             window[i] = _offsetTables[start + i];
+        }
+    }
+
+    /// @notice At most `count` offset tables, **newest first**: the most
+    ///         recently interned layout is element zero.
+    ///
+    ///         The read a purchase path makes, and the end of the set it has to
+    ///         be. A verifier only consults this registry when its own pinned
+    ///         table missed, and a pinned-table miss is by definition about code
+    ///         *newer* than the binary asking. A verifier that can afford `n`
+    ///         candidates and spends them on the oldest `n` therefore protects
+    ///         the wrong end: once an `n+1`th layout is interned, every release
+    ///         published under it becomes unreadable to every fielded binary
+    ///         carrying that bound, while the very first releases stay readable
+    ///         forever. That would blind fielded binaries to exactly the new
+    ///         releases the registry exists to vouch for.
+    ///
+    ///         Newest first for the same reason: the likeliest answer is tried
+    ///         with the fewest lookups, and a bound applied to this answer keeps
+    ///         the newest layouts rather than dropping them.
+    ///
+    ///         Reachability and latency, never correctness: a verifier reading
+    ///         the wrong end, or the whole set, could only ever miss a record or
+    ///         be slow, and refusing a release nobody could look up is what a
+    ///         verifier without any registry at all already does.
+    ///
+    ///         Clamped, so one call is enough: a `count` past the end returns
+    ///         every table there is, and no reader needs {offsetTableCount}
+    ///         first to avoid a revert.
+    function latestOffsetTables(uint256 count)
+        external
+        view
+        returns (ByteRange[][] memory window)
+    {
+        uint256 total = _offsetTables.length;
+        uint256 taken = count < total ? count : total;
+        window = new ByteRange[][](taken);
+        for (uint256 i = 0; i < taken; i++) {
+            window[i] = _offsetTables[total - 1 - i];
         }
     }
 

@@ -320,7 +320,7 @@ fn code_registry_answers_the_wrapper_over_a_real_chain_e2e() {
 
     let tables = chain
         .offset_tables(registry, CANDIDATE_LIMIT)
-        .expect("the registry answers offsetTableWindow()");
+        .expect("the registry answers latestOffsetTables()");
     assert_eq!(tables.len(), 1, "one release, one distinct table");
     assert_eq!(
         tables[0], licence_entry.immutable_ranges,
@@ -482,14 +482,16 @@ fn code_registry_answers_the_wrapper_over_a_real_chain_e2e() {
         }
     }
 
-    // ── The bootstrap read is bounded, against a real deploy ─────────────────
+    // ── The bootstrap read is bounded and newest-first, against a real deploy ─
     //
-    // The wrapper reads a window rather than the whole published set, because
-    // how many tables exist is the registry owner key's to choose and the read
-    // sits on the path that spends money. `offsetTableWindow` is a second ABI
-    // mirror, and a drifted one decodes garbage: only a real deploy can say.
-    // Latency only - reading the whole set was never able to produce a wrong
-    // verdict, just a slow one.
+    // The wrapper reads a bounded window of the newest layouts rather than the
+    // whole published set: how many tables exist is the registry owner key's to
+    // choose, the read sits on the path that spends money, and a registry is
+    // consulted only about code newer than the binary asking, so the old end is
+    // the end to give up. `latestOffsetTables` is a second ABI mirror, and a
+    // drifted one decodes garbage: only a real deploy can say. Reachability and
+    // latency only - neither the size nor the end of this read was ever able to
+    // produce a wrong verdict.
     //
     // Last in the test, so everything above ran against the single table one
     // release publishes.
@@ -516,16 +518,20 @@ fn code_registry_answers_the_wrapper_over_a_real_chain_e2e() {
     assert_eq!(
         bounded.len(),
         2,
-        "the registry holds more tables than this read asked for, and a window          returns the bound rather than the set"
+        "the registry holds more tables than this read asked for, and a window \
+         returns the bound rather than the set"
     );
     assert_eq!(
-        bounded[0], licence_entry.immutable_ranges,
-        "a window starts at the first table published, in publication order"
+        bounded[0],
+        distinct_table(extra - 1),
+        "the budget is spent on the newest layouts, because a registry is only \
+         ever asked about code newer than the binary asking"
     );
     assert_eq!(
         bounded[1],
-        distinct_table(0),
-        "the ranges inside a window must survive the ABI mirror too"
+        distinct_table(extra - 2),
+        "newest first, and the ranges inside a window must survive the ABI \
+         mirror too"
     );
 
     let clamped = chain
@@ -535,5 +541,9 @@ fn code_registry_answers_the_wrapper_over_a_real_chain_e2e() {
         clamped.len(),
         1 + extra,
         "a window past the end is clamped, so a reader needs no count call first"
+    );
+    assert_eq!(
+        clamped[extra], licence_entry.immutable_ranges,
+        "the oldest table is last, so it is the first thing a bound gives up"
     );
 }

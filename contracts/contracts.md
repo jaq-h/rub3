@@ -754,11 +754,16 @@ cast send <CODE_REGISTRY> "deprecate(bytes32,string)" \
 
 Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. The registry breaks that circle by publishing the *distinct* tables its releases use - one today, shared by `Rub3Access` and `Rub3Subscription` - so a verifier fetches the short candidate list once, hashes under each, and looks each result up.
 
-**On a purchase path, read a window rather than the set.** How many tables exist is the owner key's to choose, and the append-only bound on that key covers what it can publish, not how long a buyer waits for it. `offsetTableWindow(start, count)` returns at most `count` tables from `start`, clamped, so a verifier asks for the number of candidates it is willing to try and never pays to transfer or decode more; each surviving candidate then costs its own `record` round trip, so hold the same bound over the loop as well - a node need not honour the window it was asked for. The wrapper reads `offsetTableWindow(0, attest::MAX_CANDIDATE_OFFSET_TABLES)` and caps the lookups at the same number. This is latency and nothing else: reading the whole set could only ever be slow, never wrong. `offsetTables()` returns everything and is for a watcher or an indexer with no deadline.
+**On a purchase path, read a bounded window of the newest tables.** How many tables exist is the owner key's to choose, and the append-only bound on that key covers what it can publish, not how long a buyer waits for it. `latestOffsetTables(count)` returns at most `count` tables newest-first, clamped, so a verifier asks for the number of candidates it is willing to try and never pays to transfer or decode more; each surviving candidate then costs its own `record` round trip, so hold the same bound over the loop as well - a node need not honour what it was asked for. The wrapper reads `latestOffsetTables(attest::MAX_CANDIDATE_OFFSET_TABLES)` and caps the lookups at the same number.
+
+**Read the newest end, not the first.** This registry is consulted only when the verifier's own pinned table missed, and a miss is by definition about code newer than that build. A budget spent on the oldest layouts would make every release published under a layout past the budget unreadable to every fielded binary, while the first releases stayed readable forever - blinding fielded binaries to the new releases the registry exists to vouch for. None of this is correctness: a table never read is a release refused as unknown, which is what a verifier with no registry already does, so what is at stake is reachability and latency.
+
+`offsetTableWindow(start, count)` walks the set from an arbitrary point in first-use order, for an indexer backfilling, and `offsetTables()` returns everything for a watcher with no deadline.
 
 ```bash
-cast call <CODE_REGISTRY> "offsetTableWindow(uint256,uint256)((uint32,uint32)[][])" 0 16 --rpc-url $RPC
+cast call <CODE_REGISTRY> "latestOffsetTables(uint256)((uint32,uint32)[][])" 16 --rpc-url $RPC
 cast call <CODE_REGISTRY> "offsetTableCount()(uint256)" --rpc-url $RPC
+cast call <CODE_REGISTRY> "offsetTableWindow(uint256,uint256)((uint32,uint32)[][])" 0 16 --rpc-url $RPC
 cast call <CODE_REGISTRY> "offsetTables()((uint32,uint32)[][])" --rpc-url $RPC   # the whole set
 cast call <CODE_REGISTRY> "record(bytes32)((uint8,uint8,string,string,bytes32,string,uint64,(uint32,uint32)[]))" \
   "0x$MCH" --rpc-url $RPC

@@ -280,6 +280,12 @@ contract Rub3CodeRegistryTest is Test {
                 bytes4(keccak256("offsetTableWindow(uint256,uint256)"))
             )
         );
+        assertTrue(
+            _bytecodeHasSelector(
+                address(registry),
+                bytes4(keccak256("latestOffsetTables(uint256)"))
+            )
+        );
         assertFalse(
             _bytecodeHasSelector(address(registry), bytes4(keccak256("thisIsNotAFunction()")))
         );
@@ -525,6 +531,59 @@ contract Rub3CodeRegistryTest is Test {
             2,
             "start + count must not be computed, so the largest count cannot overflow"
         );
+    }
+
+    /// The read a purchase path makes, and the end of the set it has to be. A
+    /// registry is consulted only when the reader's own pinned table missed, and
+    /// a miss is by definition about code *newer* than that build, so a fixed
+    /// budget of candidates spent on the oldest layouts would leave every
+    /// release published under a later layout unreadable to every fielded binary
+    /// while the first releases stayed readable forever.
+    ///
+    /// Published here is four times the sixteen the wrapper reads.
+    function test_latestOffsetTables_readsTheNewestEndOfALargerSet() public {
+        uint256 published = 64;
+        _publishDistinctTables(published);
+        assertEq(registry.offsetTableCount(), published, "each table is distinct");
+
+        Rub3CodeRegistry.ByteRange[][] memory window = registry.latestOffsetTables(16);
+        assertEq(window.length, 16, "a bounded read returns the bound, not the set");
+
+        // Newest first: element zero is the last table interned, so the budget
+        // lands on the layouts a release published after a binary was packed
+        // would use.
+        for (uint256 i = 0; i < window.length; i++) {
+            assertEq(window[i].length, 1);
+            assertEq(window[i][0].start, uint32(64 + (published - 1 - i) * 64));
+            assertEq(window[i][0].length, 32);
+        }
+
+        // And the layouts it does not reach are the oldest, which is the trade
+        // being made on purpose.
+        assertEq(
+            registry.offsetTables()[0][0].start,
+            uint32(64),
+            "the full set still starts at the first table ever interned"
+        );
+    }
+
+    /// Clamped, so one call is enough on a path that cannot afford a count call
+    /// first, and no argument a caller can pass makes it revert.
+    function test_latestOffsetTables_clampsRatherThanReverting() public {
+        assertEq(registry.latestOffsetTables(16).length, 0, "nothing published yet");
+
+        _publishDistinctTables(3);
+        assertEq(registry.latestOffsetTables(16).length, 3, "a count past the end is clamped");
+        assertEq(registry.latestOffsetTables(0).length, 0, "a zero window asks for nothing");
+        assertEq(
+            registry.latestOffsetTables(type(uint256).max).length,
+            3,
+            "the largest count a caller can pass is still just the whole set"
+        );
+
+        Rub3CodeRegistry.ByteRange[][] memory one = registry.latestOffsetTables(1);
+        assertEq(one.length, 1);
+        assertEq(one[0][0].start, uint32(64 + 2 * 64), "one table means the newest one");
     }
 
     function test_offsetTables_emitOnFirstUseOnly() public {

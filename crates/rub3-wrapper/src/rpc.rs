@@ -829,7 +829,7 @@ sol! {
         }
 
         function record(bytes32 maskedCodeHash) external view returns (Release memory);
-        function offsetTableWindow(uint256 start, uint256 count)
+        function latestOffsetTables(uint256 count)
             external
             view
             returns (ByteRange[][] memory);
@@ -837,19 +837,25 @@ sol! {
 }
 
 /// Reads up to `limit` of the distinct immutable-offset tables the code registry
-/// publishes.
+/// publishes, newest first.
 ///
 /// The bootstrap for a masked-hash lookup: computing the hash needs a table, and
 /// finding the record needs the hash, so the candidate tables are fetched first
 /// in one call. Today the registry holds exactly one, shared by both licence
 /// templates.
 ///
-/// The registry's own `offsetTableWindow` does the bounding, so the response this
-/// pays to transfer and decode is capped by the caller's `limit` rather than by
-/// how many tables the registry's owner key has published. `limit` is clamped by
-/// the contract, so asking for more than exists returns what exists. This is a
-/// latency bound only: reading the whole set could only ever be slow, never
-/// wrong.
+/// The registry's own `latestOffsetTables` does the bounding, so the response
+/// this pays to transfer and decode is capped by the caller's `limit` rather
+/// than by how many tables the registry's owner key has published. `limit` is
+/// clamped by the contract, so asking for more than exists returns what exists.
+///
+/// **Newest first, because a registry is only ever consulted about code newer
+/// than this binary.** A lookup happens on a pinned-table miss, so spending a
+/// fixed budget of candidates on the oldest layouts would make every release
+/// published under a layout past that budget unreadable to this build while the
+/// first releases stayed readable forever. This is reachability and latency
+/// only: reading the wrong end, or the whole set, could never produce a wrong
+/// verdict.
 pub fn code_registry_offset_tables(
     rpc_url: &str,
     registry: Address,
@@ -859,7 +865,7 @@ pub fn code_registry_offset_tables(
         let provider = build_provider(rpc_url)?;
         let instance = IRub3CodeRegistry::new(registry, provider);
         let tables = instance
-            .offsetTableWindow(U256::ZERO, U256::from(limit))
+            .latestOffsetTables(U256::from(limit))
             .call()
             .await
             .map_err(RpcError::contract)?;
