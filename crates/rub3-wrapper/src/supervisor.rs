@@ -41,13 +41,6 @@ impl Launch {
             session: Some(session),
         }
     }
-
-    /// The session the launch carries, if any. Read by the SDK channel and by
-    /// the tests that assert which door served a launch.
-    #[cfg(feature = "session")]
-    pub fn session(&self) -> Option<&crate::session::Session> {
-        self.session.as_ref()
-    }
 }
 
 pub fn run(binary: &Path, args: &[String], launch: &Launch) -> i32 {
@@ -191,12 +184,20 @@ impl Launch {
     }
 }
 
-/// Why a launch has no session to report. Two different facts, and an
-/// application developer reading the panic needs to know which one they hit.
+/// Why a launch has no session to report. Three different facts, and an
+/// application developer reading the panic needs to know which one they hit:
+/// a build with no session model, a build that has one but can never mint a
+/// session because sessions are gated on `cooldown`, and a launch that could
+/// have carried one and did not.
 #[cfg(all(feature = "sdk", not(feature = "session")))]
 const NO_SESSION_REASON: &str =
     "this wrapper was built without the session capability (tier-0), so it has no session";
-#[cfg(all(feature = "sdk", feature = "session"))]
+#[cfg(all(feature = "sdk", feature = "session", not(feature = "cooldown")))]
+const NO_SESSION_REASON: &str =
+    "this wrapper was built without the cooldown capability (below tier-3), so every launch is \
+     served from the legacy licence proof, which carries no identity model and therefore no \
+     user_id";
+#[cfg(all(feature = "sdk", feature = "session", feature = "cooldown"))]
 const NO_SESSION_REASON: &str =
     "this launch was served from the legacy licence proof, which carries no identity model \
      and therefore no user_id";

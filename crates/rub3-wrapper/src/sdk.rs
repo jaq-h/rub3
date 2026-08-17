@@ -282,21 +282,31 @@ mod platform {
         }
     }
 
+    /// Distinguishes two endpoints served by one process. `getpid` separates
+    /// processes and the clock reading separates a reused pid from the endpoint
+    /// a previous holder of it leaked, but neither separates two [`serve`] calls
+    /// in the same process and the same clock tick, and `DirBuilder::create`
+    /// fails on a collision rather than retrying.
+    static ENDPOINT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     /// Creates the 0700 directory the socket lives in.
     ///
     /// The directory's mode is the access control, not the name: it is what
     /// stops another user on the machine connecting to the channel or replacing
     /// the socket with one of their own. The name only has to be unique per
-    /// launch, which `getpid` plus a nanosecond clock reading covers: two
-    /// wrappers can run at once, and the same pid can be reused after one exits.
+    /// call, which `getpid` plus a nanosecond clock reading plus
+    /// [`ENDPOINT_SEQ`] covers: two wrappers can run at once, the same pid can
+    /// be reused after one exits, and one process can serve more than one
+    /// channel.
     fn endpoint_dir() -> io::Result<PathBuf> {
         let name = format!(
-            "rub3-{}-{}",
+            "rub3-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            ENDPOINT_SEQ.fetch_add(1, Ordering::Relaxed)
         );
 
         let mut base = std::env::temp_dir();
@@ -757,6 +767,34 @@ mod tests {
             !std::path::Path::new(&address).exists(),
             "the endpoint should be removed with the channel"
         );
+    }
+
+    /// One process serving several channels at once, each on its own endpoint.
+    /// An endpoint name unique only per *process* collides here rather than on
+    /// a second launch, and the create fails rather than retrying.
+    #[cfg(unix)]
+    #[test]
+    fn several_channels_served_from_one_process_get_distinct_live_endpoints() {
+        let channels: Vec<Channel> = (0..8)
+            .map(|i| serve(Offer::None(format!("channel {i}"))).expect("every channel starts"))
+            .collect();
+
+        let mut addresses: Vec<_> = channels
+            .iter()
+            .map(|c| c.address().to_os_string())
+            .collect();
+        addresses.sort();
+        addresses.dedup();
+        assert_eq!(
+            addresses.len(),
+            channels.len(),
+            "two channels were published at the same address"
+        );
+
+        for channel in &channels {
+            std::os::unix::net::UnixStream::connect(channel.address())
+                .unwrap_or_else(|e| panic!("{:?} should be listening: {e}", channel.address()));
+        }
     }
 
     /// The keep-alive contract `serve_connection` documents, over a real socket:

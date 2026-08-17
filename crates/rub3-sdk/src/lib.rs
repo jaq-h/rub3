@@ -114,8 +114,10 @@ pub enum Error {
     /// wrapper, or build the application against the matching SDK.
     ProtocolVersion { expected: u32, found: u32 },
     /// The wrapper is alive and has no session to report. A tier-0 build has no
-    /// session model at all, and a launch served from the legacy licence proof
-    /// carries no identity model and therefore no `user_id`.
+    /// session model at all; a wrapper below tier-3 has one but no `cooldown`
+    /// capability, which is what mints a session, so every launch there comes
+    /// from the legacy licence proof; and that proof predates the identity
+    /// model, so it carries no `user_id`.
     NoSession(String),
     /// The wrapper understood the request and refused or failed it.
     Wrapper(String),
@@ -227,8 +229,9 @@ fn panic_message(e: &Error) -> String {
              rub3 protocol versions; repack the wrapper"
         }
         Error::NoSession(_) => {
-            "this wrapper build launched without a session it can report; \
-             a session needs a tier-1-or-higher wrapper built with the `sdk` feature"
+            "this wrapper build launched without a session it can report; a session needs the \
+             `cooldown` capability - tier-3 or higher, or the headless front door - since \
+             below that every launch is served from the legacy licence proof"
         }
         Error::Transport(_) | Error::Protocol(_) | Error::Wrapper(_) => {
             "the wrapper is reachable but the exchange failed; \

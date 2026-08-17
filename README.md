@@ -550,9 +550,27 @@ reads it.
 to see what the channel reports, or directly to see the documented failure:
 
 ```bash
-cargo run -p rub3-wrapper --no-default-features --features tier-3,sdk \
-    --bin rub3-wrapper -- --binary ./target/debug/rub3-sdk-probe -- all
+# Both binaries. The probe is its own target, gated on `sdk`, so a
+# `--bin rub3-wrapper` run does not produce it; and a tier bundle names no front
+# door, so `tier-3,sdk` alone fails with NoInteractiveFrontDoor before the
+# channel is ever served.
+cargo build -p rub3-wrapper --no-default-features --features tier-3,webview,sdk
+
+# Directly, with no wrapper: the documented failure, exit 101.
+./target/debug/rub3-sdk-probe all
+
+# Under a wrapper. A launch needs a licence on disk or the wrapper opens its
+# activation window first, so seed the throwaway proof (needs Foundry's `cast`).
+./scripts/seed-license.sh
+RUB3_LICENSE_DIR=/tmp/rub3-test \
+    ./target/debug/rub3-wrapper --binary ./target/debug/rub3-sdk-probe -- try
 ```
+
+That last one prints `heartbeat=ok` and then `error_kind=no_session`: the seeded
+record is a legacy licence proof, which predates the identity model and carries no
+`user_id`. A session to report needs the `cooldown` capability and a launch that
+actually activated one - `tests/sdk_e2e.rs` covers that case end to end, and
+[testing.md](testing.md) says how it seeds one.
 
 Windows support is written and type-checked but has never been executed - see
 implementation.md §3.5.
