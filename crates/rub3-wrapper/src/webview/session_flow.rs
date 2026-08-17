@@ -237,6 +237,22 @@ impl Wallet {
         Self { key, address }
     }
 
+    /// The same address in the EIP-55 checksummed spelling a real wallet hands
+    /// the page.
+    ///
+    /// `license::public_key_to_address` derives the all-lowercase form, and
+    /// that is the form the wrapper normalises to, so a flow driven entirely
+    /// in lowercase cannot tell a screen that echoes the string it was posted
+    /// from one that echoes the string the preimage commits to. Posting this
+    /// spelling instead is what makes that difference observable.
+    #[cfg_attr(not(feature = "cooldown"), allow(dead_code))]
+    fn checksummed(&self) -> String {
+        self.address
+            .parse::<alloy::primitives::Address>()
+            .expect("a derived address should parse")
+            .to_checksum(None)
+    }
+
     /// `personal_sign` over a 32-byte preimage given as 0x-hex, returning the
     /// `r || s || v` hex a wallet returns. Same shape `session::verify_local`
     /// and `license::verify` both expect.

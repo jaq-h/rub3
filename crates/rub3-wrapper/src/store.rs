@@ -95,9 +95,28 @@ mod tests {
 
     impl LicenseDir {
         fn set_up() -> Self {
+            Self::set_up_in(None)
+        }
+
+        /// The same guard, pointed at a path inside the tmpdir that does not
+        /// exist yet.
+        ///
+        /// `tempfile::tempdir` creates its directory, so a store pointed
+        /// straight at it never exercises `save_proof`'s `create_dir_all` -
+        /// which is the whole subject of one of the tests below, and the first
+        /// thing a stock build does on a machine that has never run it.
+        fn set_up_missing() -> Self {
+            Self::set_up_in(Some("rub3/licenses"))
+        }
+
+        fn set_up_in(sub: Option<&str>) -> Self {
             let guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let dir = tempfile::tempdir().expect("tempdir");
-            std::env::set_var("RUB3_LICENSE_DIR", dir.path());
+            let base = match sub {
+                Some(sub) => dir.path().join(sub),
+                None => dir.path().to_path_buf(),
+            };
+            std::env::set_var("RUB3_LICENSE_DIR", base);
             Self {
                 _guard: guard,
                 _dir: dir,
@@ -153,17 +172,19 @@ mod tests {
 
     #[test]
     fn save_creates_missing_directories() {
-        let _license_dir = LicenseDir::set_up();
-        // Use a deeply nested app_id to ensure intermediate dirs are created.
+        let _license_dir = LicenseDir::set_up_missing();
         let app_id = "com.rub3.store_test_mkdir";
         let proof = test_proof(app_id);
 
+        let path = proof_path(app_id).unwrap();
+        assert!(
+            !path.parent().unwrap().exists(),
+            "the store directory has to be missing, or this proves nothing",
+        );
+
         save_proof(app_id, &proof).expect("save failed");
 
-        assert!(
-            proof_path(app_id).unwrap().exists(),
-            "proof file should exist after save",
-        );
+        assert!(path.exists(), "proof file should exist after save");
     }
 
     #[test]

@@ -441,10 +441,13 @@ impl Holder {
     }
 
     /// Posts `connect` and returns the cooldown screen's payload.
+    ///
+    /// Connects with the checksummed spelling, which is what a wallet hands
+    /// the page, and what every screen downstream of here has to cope with.
     fn connect(&self, window: &Window) -> serde_json::Value {
         window.post(serde_json::json!({
             "type": "connect",
-            "address": self.wallet.address,
+            "address": self.wallet.checksummed(),
         }));
         let payload = window.expect_only("onShowCooldown");
         assert_eq!(payload["tokenId"], self.token_id);
@@ -453,12 +456,15 @@ impl Holder {
 
     /// Posts `activate_tx_sent` and returns the payload the background poller
     /// produces once the transaction has landed.
+    ///
+    /// The page carries the address the cooldown screen showed it, so this is
+    /// still the checksummed spelling; normalising it is the wrapper's job.
     fn confirm(&self, window: &Window, tx_hash: &str) -> serde_json::Value {
         window.post(serde_json::json!({
             "type":          "activate_tx_sent",
             "tx_hash":       tx_hash,
             "token_id":      self.token_id,
-            "owner_address": self.wallet.address,
+            "owner_address": self.wallet.checksummed(),
         }));
         window.wait_for("onProcessing");
         window.wait_for("onTxConfirmed")
@@ -547,8 +553,16 @@ fn a_connected_wallet_activates_signs_and_the_session_survives_a_restart_e2e() {
         0,
         "nothing should have activated yet",
     );
+    let posted_address = holder.wallet.checksummed();
+    assert_ne!(
+        posted_address, holder.wallet.address,
+        "the flow has to be driven with a spelling the wrapper must normalise",
+    );
     let cooldown = holder.connect(&window);
-    assert_eq!(cooldown["ownerAddress"], holder.wallet.address);
+    assert_eq!(
+        cooldown["ownerAddress"], posted_address,
+        "the cooldown screen hands back the address it was given",
+    );
     assert_eq!(cooldown["contractAddress"], holder.contract);
     assert_eq!(
         cooldown["ready"], true,
@@ -585,10 +599,15 @@ fn a_connected_wallet_activates_signs_and_the_session_survives_a_restart_e2e() {
     );
     assert_eq!(confirmed["identity"], "access");
     assert_eq!(
-        confirmed["ownerAddress"],
-        holder.wallet.address.to_lowercase(),
+        confirmed["ownerAddress"], holder.wallet.address,
         "the preimage commits to the normalised address, so that is the value \
          JS has to be handed back",
+    );
+    assert_ne!(
+        confirmed["ownerAddress"],
+        serde_json::Value::from(posted_address.as_str()),
+        "echoing the page's own spelling back would sign one string and hand \
+         JS another, and the session would fail to verify",
     );
     assert_eq!(
         confirmed["blockHash"],
@@ -681,12 +700,19 @@ fn a_second_activation_inside_the_cooldown_is_refused_and_the_window_says_how_lo
     );
 
     // ── The window reports it ────────────────────────────────────────────────
-    // The cached session is removed first so a relaunch is forced back
-    // on-chain instead of taking the fast path. That is the "session lost
-    // inside the cooldown" case, the only one in which a person meets this
-    // screen at all.
+    // A person only ever meets this screen with the cached session gone:
+    // while it is on disk the launch path is served from it and opens no
+    // window at all, inside the cooldown or out of it.
+    assert!(
+        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_some(),
+        "the session persisted above must still be served from cache",
+    );
     std::fs::remove_file(crate::session_store::session_path(APP_ID, holder.token_id).unwrap())
         .expect("remove the cached session");
+    assert!(
+        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_none(),
+        "with the session gone the launch path has to open the window instead",
+    );
 
     let payload = holder.connect(&holder.window(SESSION_TTL_SECS));
     assert_eq!(
