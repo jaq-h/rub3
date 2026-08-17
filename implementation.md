@@ -151,7 +151,7 @@ surfaces it to the user, and polls the receipt they paste back.
 - `forge test` (contracts/): 33 pass
 - Anvil-gated e2e (`session_verify_onchain_e2e`): passes with the new purchase-path assertions
 
-### 1.8 - On-chain cooldown + session model (tier 3) `[partial]`
+### 1.8 - On-chain cooldown + session model (tier 3) `[complete]`
 
 Replaces the legacy `LicenseProof` flow with a full session model backed by an on-chain cooldown. An NFT holder can otherwise run a signing oracle to distribute fresh sessions to non-holders; a contract-enforced `activate()` cooldown rate-limits how many sessions a single token can mint. The wrapper reads cooldown state and encodes calldata - it never sends txs or holds keys.
 
@@ -201,7 +201,23 @@ function cooldownReady(uint256 tokenId)
 - All five tier bundles (`tier-0`/`1`/`2`/`3`/`4`) compile clean
 - Phase B `rpc` additions covered by pure tests: selector + calldata layout for `encode_activate_calldata(uint256)`, invalid-hash transport errors for `get_tx_receipt` and `get_block_number`
 - Phase C anvil-gated integration test (`tests/session_onchain_e2e.rs`, `#[ignore]`): spawns `anvil`, deploys `Rub3Access` via `forge create`, runs `purchase(address)` + `activate(uint256)` via `cast send`, extracts the real block hash, and exercises `verify_onchain` on (a) the happy path, (b) a tampered contract field, (c) a tampered block hash, and (d) a non-existent tx hash. Gracefully skips when the Foundry toolchain is unavailable. Run with `cargo test -p rub3-wrapper --no-default-features --features tier-3 -- --ignored session_verify_onchain_e2e`
-- Still to do separately from Phase C: end-to-end against anvil of the full connect → tx → sign → persistence-across-restarts webview flow (that belongs in §1.7's manual testing), cooldown enforcement path, short-TTL expiry re-activation, zero-contract legacy backward-compat test
+- Everything Phase C left open is now covered by Phase D below
+
+**Phase D - the deferred regression net `[complete]`**
+
+This is what the section was `[partial]` for. Phases A, B and C were each complete on their own terms; what was outstanding was that four behaviours the flow depends on had no test that would go red if they broke. They do now, so the section is complete.
+
+The four behaviours Phase C listed as "still to do" have named tests in `crates/rub3-wrapper/src/webview/session_flow.rs`. They live there rather than under `tests/` because the seam they drive is `webview::IpcState` - the window's IPC handler - which is private to `src/webview.rs` and out of reach of an integration test binary. `activation::persist_activation` was split out of `interactive_slow_path` in the same pass, so a test writes the record through the production call instead of a copy of it, and `try_session_fast_path` became `pub(crate)` so the expiry test asserts against the launch path itself.
+
+- The full session flow, connect → activate tx → session signing → the session surviving a restart: `a_connected_wallet_activates_signs_and_the_session_survives_a_restart_e2e`
+- Cooldown enforcement: `a_second_activation_inside_the_cooldown_is_refused_and_the_window_says_how_long_e2e`
+- Short-TTL expiry re-activation: `an_expired_session_is_refused_and_a_fresh_activation_replaces_it_e2e`
+- Zero-contract legacy `LicenseProof` backward compatibility: `a_zero_contract_build_still_issues_and_serves_a_legacy_licence_proof`
+- Per-test inventory: `testing.md` → "Webview session flow (`src/webview/session_flow.rs`)"
+
+The first three are anvil-gated and need `tier-3,webview`; the fourth is gated on neither anvil nor `cooldown`, so it runs in the ordinary matrix from `tier-2,webview` up.
+
+**The first behaviour is covered only at the `webview::IpcState` seam**, and the claim goes no further: connect → activate tx → session signing → persistence across restarts is driven by posting the IPC messages the page would post, not by a real browser or a genuine end-to-end webview drive. The browser layer itself - the `wry`/`tao` view and `assets/activation.html` - is untouched by these tests and remains §1.7's manual testing. Everything on the Rust side of that seam is covered.
 
 ### 1.9 - Tier scaffold + feature flags `[complete]`
 

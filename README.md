@@ -45,6 +45,8 @@ rub3/
 │       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner, chainId, getCode) via alloy
 │       │   ├── attest.rs             # Pre-purchase contract attestation: masked code hash vs the pinned canonical table (feature `onchain-read`, tier 2+)
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC message handling (feature `webview`)
+│       │   ├── webview/session_flow.rs # Test-only: the §1.8 activation flows driven at the IPC seam, three of them anvil-gated (`#[cfg(test)]`, never shipped)
+│       │   ├── webview/session_flow/onchain.rs # Test-only: the anvil harness behind those three (spawn/deploy/mine helpers, port 8551)
 │       │   ├── supervisor.rs         # Child process lifecycle, SIGTERM forwarding, `RUB3_AGENT_*` stripped from the child
 │       │   ├── session.rs            # Session schema, message hash, verify_local, is_expired
 │       │   ├── session_store.rs      # Session persistence, load_latest_session
@@ -87,6 +89,7 @@ rub3/
 ├── licenses/
 │   └── com.rub3.example.json         # Example license proof with valid signature
 ├── scripts/
+│   ├── assert-e2e-ran.sh             # CI guard: an anvil suite that ran nothing is not green
 │   ├── canonical-bytecode-hashes.sh  # check/update/print the canonical fingerprints
 │   ├── check-deployments.sh          # Schema gate for contracts/deployments.json (CI runs it)
 │   ├── seed-license.sh               # Generate a signed license proof for local testing

@@ -27,17 +27,19 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
 # tier-3 + the headless (agent) front door: 169 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
 
-# tier-3 + the webview (human) front door: 113 lib tests
+# tier-3 + the webview (human) front door: 117 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,webview --lib
 ```
 
 For reference, `--lib` counts per bundle: `tier-0` 51, `tier-1` 81, `tier-2` 96,
-`tier-3`/`tier-4` 106, `tier-2,webview` 96, `tier-3,webview` 113,
-`tier-3,headless` 169. Each total includes the one `#[ignore]`d network test,
-which a plain run skips, so a bundle reports one fewer as passed. `tier-1` and
-`tier-2` diverge because `attest` needs `onchain-read`. `tier-2,webview` and
-`tier-3,webview` diverge because the window's purchase screen, and the code
-attestation guarding it, need `onchain-write`.
+`tier-3`/`tier-4` 106, `tier-2,webview` 97, `tier-3,webview` 117,
+`tier-3,headless` 169. Each total includes `#[ignore]`d tests, which a plain run
+skips and reports as ignored rather than passed: one network test in every
+bundle, plus the three anvil-gated webview session-flow tests under
+`tier-3,webview`. `tier-1` and `tier-2` diverge because `attest` needs
+`onchain-read`. `tier-2,webview` and `tier-3,webview` diverge because the
+window's purchase screen, the code attestation guarding it, and the tier-3
+session flow all need `onchain-write` or `cooldown`.
 
 Network-dependent tests (requires internet). `--ignored` runs *only* the ignored tests, so this replaces the suite above rather than adding to it:
 
@@ -99,6 +101,14 @@ Each test provisions a valid license proof in a temp directory via `RUB3_LICENSE
 
 - `wrapper_forwards_sigterm` - spawn wrapper with `/bin/sleep`, send SIGTERM, assert clean exit
 
+**The three anvil-gated suites below are count-checked in CI.** Each `onchain-e2e`
+step pipes cargo's output through `scripts/assert-e2e-ran.sh`, which fails the
+step unless exactly the number of tests that step's `EXPECTED_TESTS` names
+passed: cargo exits 0 both for a filter that selects nothing and for a suite
+that self-skips on a missing toolchain, so neither the exit code nor a green
+step means anything on its own. Adding or removing a test in any of the three
+means updating that count in `.github/workflows/ci.yml`.
+
 ### Tier-3 on-chain session E2E (`tests/session_onchain_e2e.rs`)
 
 Exercises `session::verify_onchain` against a live EVM node. Requires the Foundry toolchain (`anvil`, `forge`, `cast`) on PATH; gracefully prints `SKIP:` and returns when any of those are missing. Marked `#[ignore]` so default `cargo test` runs skip it.
@@ -114,6 +124,43 @@ Run with:
 ```bash
 cargo test -p rub3-wrapper --no-default-features --features tier-3 \
     -- --ignored session_verify_onchain_e2e
+```
+
+### Webview session flow (`src/webview/session_flow.rs`)
+
+The human front door's §1.8 flows: connect, activate, sign, persist, restart. Lib
+tests rather than an integration suite, because the seam they drive -
+`webview::IpcState`, the activation window's IPC handler - is private to
+`src/webview.rs`. A `Window` driver wires that handler to channels instead of a `wry`
+view, so a test posts the JSON the page posts and reads back the JS the page
+would have run.
+
+**What this does not cover**, and is still §1.7's manual testing: the `wry`/`tao`
+layer itself, and `assets/activation.html` - the JS that renders each screen,
+carries `pendingSessionCtx` across the cooldown → confirm → sign hand-offs, and
+posts the messages back. Everything between the two is covered.
+
+Three of the four are anvil-gated on port **8551**, so they run alongside
+`session_onchain_e2e.rs` (8547) and `headless_e2e.rs` (8549); they are
+`#[ignore]`d, print `SKIP:` and pass when Foundry is absent, and serialise
+themselves through a file-level mutex plus the crate's `ENV_LOCK`. Each seeds a
+licence with `cast` rather than buying one, so none of them depends on the local
+build reproducing `contracts/canonical-bytecode.json`.
+
+- `a_connected_wallet_activates_signs_and_the_session_survives_a_restart_e2e` - the whole flow: `onAppInfo`, `connect` → the cooldown screen, the wallet broadcasting that screen's own calldata, the poller's `onTxConfirmed` checked against the receipt's real block hash and normalised owner address, the wallet signing that preimage, `SessionSuccess` verified locally and on-chain, `activation::persist_activation`, then `activation::ensure` returning from the fast path with no window and no second `activate()`
+- `a_second_activation_inside_the_cooldown_is_refused_and_the_window_says_how_long_e2e` - the contract refuses with `CooldownActive` and does not move `lastActivationBlock`; the window reports `ready: false` with the blocks the contract is still counting, holds that two blocks out, and clears at the boundary with session id 2. Two blocks rather than one because `cooldownReady` is evaluated at the head while the transaction executes in the next block
+- `an_expired_session_is_refused_and_a_fresh_activation_replaces_it_e2e` - a two-second TTL, then `activation::try_session_fast_path` declines the lapsed session and a second pass through the flow issues a fresh one
+
+The fourth is not anvil-gated and not gated on `cooldown`, so it runs in the
+ordinary matrix under `tier-2,webview` as well:
+
+- `a_zero_contract_build_still_issues_and_serves_a_legacy_licence_proof` - with no contract configured the window issues a `LicenseProof`, and a later `ensure` is served from it against an RPC URL nothing answers on, which is what proves the path reads no chain
+
+Run the anvil-gated three with:
+
+```bash
+cargo test -p rub3-wrapper --no-default-features --features tier-3,webview \
+    --lib -- --ignored webview::session_flow
 ```
 
 ### Headless (agent) E2E (`tests/headless_e2e.rs`)

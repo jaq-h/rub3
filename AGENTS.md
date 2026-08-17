@@ -79,7 +79,14 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
   -- --ignored headless
 ```
 
-`--ignored` covers unrelated gates: under the default bundle it instead runs `rpc::tests::owner_of_unminted_token_returns_contract_error`, which needs live Base mainnet RPC.
+The webview front door's §1.8 flows (`src/webview/session_flow.rs`) are the same shape again on port 8551, but they are **lib tests, not an integration suite**: the seam they drive, `webview::IpcState`, is private to `src/webview.rs`, so no `tests/` binary can reach it. Select them with `--lib` plus the module path:
+
+```bash
+cargo test -p rub3-wrapper --no-default-features --features tier-3,webview \
+    --lib -- --ignored webview::session_flow
+```
+
+`--ignored` covers unrelated gates: under the default bundle it instead runs `rpc::tests::owner_of_unminted_token_returns_contract_error`, which needs live Base mainnet RPC, and the module-path filter above is what keeps that test out of the webview run.
 
 ## Where the design authority lives
 

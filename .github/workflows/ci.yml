@@ -255,15 +255,19 @@ jobs:
         run: scripts/canonical-bytecode-hashes.sh check
 
   # ---------------------------------------------------------------------------
-  # Anvil-gated on-chain E2E, both #[ignore]d suites.
+  # Anvil-gated on-chain E2E, all three #[ignore]d suites.
   # session_onchain_e2e.rs spawns a local anvil, deploys Rub3Access with
   # `forge create` from contracts/, runs purchase + activate, then asserts
   # verify_onchain accepts the good session and rejects three tampered ones.
   # headless_e2e.rs drives the agent front door end to end on a fresh key.
-  # Both need submodules (forge create compiles the contracts) and Foundry.
+  # webview::session_flow drives the human front door the same way, at the
+  # window's IPC seam.
+  # All need submodules (forge create compiles the contracts) and Foundry.
   #
   # headless_e2e runs unfiltered and without --test-threads=1: the suite
   # serialises itself in-file around the anvil port and the env vars it sets.
+  # webview::session_flow does the same, and each of the three binds its own
+  # anvil port, so nothing here depends on the steps staying sequential.
   #
   # Kept in its own job rather than folded into the tier-3 matrix job so that an
   # on-chain failure is distinguishable at a glance from a unit-test failure.
@@ -291,14 +295,53 @@ jobs:
             command -v "$bin" >/dev/null 2>&1 || { echo "::error::$bin not found on PATH"; exit 1; }
           done
 
+      # `scripts/assert-e2e-ran.sh` is what makes each of these steps mean
+      # anything: cargo exits 0 for a filter that selects no tests, and every
+      # one of these suites also exits 0 after printing `SKIP:`. Each step
+      # therefore states how many tests it expects, and a mismatch is red.
       - name: session_verify_onchain_e2e
+        env:
+          # Update when a test is added to or removed from this suite.
+          EXPECTED_TESTS: 1
         run: |
+          set -o pipefail
+          log="${RUNNER_TEMP:-/tmp}/session_onchain_e2e.log"
           cargo test -p rub3-wrapper --no-default-features --features tier-3 \
-            --test session_onchain_e2e -- --ignored --nocapture
+            --test session_onchain_e2e -- --ignored --nocapture 2>&1 | tee "$log"
+          scripts/assert-e2e-ran.sh "$log" "$EXPECTED_TESTS"
 
       # always() so a failure in the sibling suite does not hide this one.
       - name: headless_e2e
         if: always()
+        env:
+          # Update when a test is added to or removed from this suite.
+          EXPECTED_TESTS: 30
         run: |
+          set -o pipefail
+          log="${RUNNER_TEMP:-/tmp}/headless_e2e.log"
           cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
-            --test headless_e2e -- --ignored --nocapture
+            --test headless_e2e -- --ignored --nocapture 2>&1 | tee "$log"
+          scripts/assert-e2e-ran.sh "$log" "$EXPECTED_TESTS"
+
+      # The human front door's flows (implementation.md §1.8). These are lib
+      # tests rather than an integration suite because the seam they drive -
+      # the activation window's IPC handler - is private to `src/webview.rs`,
+      # so `--lib` plus a module-path filter is what selects them. The filter is
+      # load-bearing in the other direction too: `--ignored` alone would also
+      # run rpc's live-Base-mainnet test, which this job has no business
+      # depending on.
+      #
+      # tier-3,webview is the only bundle that compiles all of them - tier-2
+      # has no `cooldown`, and a bundle without `webview` has no window - and it
+      # is already a matrix entry, so nothing new is introduced here.
+      - name: webview session flow
+        if: always()
+        env:
+          # Update when a test is added to or removed from this suite.
+          EXPECTED_TESTS: 3
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP:-/tmp}/webview_session_flow.log"
+          cargo test -p rub3-wrapper --no-default-features --features tier-3,webview \
+            --lib -- --ignored webview::session_flow --nocapture 2>&1 | tee "$log"
+          scripts/assert-e2e-ran.sh "$log" "$EXPECTED_TESTS"
