@@ -20,9 +20,16 @@ pub const SDK_ADDRESS_ENV: &str = "RUB3_SDK_SOCKET";
 /// channel. A build without the `session` capability has nothing to carry, so the
 /// type is empty there rather than absent: the launch path then reads the same in
 /// every tier bundle.
+///
+/// The session is carried only when there is somewhere for it to go. The SDK
+/// channel is the sole reader - [`Launch::offer`] is the only code that ever
+/// looks at it - so without `sdk` the field would be write-only, which is a
+/// `dead_code` error under the workspace's `-D warnings` lint on the default
+/// bundle. Both constructors stay available whenever `session` is on, because
+/// the activation doors call them regardless of whether the channel is compiled.
 #[derive(Default)]
 pub struct Launch {
-    #[cfg(feature = "session")]
+    #[cfg(all(feature = "session", feature = "sdk"))]
     session: Option<crate::session::Session>,
 }
 
@@ -34,10 +41,13 @@ impl Launch {
     }
 
     /// A launch authorised by `session`, which is what the application will be
-    /// told when it asks.
+    /// told when it asks - in a build that compiled the channel to ask over.
     #[cfg(feature = "session")]
     pub fn from_session(session: crate::session::Session) -> Self {
+        #[cfg(not(feature = "sdk"))]
+        drop(session);
         Self {
+            #[cfg(feature = "sdk")]
             session: Some(session),
         }
     }
