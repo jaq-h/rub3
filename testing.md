@@ -25,19 +25,19 @@ capabilities nor the headless front door. Cargo features are additive, so
 `--no-default-features` is mandatory when selecting another bundle:
 
 ```bash
-# tier-3 (adds onchain-write + cooldown): 125 lib tests
+# tier-3 (adds onchain-write + cooldown): 126 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
 
-# tier-3 + the headless (agent) front door: 189 lib tests
+# tier-3 + the headless (agent) front door: 190 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
 
-# tier-3 + the webview (human) front door: 136 lib tests
+# tier-3 + the webview (human) front door: 138 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,webview --lib
 ```
 
-For reference, `--lib` counts per bundle: `tier-0` 51, `tier-1` 81, `tier-2` 115,
-`tier-3`/`tier-4` 125, `tier-2,webview` 116, `tier-3,webview` 136,
-`tier-3,headless` 189. Each total includes `#[ignore]`d tests, which a plain run
+For reference, `--lib` counts per bundle: `tier-0` 51, `tier-1` 81, `tier-2` 116,
+`tier-3`/`tier-4` 126, `tier-2,webview` 116, `tier-3,webview` 138,
+`tier-3,headless` 190. Each total includes `#[ignore]`d tests, which a plain run
 skips and reports as ignored rather than passed: one network test in every
 bundle, plus the three anvil-gated webview session-flow tests under
 `tier-3,webview`. `tier-1` and `tier-2` diverge because `attest` needs
