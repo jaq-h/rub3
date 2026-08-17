@@ -16,6 +16,10 @@ cargo test -p rub3-wrapper
 
 This runs all unit tests, integration tests, and license e2e tests. No external tools required - wallet generation and signing are done natively in Rust via `k256`.
 
+The workspace has a second member, the docs MCP server, whose suites are separate
+and described in [Docs MCP server](#docs-mcp-server-cratesrub3-docs-mcp) below:
+`cargo test -p rub3-docs-mcp`.
+
 The default bundle is `tier-2` + `webview`, so it compiles neither the tier-3
 capabilities nor the headless front door. Cargo features are additive, so
 `--no-default-features` is mandatory when selecting another bundle:
@@ -228,6 +232,102 @@ Shared utilities available to all integration test files:
 - `create_license_json(dir, ...)` - write a valid `LicenseProof` JSON file
 - `wrapper_bin()` - path to the compiled wrapper binary
 - `verifying_key_to_address(key)` - derive Ethereum address from public key
+
+### Docs MCP server (`crates/rub3-docs-mcp/`)
+
+The developer-facing docs server of §3.3, and the machine-legibility gate over
+the documents themselves. A separate workspace member, so it runs on its own and
+adds nothing to the wrapper's dependency path:
+
+```bash
+cargo test -p rub3-docs-mcp
+```
+
+Four suites. Their subject is not behaviour so much as *provenance*: the server
+must be unable to answer from a stored copy of anything.
+
+- **`src/` unit tests** (14) - checkout resolution and the read guard (the walk up
+  from a subdirectory, a named directory that is not a checkout refused, that
+  same refusal held through `resolve_from_env` so a stale `RUB3_REPO_ROOT` never
+  falls back to serving the compiled-in tree instead, a relative path refused for
+  trying to leave the root, and `CLAUDE.md` still readable through its symlink),
+  the Markdown parse (a `#` comment inside a shell fence not counted as a
+  heading, a section carrying its subsections and stopping at its peer,
+  resolution by anchor, and an untagged fence reporting an empty language), a
+  search that finds exactly as many hits as its limit reporting itself
+  untruncated while one more hit past the limit sets the flag, and the `cfg`
+  predicate that decides what is test scaffolding: `test`, `any(test, ..)` and
+  `all(test, ..)` are dropped from the served surface, `not(test)` and a plain
+  feature gate are not
+- **`tests/derivation.rs`** (26) - the provenance proofs. Seven of them build a
+  throwaway checkout, ask a question, edit the file the answer came from, and ask
+  again *through the same server*: a renamed function, a feature gate added to a
+  crate root, a declaration re-exported out of a private module, an edited ABI
+  entry, a selector removed from an artifact, a moved fingerprint, and a document
+  added after startup. An answer that survives its own source being changed is
+  either hardcoded or cached, and both are the defect the suite exists to catch.
+  The rest run against this repository:
+  `every_served_rust_signature_is_a_verbatim_slice_of_its_file` walks the whole
+  workspace and asserts each served signature appears byte for byte in the file
+  it is attributed to, and
+  `every_rendered_function_signature_matches_the_artifacts_own_selector_map`
+  cross-checks every rendered contract signature against `methodIdentifiers`,
+  which is how a mis-expanded tuple parameter is caught rather than shipped with
+  a plausible-looking wrong selector. A third asserts that no served signature
+  carries an attribute or a doc comment, since `syn` spans cover both and a
+  signature a caller cannot paste is only half derived. A fourth,
+  `the_wrappers_reexported_front_doors_carry_their_declarations`, holds
+  `supervisor_run` and `ensure_headless` to answering with the `pub fn` line
+  their private modules declare, at the file and line the answer names, since a
+  `pub use` statement tells an agent the name exists and nothing about how to
+  call it. A fifth, `a_second_derivation_agrees_with_the_first`, derives the
+  workspace twice and holds the second answer to the same verbatim slices as the
+  first: `rustapi::workspace` drops the spans of every earlier derivation before
+  it starts, and dropping them any later would silently start slicing the right
+  shape out of the wrong file. Three refusals are in here too, for the questions
+  where an empty answer would be read as a fact: a contract question with no
+  artifacts names `forge build`, a module name that no crate declares names the
+  modules that do exist, and an item name nothing matches names the items that
+  do, rather than returning an empty surface an agent would read as "nothing
+  public lives there". A fourth holds the shape of those refusals: a scope with
+  no public names in it must say so rather than print a colon and stop, since
+  the list is the whole reason the refusal exists. Four more hold the single
+  rule about modules that expose nothing, which are answered rather than
+  refused: such a module keeps its `//!` unfiltered and answers the same way
+  when asked for by name, only an unknown module is refused, an unfiltered
+  `rust_api` is capped at `limit` items and reports `truncated` with the capped
+  answer a prefix of the whole one, and the cap drops a crate it emptied while
+  keeping one that had nothing to cut. All of them build the shape they need in
+  the fixture, since no module of this workspace has it. Two tolerances are here
+  for the same reason inverted: a document that is not readable UTF-8 costs that
+  document and not the other two document tools, which share the inventory with
+  it, and a missing
+  `contracts/canonical-bytecode.json` costs the fingerprints and not the whole
+  contract surface, which is derived from the artifacts instead
+- **`tests/docs_legibility.rs`** (8) - the gate: every code fence declares a
+  language, every relative cross-reference resolves to a file *and* to a heading
+  that exists, one title per document with no skipped heading level, a stated
+  purpose under each title, no em dashes, and `llms.txt` conforming to the
+  specification, linking only files that exist, and covering every document in
+  the inventory. The gate holds the git-tracked Markdown, not the working tree
+  the server walks, so an uncommitted scratch file is not held to the
+  repository's documentation standard
+- **`tests/mcp_stdio.rs`** (1) - spawns the built binary and speaks
+  newline-delimited JSON-RPC to it: `initialize` at protocol revision
+  `2025-11-25`, `tools/list`, three `tools/call`s and one refusal. It is the only
+  test that can see stdout being clean, which the protocol depends on: a stray
+  `println!` anywhere in the crate would corrupt every message after it
+
+The two contract suites need forge artifacts, which are not checked in. Without
+them the contract tests print `SKIP:` and pass, the same convention as the
+anvil-gated suites. CI builds them first and sets
+`RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1`, which turns that skip into a failure, so a
+run that silently tested nothing cannot report green:
+
+```bash
+(cd contracts && forge build)
+RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1 cargo test -p rub3-docs-mcp
+```
 
 ## 3. Seed a license proof for manual testing
 

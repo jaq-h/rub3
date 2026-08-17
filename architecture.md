@@ -6,7 +6,7 @@ This file owns design rationale: why the system is shaped the way it is. Securit
 
 rub3 exists to let machines buy, verify, and resell software without asking anyone's permission. The unit of adoption is one closed loop an agent can complete end to end:
 
-```
+```text
 discover → pay → fetch → verify → run → (resell)
 ```
 
@@ -104,7 +104,7 @@ Session identity field: `tba_address` (deterministic TBA derived from token)
 
 The TBA address for any token is deterministic and computed locally - no on-chain call needed:
 
-```
+```text
 tba = CREATE2(
   registry:       0x000000006551c19487814612e58FE06813775758,  // canonical ERC-6551 registry
   implementation: <developer-chosen TBA implementation>,
@@ -123,7 +123,7 @@ If the developer wants the TBA to actually hold assets or execute transactions o
 
 ## System Overview
 
-```
+```text
 ┌──────────────┐     ┌─────────────────────┐     ┌──────────────────────────┐
 │   Developer   │     │   Base (L2)          │     │        User              │
 │              │     │                     │     │                          │
@@ -239,7 +239,7 @@ The session format varies by tier. Tiers 0 uses the legacy `LicenseProof` format
 
 ### Session schema (tiers 1-4)
 
-```
+```text
 session = {
   app_id:       "com.example.myapp",
   token_id:     42,
@@ -304,7 +304,7 @@ Session files stored at `~/.rub3/sessions/<app_id>/<token_id>.json` - one per to
 
 A wallet may own multiple tokens from the same contract. At session creation (first launch or renewal), the wrapper presents a token selector after wallet connection.
 
-```
+```text
 ┌────────────────────────────────────────────────┐
 │  Connect to My App                             │
 │                                                │
@@ -587,7 +587,7 @@ Only factory deploys are listable. Each entry doubles as an ERC-8004-style agent
 
 ### 2. rub3 Wrapper Runtime
 
-```
+```text
 rub3-wrapper
 ├── Session Manager
 │   ├── Read cached session ~/.rub3/sessions/<app_id>/<token_id>.json
@@ -687,7 +687,7 @@ A thin in-process crate the wrapped app links: `rub3::heartbeat()` and `rub3::se
 
 ### How it works
 
-```
+```text
 Wrapper config embeds:
   contract: "0x1234...abcd"
   ens:      "myapp.eth"           # developer's own ENS, OR
@@ -753,7 +753,7 @@ Would ship the embedded app binary as ciphertext the wrapper decrypts into memor
 
 ### Tier 0-2: signature/ownership verification
 
-```
+```text
 Wrapper starts
     │
     Read cached session/proof
@@ -802,7 +802,7 @@ Launch app                      Open webview
 
 ### Tier 3: cooldown activation
 
-```
+```text
     ... (same as above through token selection) ...
                                             │
                                     ownerOf() / isValid()
@@ -840,7 +840,7 @@ Deferred; no launch flow is implemented. See "Deferred designs".
 
 ### Runtime (all tiers)
 
-```
+```text
 While running:
   Wrapper ──heartbeat IPC──▶ App (every 5s)
   App panics/exits if heartbeat stops
@@ -945,7 +945,7 @@ This is intentional and matches the semantics: **transfer sells the account to t
 
 ### Defense layers summary
 
-```
+```text
 Attestation:   masked code hash vs fingerprints pinned in the binary (pre-purchase, both front doors: refuses to buy from non-canonical code, never blocks a launch)
 Distribution:  on-chain binary hash (verify download)
 Encryption:    AES-256-GCM binary encryption (tiers 3-4: binary useless without valid session)

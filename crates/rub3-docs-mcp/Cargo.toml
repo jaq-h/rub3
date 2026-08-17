@@ -1,0 +1,24 @@
+[package]
+name = "rub3-docs-mcp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rub3-docs-mcp"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+pulldown-cmark = { version = "0.13.4", default-features = false }
+rmcp = { version = "3.1.2", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syn = { version = "3.0.3", features = ["full"] }
+tokio = { version = "1", features = ["rt", "macros", "io-std"] }
+toml = "1.1.4"
+
+[dev-dependencies]
+tempfile = "3.27.0"

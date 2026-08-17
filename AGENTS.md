@@ -4,11 +4,12 @@ Wallet-native licensing for locally executed software (CLI tools, MCP servers, d
 
 ## Layout
 
-Two halves, different toolchains:
+Three parts, two toolchains:
 
 | Path | What | Toolchain |
 |---|---|---|
-| `crates/rub3-wrapper/` | wrapper runtime, the only workspace member | `cargo`, from the repo root |
+| `crates/rub3-wrapper/` | wrapper runtime, the crate that ships | `cargo`, from the repo root |
+| `crates/rub3-docs-mcp/` | developer-facing docs MCP server (§3.3); off the wrapper's dependency path | `cargo`, from the repo root |
 | `contracts/` | Foundry project, ERC-721 license contracts | `forge`, **from `contracts/`** |
 
 `README.md` → "Project structure" is the per-module map, and it is the only one: it covers every module, including the two deferred feature-gated scaffolds `src/device.rs` and `src/decrypt.rs`.
@@ -19,13 +20,14 @@ Two halves, different toolchains:
 cargo build -p rub3-wrapper
 cargo test  -p rub3-wrapper               # default bundle = tier-2
 cargo test  -p rub3-wrapper -- --ignored  # runs ONLY the ignored tests: a live Base mainnet RPC test
+cargo test  -p rub3-docs-mcp              # docs server + the docs legibility gate
 
 cd contracts && forge test                # in-process EVM: no network, no .env
 ```
 
 `forge` resolves `contracts/foundry.toml`, so it must run from `contracts/`; it fails at the repo root. OpenZeppelin and forge-std are git submodules, and `forge test` clones them at the pinned revisions on first run, so `git submodule update --init --recursive` is optional.
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: the wrapper matrix for `tier-0` through `tier-4` plus the `headless` and `webview` front doors, `forge test` preceded by `scripts/check-deployments.sh` (the schema gate on `contracts/deployments.json`, the canonical-factory-per-chain record), the blocking canonical-bytecode-fingerprint job (see `contracts/contracts.md` -> "Reproducible builds and canonical fingerprints"), the anvil-gated e2e, and a lint job where `cargo clippy -- -D warnings` and `cargo fmt --check` are both blocking gates. Read it for the exact invocations. It is macOS-only, and it does **not** build `tier-3,binary-encryption`, the only bundle that compiles `src/decrypt.rs`, so running the full local matrix below is still the contributor's job.
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: the wrapper matrix for `tier-0` through `tier-4` plus the `headless` and `webview` front doors, `forge test` preceded by `scripts/check-deployments.sh` (the schema gate on `contracts/deployments.json`, the canonical-factory-per-chain record), the blocking canonical-bytecode-fingerprint job (see `contracts/contracts.md` -> "Reproducible builds and canonical fingerprints"), the anvil-gated e2e, the docs-surface job (`forge build`, then `cargo test -p rub3-docs-mcp` with `RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1`), and a lint job where `cargo clippy -- -D warnings` and `cargo fmt --check` are both blocking gates. Read it for the exact invocations. It is macOS-only, and it does **not** build `tier-3,binary-encryption`, the only bundle that compiles `src/decrypt.rs`, so running the full local matrix below is still the contributor's job.
 
 **A contract change is also a wrapper change.** `crates/rub3-wrapper/src/attest.rs` pins a copy of the canonical fingerprints and immutable ranges so the wrapper can verify a contract before buying from it (`implementation.md` §2.6). Touch anything under `contracts/src/` and the sequence is: `scripts/canonical-bytecode-hashes.sh update`, then **add** a row to `attest::CANONICAL` for each moved fingerprint - never overwrite or drop one once the contract it describes is deployed, because a deployed contract goes on validating its own tokens forever. That accumulate-only rule switches on at the first deploy: nothing is deployed to any public network yet, so the table holds exactly one row per contract today (`attest::CANONICAL`'s doc comment and `implementation.md` §2.6 carry the reasoning). A unit test in `attest` fails until you do, in every tier-2-and-up matrix job.
 
@@ -101,6 +103,12 @@ These are the spec; this file is only the map. Read the relevant one before chan
 | `testing.md` | per-suite test inventory, manual testing, seeding a license proof |
 
 The wrapper's app identity (`APP_ID`, `CONTRACT`, `CHAIN_ID`, `RPC_URL`) is hardcoded as placeholder constants in `src/main.rs`, pending `rub3 pack`. `CONTRACT` defaults to the zero address, which the wrapper reads as "no contract configured" and skips on-chain ownership checks, so a stock build never touches the chain. See `testing.md` → "App constants".
+
+## The docs surface serves derived facts only
+
+`crates/rub3-docs-mcp` is the docs MCP server of `implementation.md` §3.3, plus the machine-legibility gate over the documents. **Nothing it serves may be transcribed.** Contract ABIs come from the artifacts `forge build` wrote, selectors from the artifact's own `methodIdentifiers` map, and Rust signatures are byte ranges of the source file rather than re-renderings, so a served signature that is not in the file is a test failure. A fact that cannot be derived is refused with the command that would produce it: `contracts/out/` is not checked in, so the contract tools ask for `forge build` rather than answering. This is the same line `scripts/canonical-bytecode-hashes.sh` and `attest`'s manifest mirror test hold, and a docs server is where a second hand-maintained copy would rot fastest, because a wrong signature surfaces only when an agent has already written calldata against it.
+
+Two consequences for unrelated changes. `tests/docs_legibility.rs` turns red on an untagged code fence, a cross-reference to a heading that no longer exists, a document with no purpose statement under its title, an em dash, and a new Markdown document that `llms.txt` does not link - each failure names the file and the fix. And the crate must stay off the wrapper's dependency path: `cargo tree -p rub3-wrapper` is the check.
 
 ## Ownership invariants: a hard constraint, not a preference
 

@@ -1,0 +1,45 @@
+# rub3
+
+> Wallet-native licensing for locally executed software - CLI tools, MCP servers, desktop apps. An ERC-721 token on Base *is* the access credential: the `rub3-wrapper` Rust runtime verifies ownership on the machine at launch, then runs the wrapped binary as a supervised child process. There is no backend, so the chain is the source of truth and the wallet is the identity. The roadmap is agent-first: an autonomous buyer completing discover -> pay -> fetch -> verify -> run -> resell with no human in the loop.
+
+What the contracts guarantee is the thing most worth knowing before integrating, because it is what makes a licence safe to hold. The token is the invariant; everything else is versioned. A rub3 licence contract carries no proxy, no upgrade hook and no revocation surface: no burn, no admin transfer, and no pause that touches `ownerOf`, `isValid` or `activate` for a token already issued. Those are absences from the deployed bytecode, audited by test against a fixed list of forbidden signatures, not promises in prose. Evolution changes what is *offered* going forward - price, supply, successors, listings - and never what was *granted*. Migration is a new deploy plus an opt-in `successor` pointer the holder follows, and the old contract goes on validating its own tokens forever.
+
+Status, so that nothing below reads as an invitation: **nothing is deployed to any public network.** Every entry in `contracts/deployments.json` is `null` on purpose, and there is no testnet address to point a build at yet. `implementation.md` is the authority on what exists; its `[complete]` / `[partial]` / `[not started]` tags are maintained section by section, and the deferred and rejected work is recorded there too rather than dropped.
+
+Each document below owns one subject and states that ownership in its own first paragraph, so a section read out of one document is not contradicted by another. The repository also ships a docs MCP server, `crates/rub3-docs-mcp`, which serves contract ABIs, 4-byte selectors and the wrapper's Rust signatures derived from the build artifacts and the source at call time - worth wiring up in preference to guessing a signature from these documents.
+
+## Documents
+
+- [README](https://raw.githubusercontent.com/jaq-h/rub3/main/README.md): orientation, and the only complete per-module map of the repository. How to build, test and run the wrapper, the tier feature bundles and front doors, the headless (agent) door's signer sources, spend ceilings and exit codes, and one line per shipped capability.
+- [architecture.md](https://raw.githubusercontent.com/jaq-h/rub3/main/architecture.md): design rationale. The security tiers and what each enforces, the session model and its preimage, the two identity models, the launch flows, and the ownership invariants argued rather than asserted. Read before changing behaviour.
+- [implementation.md](https://raw.githubusercontent.com/jaq-h/rub3/main/implementation.md): the phased roadmap and the build record in one document. What each phase shipped, what it cost, what was deliberately not built and why.
+- [contracts/contracts.md](https://raw.githubusercontent.com/jaq-h/rub3/main/contracts/contracts.md): contract operations. Local Anvil and Base Sepolia setup, the deploy environment variables, the EIP-3009 stablecoin purchase recipe, the protocol fee mechanics, the reproducible-build contract behind the canonical fingerprints, and the pre-purchase audit a buyer runs by hand.
+- [testing.md](https://raw.githubusercontent.com/jaq-h/rub3/main/testing.md): the per-suite test inventory, the manual testing guide, and how to seed a license proof for local runs.
+- [ideation.md](https://raw.githubusercontent.com/jaq-h/rub3/main/ideation.md): positioning. The vision, the business model, and what rub3 is and is not.
+
+## Contracts
+
+Foundry project, `forge test` from `contracts/`. Solidity 0.8.28, OpenZeppelin ERC-721 + Enumerable + Ownable.
+
+- [Rub3License.sol](https://raw.githubusercontent.com/jaq-h/rub3/main/contracts/src/Rub3License.sol): the abstract base every licence contract inherits: purchase on the ETH and stablecoin rails, the wrapper hash set, the successor pointer, activation and cooldown.
+- [Rub3Access.sol](https://raw.githubusercontent.com/jaq-h/rub3/main/contracts/src/Rub3Access.sol): one-time purchase licence, valid for as long as it is held.
+- [Rub3Subscription.sol](https://raw.githubusercontent.com/jaq-h/rub3/main/contracts/src/Rub3Subscription.sol): time-bounded licence with `expiresAt`, `renew` and `isValid`.
+- [Rub3Factory.sol](https://raw.githubusercontent.com/jaq-h/rub3/main/contracts/src/Rub3Factory.sol): stamps immutable fee terms into a canonical deploy and records it in `isDeployed`. A direct deploy stays fee-free and unrecorded.
+- [canonical-bytecode.json](https://raw.githubusercontent.com/jaq-h/rub3/main/contracts/canonical-bytecode.json): the published fingerprint of each deployable contract - sha256 of the runtime code with immutables zeroed - plus the byte ranges a comparator must zero in `eth_getCode` before hashing. A blocking CI job keeps it honest against the contracts.
+- [deployments.json](https://raw.githubusercontent.com/jaq-h/rub3/main/contracts/deployments.json): the canonical factory per chain id. Every entry is `null` until launch.
+
+## Wrapper runtime
+
+Rust, the workspace member that ships, `cargo` from the repository root.
+
+- [Cargo.toml](https://raw.githubusercontent.com/jaq-h/rub3/main/crates/rub3-wrapper/Cargo.toml): the five tier bundles over composable capability flags, and the two front doors. A build selects exactly one tier bundle and at least one front door; `--no-default-features` is mandatory, because Cargo features are additive and `--features tier-0` alone silently tests the tier-2 default.
+- [lib.rs](https://raw.githubusercontent.com/jaq-h/rub3/main/crates/rub3-wrapper/src/lib.rs): the authority on which modules exist under which feature. Whole modules are compiled away by tier, so code that builds under the default proves nothing about `tier-0` or `tier-3`.
+- [activation.rs](https://raw.githubusercontent.com/jaq-h/rub3/main/crates/rub3-wrapper/src/activation.rs): activation orchestration, and the stable exit codes an orchestrator branches on rather than parsing stderr.
+- [attest.rs](https://raw.githubusercontent.com/jaq-h/rub3/main/crates/rub3-wrapper/src/attest.rs): pre-purchase contract attestation. The masked code hash is compared against fingerprints pinned in the binary before anything is signed, from either front door. It gates purchases, never launches.
+
+## Optional
+
+- [AGENTS.md](https://raw.githubusercontent.com/jaq-h/rub3/main/AGENTS.md): the contributor and agent brief for working *in* this repository rather than integrating against it: the layout, the build and test commands, the tier matrix that has to pass, and the conventions a change is held to. `CLAUDE.md` is a symlink to it.
+- [main.rs of the docs MCP server](https://raw.githubusercontent.com/jaq-h/rub3/main/crates/rub3-docs-mcp/src/main.rs): how to run the server described above and wire it into a coding agent over stdio.
+- [ci.yml](https://raw.githubusercontent.com/jaq-h/rub3/main/.github/workflows/ci.yml): what is actually gated on every pull request, including the blocking canonical-bytecode-fingerprint job and the feature-bundle matrix.
+- [canonical-bytecode-hashes.sh](https://raw.githubusercontent.com/jaq-h/rub3/main/scripts/canonical-bytecode-hashes.sh): the fingerprint gate, and the worked reasoning for why a published fingerprint is derived from build artifacts rather than transcribed.
