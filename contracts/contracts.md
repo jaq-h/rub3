@@ -225,8 +225,13 @@ that bound is the operator's: `RUB3_AGENT_MAX_TOKEN_AMOUNT`, an integer in the
 payment token's own smallest unit, must be set before a headless build will use
 the stablecoin rail at all. Unset, it buys in ETH and says so; a listed
 `priceAmount` above it is refused with exit code 22 rather than switched to the
-other rail. Nothing here changes what the *contract* accepts - either rail is
-always spendable by anyone who submits a valid transaction.
+other rail. The ETH rail carries the same bound, `RUB3_AGENT_MAX_ETH_WEI`, an
+integer in wei, weighed after `price()` is read and before the transaction is
+sent, so a refusal is the same exit code 22 and costs no gas; it differs in
+having a default, 0.1 ETH, because wei is a fixed unit, so an operator who
+configures nothing still buys on a bounded rail rather than an unbounded one.
+Nothing here changes what the *contract* accepts - either rail is always
+spendable by anyone who submits a valid transaction.
 
 Change what is offered to *future* buyers (owner only; it reaches nothing already issued, and a subscription snapshots both rails per token at mint):
 
