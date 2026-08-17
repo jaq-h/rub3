@@ -148,17 +148,50 @@ impl Window {
     }
 
     /// The final outcome the window hands back to `activation::ensure`.
+    ///
+    /// Watches the command channel alongside the result channel for the same
+    /// reason [`Self::wait_for`] does: a flow that gives up emits `onError` and
+    /// sends no result, so waiting on the result alone would spend the whole
+    /// [`RECV_TIMEOUT`] and then report a hang while the reason sat unread.
     fn result(&self) -> ActivationResult {
-        let result = self
-            .result_rx
-            .recv_timeout(RECV_TIMEOUT)
-            .expect("activation window should have produced a result");
-        self.drain();
-        assert!(
-            self.closed.get(),
-            "a terminal result must also close the window",
-        );
-        result
+        const POLL: Duration = Duration::from_millis(50);
+
+        let deadline = Instant::now() + RECV_TIMEOUT;
+        loop {
+            match self.result_rx.try_recv() {
+                Ok(result) => {
+                    self.drain();
+                    assert!(
+                        self.closed.get(),
+                        "a terminal result must also close the window",
+                    );
+                    return result;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("the activation window dropped its result channel")
+                }
+            }
+
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !left.is_zero(),
+                "activation window should have produced a result",
+            );
+            match self.cmd_rx.recv_timeout(POLL.min(left)) {
+                Ok(Cmd::Eval(script)) => {
+                    let call = parse_call(&script);
+                    if call.name == "onError" {
+                        panic!("no result: the flow errored: {}", call.arg);
+                    }
+                }
+                Ok(Cmd::Close) => self.closed.set(true),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("the activation window dropped its command channel")
+                }
+            }
+        }
     }
 }
 
@@ -235,6 +268,43 @@ const UNREACHABLE_RPC: &str = "http://127.0.0.1:1";
 const ZERO_CONTRACT: &str = "0x0000000000000000000000000000000000000000";
 const LEGACY_APP_ID: &str = "com.rub3.legacy-flow-test";
 
+/// Points the licence and session stores at tmpdirs for one test, and holds
+/// [`crate::ENV_LOCK`] while they are pointed there.
+///
+/// Same shape as `store::tests::LicenseDir`, and for the same reason: both
+/// variables are process-global, so clearing them on the way out of an
+/// assertion failure is what stops a red test from leaving the rest of the
+/// binary reading a directory the unwind has already deleted.
+struct StoreDirs {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    _license: tempfile::TempDir,
+    _session: tempfile::TempDir,
+}
+
+impl StoreDirs {
+    fn set_up() -> Self {
+        let guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let license = tempfile::tempdir().expect("tempdir");
+        let session = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("RUB3_LICENSE_DIR", license.path());
+        std::env::set_var("RUB3_SESSION_DIR", session.path());
+        Self {
+            _guard: guard,
+            _license: license,
+            _session: session,
+        }
+    }
+}
+
+impl Drop for StoreDirs {
+    fn drop(&mut self) {
+        // Runs before the fields, so both variables are cleared while the lock
+        // is still held and before the directories they name go away.
+        std::env::remove_var("RUB3_LICENSE_DIR");
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+}
+
 /// The pre-session `LicenseProof` path still works when no contract is
 /// configured: the window issues a proof, and a later launch is served from it
 /// without a window and without a chain read.
@@ -247,12 +317,7 @@ const LEGACY_APP_ID: &str = "com.rub3.legacy-flow-test";
 /// path and on the one that has both.
 #[test]
 fn a_zero_contract_build_still_issues_and_serves_a_legacy_licence_proof() {
-    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    let license_dir = tempfile::tempdir().expect("tempdir");
-    let session_dir = tempfile::tempdir().expect("tempdir");
-    std::env::set_var("RUB3_LICENSE_DIR", license_dir.path());
-    std::env::set_var("RUB3_SESSION_DIR", session_dir.path());
+    let _dirs = StoreDirs::set_up();
 
     let wallet = Wallet::new();
     let window = Window::open(LEGACY_APP_ID, ZERO_CONTRACT, 8453, UNREACHABLE_RPC, 3600);
@@ -318,9 +383,6 @@ fn a_zero_contract_build_still_issues_and_serves_a_legacy_licence_proof() {
     let stored = crate::store::load_proof(LEGACY_APP_ID).expect("proof should be on disk");
     assert_eq!(stored.signature, proof.signature);
     assert_eq!(stored.wallet_address, proof.wallet_address);
-
-    std::env::remove_var("RUB3_LICENSE_DIR");
-    std::env::remove_var("RUB3_SESSION_DIR");
 }
 
 /// Names an [`ActivationResult`] for a panic message. The type is not `Debug`,

@@ -59,6 +59,27 @@ const PRICE_WEI: &str = "0";
 
 const ZERO_ADDR: &str = "0x0000000000000000000000000000000000000000";
 
+/// The selector of `CooldownActive(uint256)`, the error
+/// `contracts/src/Rub3License.sol` reverts with inside the window. Verified
+/// with `cast sig "CooldownActive(uint256)"`.
+const COOLDOWN_ACTIVE_SELECTOR: &str = "c1ab61a1";
+
+/// True when a `cast` refusal is the contract enforcing the cooldown.
+///
+/// [`wallet_sends`] broadcasts raw calldata, so `cast` has no ABI for the
+/// target and can only name a custom error when its selector resolves through
+/// the machine-global signature cache or an online lookup. Where neither is
+/// available it prints the bare selector, so both spellings count - the same
+/// hazard `names_the_expiry` in `tests/headless_e2e.rs` documents.
+///
+/// Deliberately still specific to this one error: a bare "the send failed"
+/// check would let an out-of-gas or a `NotTokenOwner` pass as a cooldown
+/// refusal, which is the whole point of asserting on it.
+fn names_the_cooldown(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("cooldownactive") || lower.contains(COOLDOWN_ACTIVE_SELECTOR)
+}
+
 /// Every test here binds [`PORT`] and sets `RUB3_SESSION_DIR`, which is
 /// process-global. Held for the whole body so the anvil instance and the
 /// session directory belong to one test at a time.
@@ -650,7 +671,7 @@ fn a_second_activation_inside_the_cooldown_is_refused_and_the_window_says_how_lo
     let refusal = wallet_sends(&holder.wallet, &holder.contract, &calldata)
         .expect_err("the contract must refuse a second activate() inside the window");
     assert!(
-        refusal.to_ascii_lowercase().contains("cooldownactive"),
+        names_the_cooldown(&refusal),
         "the refusal should be CooldownActive, got: {refusal}",
     );
     assert_eq!(
@@ -700,9 +721,11 @@ fn a_second_activation_inside_the_cooldown_is_refused_and_the_window_says_how_lo
         "short of the window is still inside it",
     );
     assert_eq!(payload["blocksRemaining"], 2);
+    let refusal = wallet_sends(&holder.wallet, &holder.contract, &calldata)
+        .expect_err("the chain should still refuse two blocks short");
     assert!(
-        wallet_sends(&holder.wallet, &holder.contract, &calldata).is_err(),
-        "the chain should still refuse two blocks short",
+        names_the_cooldown(&refusal),
+        "two blocks short the refusal should still be CooldownActive, got: {refusal}",
     );
 
     // ── And the last blocks clear it, for both of them ───────────────────────
