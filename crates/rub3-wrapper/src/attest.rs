@@ -252,12 +252,21 @@ const RELEASE: &str =
 /// get declared ready for use until the registry ships, and the factory and the
 /// registry launch together (`implementation.md` §1.5, §2.3). That condition
 /// has a machine-checked form: `contracts/deployments.json`, whose every
-/// `factory` is still `null`. When one stops being null, the rule above is live
-/// for that chain and this table only ever grows. Before the first deploy a
-/// superseded fingerprint protects no holder, while it widens the set of code
-/// the wrapper will spend money on, which is the opposite of what this table
-/// is for; so the pre-exact-payment rows of the §2.3 contracts were dropped
-/// rather than carried. That was a one-off taken while the condition above was
+/// `factory` **and** every `code_registry` is still `null`, asserted by
+/// [`tests::nothing_is_deployed_so_the_accumulate_only_rule_is_not_live_yet`].
+/// Those two are separate records with separate lifecycles, checked
+/// independently by `scripts/check-deployments.sh`, so either can be published
+/// without the other: the rule goes live for a chain as soon as **either** of
+/// them stops being `null`, and it goes live for whichever contracts that
+/// deploy actually put on chain. A `Rub3CodeRegistry` published while `factory`
+/// is still `null` makes the registry's own row here permanent, and overwriting
+/// it after that would leave every build carrying the new row refusing the
+/// deployed registry as not the code registry it pins - which costs every
+/// pinned-table miss on that chain its second authority. Before the first
+/// deploy a superseded fingerprint protects no holder, while it widens the set
+/// of code the wrapper will spend money on, which is the opposite of what this
+/// table is for; so the pre-exact-payment rows of the §2.3 contracts were
+/// dropped rather than carried. That was a one-off taken while the condition above was
 /// still false, not licence to prune the table again.
 ///
 /// Rows are grouped by contract, newest release first, so a contract's history
@@ -3366,6 +3375,46 @@ mod tests {
     }
 
     // ── Drift protection for the registry's own contracts ────────────────────
+
+    /// [`CANONICAL`]'s accumulate-only rule is not live yet, and this is the
+    /// check that says so rather than the doc comment claiming it.
+    ///
+    /// The rule is that a contract's row becomes permanent once that contract is
+    /// deployed, because a deployed contract goes on selling and validating its
+    /// own tokens forever. Its precondition is a fact about
+    /// `contracts/deployments.json` and not about anyone's memory: while every
+    /// `factory` and every `code_registry` there is `null`, no row protects a
+    /// holder and a fingerprint may still be corrected in place. The two records
+    /// are independent deploys, so either one going live arms the rule for that
+    /// chain and for whatever it put on chain.
+    ///
+    /// This fails the moment a deploy is recorded, which is the point: the
+    /// sentence in [`CANONICAL`]'s doc stops being true at that moment, and a
+    /// permanence rule whose precondition nobody re-checks is how a row that
+    /// protects a holder gets overwritten by somebody following a stale comment.
+    #[test]
+    fn nothing_is_deployed_so_the_accumulate_only_rule_is_not_live_yet() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(DEPLOYMENTS).expect("contracts/deployments.json is not JSON");
+        let chains = manifest["chains"]
+            .as_object()
+            .expect("contracts/deployments.json has a chains object");
+
+        for (id, chain) in chains {
+            for record in ["factory", "code_registry"] {
+                assert!(
+                    chain[record].is_null(),
+                    "chain {id} publishes a {record} at {}, so attest::CANONICAL's \
+                     accumulate-only rule is now live for whatever that deploy put on \
+                     chain: rows for deployed contracts may never be overwritten or \
+                     dropped again, only added to. Update CANONICAL's doc comment to say \
+                     the rule is live rather than pending, then update this test to assert \
+                     what is still unpublished.",
+                    chain[record]
+                );
+            }
+        }
+    }
 
     /// The per-chain registry table is the deployment manifest, compiled in.
     ///
