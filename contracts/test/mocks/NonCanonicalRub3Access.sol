@@ -16,8 +16,8 @@ import {Rub3Access} from "../../src/Rub3Access.sol";
 /// arguments would, carrying its one extra power under a name no blacklist
 /// guessed. Such a contract passes {Rub3Invariants}'s forbidden-signature scan
 /// in silence and fails the masked code hash, and that asymmetry is the whole
-/// justification for the fingerprint check. Until this fixture existed the asymmetry was asserted
-/// only at the unit level, against synthetic bytes.
+/// justification for the fingerprint check. Until this fixture existed the
+/// asymmetry was asserted only at the unit level, against synthetic bytes.
 ///
 /// It is also the fixture for the other half of the posture. A launch is a
 /// program somebody already paid for, so the launch path never attests at all -

@@ -73,7 +73,7 @@ rub3/
 │   │   ├── Rub3Factory.t.sol         # §2.3: fee immutability, exact split on both rails, direct deploys
 │   │   └── mocks/
 │   │       ├── MockEIP3009Token.sol  # Faithful EIP-3009 stand-in for USDC, plus its negative fixtures
-│   │       └── NonCanonicalRub3Access.sol  # §2.6 - a licence deliberately not canonical; never move to src/
+│   │       └── NonCanonicalRub3Access.sol # §2.6 - a licence deliberately not canonical; never move to src/
 │   ├── script/
 │   │   ├── Deploy.s.sol              # Deploy either contract to any EVM chain, directly or via FACTORY
 │   │   └── DeployFactory.s.sol       # Deploy a Rub3Factory (FEE_BPS + TREASURY required; PREVIOUS_FACTORY optional)
