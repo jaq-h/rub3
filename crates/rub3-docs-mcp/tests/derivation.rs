@@ -34,14 +34,40 @@ const DEMO_LIB: &str = r#"//! Demo crate.
 
 pub mod widget;
 
+mod gadget;
+
+pub use gadget::spin as gadget_spin;
 pub use widget::alpha;
 "#;
 
 const DEMO_WIDGET: &str = r#"//! Widgets.
 
+pub use self::inner::polish;
+
 /// Does the alpha thing.
 pub fn alpha(count: u32) -> bool {
     count > 0
+}
+
+mod inner {
+    /// Polishes a widget.
+    pub fn polish(coats: u8) -> u8 {
+        coats
+    }
+}
+"#;
+
+/// A private file module, re-exported under another name from the crate root.
+///
+/// The wrapper's `supervisor_run` is this shape, and the wrapper's headless
+/// front door is the inline-module shape in `DEMO_WIDGET`. Neither declaration
+/// is reachable through a `pub mod`, so a listing that stops at the `pub use`
+/// statement never carries a parameter list for either.
+const DEMO_GADGET: &str = r#"//! Gadgets.
+
+/// Spins a gadget.
+pub fn spin(turns: u8) -> u8 {
+    turns
 }
 "#;
 
@@ -65,11 +91,18 @@ impl Fixture {
         );
         fixture.write("crates/demo/src/lib.rs", DEMO_LIB);
         fixture.write("crates/demo/src/widget.rs", DEMO_WIDGET);
+        fixture.write("crates/demo/src/gadget.rs", DEMO_GADGET);
         fixture.write("README.md", "# Demo\n\nThe demo fixture.\n");
         fixture
     }
 
     fn write(&self, relative: &str, contents: &str) {
+        let path = self.directory.path().join(relative);
+        fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        fs::write(path, contents).expect("write");
+    }
+
+    fn write_bytes(&self, relative: &str, contents: &[u8]) {
         let path = self.directory.path().join(relative);
         fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
         fs::write(path, contents).expect("write");
@@ -112,6 +145,36 @@ const MANIFEST: &str = r#"{
   }
 }
 "#;
+
+/// True when the reported line is where the served declaration begins.
+///
+/// A signature is cut before the body, so the file's line is the served line
+/// plus whatever opens the block; the reported line is right when the file's
+/// line starts with it. Leading indentation is dropped because a nested member
+/// is sliced from its own first token.
+fn starts_the_declaration(source: &str, line: usize, signature: &str) -> bool {
+    let first = signature.lines().next().unwrap_or_default();
+    source
+        .lines()
+        .nth(line - 1)
+        .is_some_and(|found| found.trim_start().starts_with(first.trim_start()))
+}
+
+/// The declaration served under a re-export: signature, declaring file, line.
+fn reexported(
+    api: &[rustapi::CrateApi],
+    module: &str,
+    name: &str,
+) -> Option<(String, String, usize)> {
+    api.iter()
+        .flat_map(|crate_api| crate_api.modules.iter())
+        .filter(|candidate| candidate.name == module)
+        .flat_map(|candidate| candidate.items.iter())
+        .filter(|item| item.kind == "reexport")
+        .flat_map(|item| item.members.iter())
+        .find(|member| member.name == name)
+        .map(|member| (member.signature.clone(), member.path.clone(), member.line))
+}
 
 fn only_signature(api: &[rustapi::CrateApi], module: &str, name: &str) -> Option<String> {
     api.iter()
@@ -415,7 +478,135 @@ fn an_unknown_module_is_refused_with_the_modules_that_exist() {
     );
 }
 
+/// A `pub use` out of a private module answers with the declaration, not with
+/// the statement.
+///
+/// The statement names the item and says nothing about how to call it, so a
+/// listing that stops there leaves an agent to invent the parameter list, which
+/// is the one failure this crate exists to prevent. Both shapes the wrapper
+/// uses are covered: a private file module (`supervisor_run`) and a private
+/// module inline in the same file (the headless front door).
+#[test]
+fn a_reexport_out_of_a_private_module_serves_the_declaration_it_points_at() {
+    let fixture = Fixture::new();
+    let server = fixture.server();
+    let ask = || {
+        server
+            .rust_api(Parameters(RustApi {
+                crate_name: None,
+                module: None,
+                name: None,
+            }))
+            .expect("the fixture crate derives")
+            .0
+            .crates
+    };
+
+    let (signature, path, line) =
+        reexported(&ask(), "lib", "gadget_spin").expect("the crate root re-exports gadget::spin");
+    assert_eq!(signature, "pub fn spin(turns: u8) -> u8");
+    assert_eq!(
+        path, "crates/demo/src/gadget.rs",
+        "the answer names the file that declares it, not the one re-exporting it"
+    );
+    assert_eq!(line, 4);
+
+    let (signature, path, _) =
+        reexported(&ask(), "widget", "polish").expect("widget re-exports its inline inner module");
+    assert_eq!(signature, "pub fn polish(coats: u8) -> u8");
+    assert_eq!(path, "crates/demo/src/widget.rs");
+
+    // The same server instance, so an answer that survives the edit is a cache
+    // or a transcription rather than a slice taken at call time.
+    fixture.write(
+        "crates/demo/src/gadget.rs",
+        "//! Gadgets.\n\n/// Spins a gadget.\npub fn spin(turns: u8, reverse: bool) -> u8 {\n    turns\n}\n",
+    );
+    assert_eq!(
+        reexported(&ask(), "lib", "gadget_spin").map(|found| found.0),
+        Some("pub fn spin(turns: u8, reverse: bool) -> u8".to_string()),
+    );
+}
+
+/// A re-export of something this listing already carries is left as a statement.
+///
+/// Resolving one would repeat every public item of every public module under
+/// the crate root's re-exports, which is noise an agent pays for in context.
+#[test]
+fn a_reexport_of_an_already_listed_declaration_is_not_repeated() {
+    let fixture = Fixture::new();
+    let server = fixture.server();
+    let api = server
+        .rust_api(Parameters(RustApi {
+            crate_name: None,
+            module: None,
+            name: None,
+        }))
+        .expect("the fixture crate derives")
+        .0
+        .crates;
+
+    assert!(
+        reexported(&api, "lib", "alpha").is_none(),
+        "widget is a public module, so its declaration of alpha is already served"
+    );
+    assert_eq!(
+        only_signature(&api, "widget", "alpha").as_deref(),
+        Some("pub fn alpha(count: u32) -> bool"),
+    );
+}
+
 // ── The real repository ───────────────────────────────────────────────────────
+
+/// The wrapper's two front doors answer with their real declarations.
+///
+/// `supervisor_run` is one hop out of a private file module and
+/// `ensure_headless` is two: `lib.rs` re-exports what `activation.rs`
+/// re-exports out of its private `headless` module. Both are the names an
+/// integrator writes, and neither declaration appears anywhere else in the
+/// listing, so this is the case that decides whether the tool hands over a
+/// signature or a bare `pub use` line.
+#[test]
+fn the_wrappers_reexported_front_doors_carry_their_declarations() {
+    let repo = Repo::compiled_in().expect("this crate lives in a rub3 checkout");
+    let api = rustapi::workspace(&repo).expect("the workspace derives");
+
+    for (module, name, declared_in) in [
+        (
+            "lib",
+            "supervisor_run",
+            "crates/rub3-wrapper/src/supervisor.rs",
+        ),
+        (
+            "activation",
+            "ensure_headless",
+            "crates/rub3-wrapper/src/activation.rs",
+        ),
+        (
+            "lib",
+            "ensure_headless",
+            "crates/rub3-wrapper/src/activation.rs",
+        ),
+    ] {
+        let (signature, path, line) = reexported(&api, module, name).unwrap_or_else(|| {
+            panic!("{module} re-exports {name} and must serve the declaration behind it")
+        });
+        assert_eq!(path, declared_in);
+        let source = repo.read(&path).expect("the declaring file reads");
+        assert!(
+            source.contains(&signature),
+            "{path} serves {signature:?} for {name}, which is not in the file"
+        );
+        assert!(
+            starts_the_declaration(&source, line, &signature),
+            "{path} serves {name} as starting on line {line}, which holds something else"
+        );
+        assert!(
+            signature.starts_with("pub fn ") && signature.contains('('),
+            "{name} is served as {signature:?}, which is not a callable declaration"
+        );
+    }
+}
 
 /// Every signature served for the workspace appears verbatim in its own file.
 ///
@@ -435,8 +626,11 @@ fn every_served_rust_signature_is_a_verbatim_slice_of_its_file() {
     let mut checked = 0;
     for crate_api in &api {
         for module in &crate_api.modules {
-            let source = repo.read(&module.path).expect("a module file reads");
             let check = |item: &rustapi::Item| {
+                // Against the file the item says it came from, which for a
+                // resolved re-export is the file that declares it rather than
+                // the one the `pub use` statement is in.
+                let source = repo.read(&item.path).expect("a declaring file reads");
                 // A value declaration too long to serve whole is cut after its
                 // type; the part served is still a slice, so the assertion is
                 // on that part.
@@ -447,16 +641,24 @@ fn every_served_rust_signature_is_a_verbatim_slice_of_its_file() {
                 assert!(
                     source.contains(served),
                     "{} serves {:?} for {} {}, which is not in the file",
-                    module.path,
+                    item.path,
                     served,
                     item.kind,
                     item.name
+                );
+                assert!(
+                    starts_the_declaration(&source, item.line, served),
+                    "{} serves {} {} as starting on line {}, which holds something else",
+                    item.path,
+                    item.kind,
+                    item.name,
+                    item.line
                 );
                 for cfg in &item.cfg {
                     assert!(
                         source.contains(cfg),
                         "{} serves cfg {cfg:?}, which is not in the file",
-                        module.path
+                        item.path
                     );
                 }
             };
@@ -681,6 +883,50 @@ fn the_document_inventory_finds_a_document_added_after_the_server_started() {
         vec!["README.md".to_string(), "docs/late.md".to_string()],
         "the inventory is walked at call time"
     );
+}
+
+/// One document the walk cannot read costs that document and nothing else.
+///
+/// The inventory is the spine of all three document tools, so a hard failure on
+/// a stray latin-1 file in somebody's checkout would take `read_document` and
+/// `search_documents` down with it over a file nobody asked for.
+#[test]
+fn a_document_that_cannot_be_read_does_not_take_the_others_down() {
+    let fixture = Fixture::new();
+    let server = fixture.server();
+    fixture.write_bytes("broken.md", &[b'#', b' ', 0x80, 0xff, b'\n']);
+
+    let listed: Vec<String> = server
+        .list_documents()
+        .expect("the readable documents are still served")
+        .0
+        .documents
+        .into_iter()
+        .map(|document| document.path)
+        .collect();
+    assert_eq!(
+        listed,
+        vec!["README.md".to_string()],
+        "the unreadable document is skipped and the rest of the inventory answers"
+    );
+
+    let read = server
+        .read_document(Parameters(rub3_docs_mcp::server::ReadDocument {
+            path: "README.md".to_string(),
+            section: None,
+        }))
+        .expect("reading another document still works")
+        .0;
+    assert!(read.text.contains("The demo fixture"));
+
+    let hits = server
+        .search_documents(Parameters(rub3_docs_mcp::server::SearchDocuments {
+            query: "fixture".to_string(),
+            limit: None,
+        }))
+        .expect("search still works")
+        .0;
+    assert_eq!(hits.matches.len(), 1);
 }
 
 #[test]

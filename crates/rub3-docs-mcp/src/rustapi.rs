@@ -100,9 +100,16 @@ pub struct Item {
     pub cfg: Vec<String>,
     /// The item's `///` documentation.
     pub doc: String,
+    /// Repository-relative file the declaration was sliced from.
+    ///
+    /// Usually the module's own file, and not always: a `reexport` resolved
+    /// back to its declaration reports the file that declares it, which is the
+    /// file an integrator has to read.
+    pub path: String,
     /// 1-based line the declaration starts on.
     pub line: usize,
-    /// Public fields, variants, or methods.
+    /// Public fields, variants, or methods, and for a `reexport` the
+    /// declarations it points at that no other module in this listing carries.
     pub members: Vec<Item>,
 }
 
@@ -159,25 +166,59 @@ fn members(repo: &Repo) -> Result<Vec<String>, RustApiError> {
         .collect())
 }
 
+/// One source file of a crate, and what slicing it needs.
+///
+/// It is carried rather than passed as loose arguments because a declaration is
+/// not always in the file the caller started from: a `pub use` is resolved back
+/// to the file that declares it, and the answer has to say which file that was.
+struct SourceFile {
+    /// The crate directory, so a module path can be resolved from the root.
+    crate_dir: String,
+    /// Repository-relative path of this file.
+    path: String,
+    /// The file, verbatim. Every signature served is a slice of this.
+    text: String,
+    lines: LineIndex,
+}
+
+impl SourceFile {
+    fn read(
+        repo: &Repo,
+        crate_dir: &str,
+        path: &str,
+    ) -> Result<(SourceFile, syn::File), RustApiError> {
+        let text = repo.read(path)?;
+        let parsed = parse(path, &text)?;
+        let lines = LineIndex::new(&text);
+        Ok((
+            SourceFile {
+                crate_dir: crate_dir.to_string(),
+                path: path.to_string(),
+                text,
+                lines,
+            },
+            parsed,
+        ))
+    }
+}
+
 /// The crate root and every `pub mod` it declares.
 fn modules(repo: &Repo, crate_dir: &str, root_path: &str) -> Result<Vec<Module>, RustApiError> {
-    let source = repo.read(root_path)?;
-    let file = parse(root_path, &source)?;
-    let lines = LineIndex::new(&source);
+    let (root, file) = SourceFile::read(repo, crate_dir, root_path)?;
 
     let mut modules = vec![Module {
         name: "lib".to_string(),
         path: root_path.to_string(),
         cfg: Vec::new(),
         doc: inner_doc(&file.attrs),
-        items: items(&source, &lines, &file.items),
+        items: items(repo, &root, &file.items),
     }];
 
     for item in &file.items {
         let syn::Item::Mod(module) = item else {
             continue;
         };
-        if !is_public(&module.vis) || is_test_only(&cfgs(&source, &module.attrs)) {
+        if !is_public(&module.vis) || is_test_only(&cfgs(&root.text, &module.attrs)) {
             continue;
         }
         let name = module.ident.to_string();
@@ -192,18 +233,46 @@ fn modules(repo: &Repo, crate_dir: &str, root_path: &str) -> Result<Vec<Module>,
             // no test could exercise would be the worse of the two answers.
             continue;
         };
-        let module_source = repo.read(&path)?;
-        let module_file = parse(&path, &module_source)?;
-        let module_lines = LineIndex::new(&module_source);
+        let (module_source, module_file) = SourceFile::read(repo, crate_dir, &path)?;
         modules.push(Module {
             name,
             path,
-            cfg: cfgs(&source, &module.attrs),
+            cfg: cfgs(&root.text, &module.attrs),
             doc: inner_doc(&module_file.attrs),
-            items: items(&module_source, &module_lines, &module_file.items),
+            items: items(repo, &module_source, &module_file.items),
         });
     }
+    drop_reexports_of_listed_items(&mut modules);
     Ok(modules)
+}
+
+/// Keeps a resolved re-export only when the listing carries it nowhere else.
+///
+/// `pub use activation::ensure` points into a module this listing already
+/// describes in full, so repeating the declaration under the re-export would
+/// double every public item of every public module. `pub use
+/// self::headless::ensure_headless` points into a private module, which nothing
+/// else in the listing reaches, and that is the declaration an integrator
+/// otherwise has to invent.
+///
+/// The test is where the declaration is, file and line, rather than what its
+/// module's visibility is: it is the same question the caller is asking, and it
+/// stays right as the module walk changes.
+fn drop_reexports_of_listed_items(modules: &mut [Module]) {
+    let listed: std::collections::BTreeSet<(String, usize)> = modules
+        .iter()
+        .flat_map(|module| module.items.iter())
+        .filter(|item| item.kind != "reexport")
+        .map(|item| (item.path.clone(), item.line))
+        .collect();
+    for module in modules.iter_mut() {
+        for item in module.items.iter_mut() {
+            if item.kind == "reexport" {
+                item.members
+                    .retain(|member| !listed.contains(&(member.path.clone(), member.line)));
+            }
+        }
+    }
 }
 
 fn parse(path: &str, source: &str) -> Result<syn::File, RustApiError> {
@@ -214,10 +283,10 @@ fn parse(path: &str, source: &str) -> Result<syn::File, RustApiError> {
 }
 
 /// Every public item of one parsed file.
-fn items(source: &str, lines: &LineIndex, parsed: &[syn::Item]) -> Vec<Item> {
+fn items(repo: &Repo, ctx: &SourceFile, parsed: &[syn::Item]) -> Vec<Item> {
     let mut derived = Vec::new();
     for item in parsed {
-        let Some(described) = describe(source, lines, item) else {
+        let Some(described) = describe(repo, ctx, item) else {
             continue;
         };
         if is_test_only(&described.cfg) {
@@ -228,12 +297,16 @@ fn items(source: &str, lines: &LineIndex, parsed: &[syn::Item]) -> Vec<Item> {
     derived
 }
 
-fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
+fn describe(repo: &Repo, ctx: &SourceFile, item: &syn::Item) -> Option<Item> {
     use syn::spanned::Spanned;
+
+    let source = ctx.text.as_str();
+    let lines = &ctx.lines;
 
     match item {
         syn::Item::Fn(function) if is_public(&function.vis) => Some(Item {
             kind: "fn".to_string(),
+            path: ctx.path.clone(),
             name: function.sig.ident.to_string(),
             signature: slice(
                 source,
@@ -247,6 +320,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
         }),
         syn::Item::Const(constant) if is_public(&constant.vis) => Some(Item {
             kind: "const".to_string(),
+            path: ctx.path.clone(),
             name: constant.ident.to_string(),
             signature: value_signature(
                 source,
@@ -261,6 +335,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
         }),
         syn::Item::Static(item_static) if is_public(&item_static.vis) => Some(Item {
             kind: "static".to_string(),
+            path: ctx.path.clone(),
             name: item_static.ident.to_string(),
             signature: value_signature(
                 source,
@@ -285,6 +360,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
                 .unwrap_or_else(|| end(item_struct.span()));
             Some(Item {
                 kind: "struct".to_string(),
+                path: ctx.path.clone(),
                 name: item_struct.ident.to_string(),
                 signature: slice(source, start, stop),
                 cfg: cfgs(source, &item_struct.attrs),
@@ -296,6 +372,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
                     .filter(|field| is_public(&field.vis))
                     .map(|field| Item {
                         kind: "field".to_string(),
+                        path: ctx.path.clone(),
                         name: field
                             .ident
                             .as_ref()
@@ -318,6 +395,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
             let start = start_of(&item_enum.vis, item_enum.span());
             Some(Item {
                 kind: "enum".to_string(),
+                path: ctx.path.clone(),
                 name: item_enum.ident.to_string(),
                 signature: slice(
                     source,
@@ -338,6 +416,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
                         let start = variant.ident.span().byte_range().start;
                         Item {
                             kind: "variant".to_string(),
+                            path: ctx.path.clone(),
                             name: variant.ident.to_string(),
                             signature: slice(source, start, end(variant.span())),
                             cfg: cfgs(source, &variant.attrs),
@@ -353,6 +432,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
             let start = start_of(&item_trait.vis, item_trait.span());
             Some(Item {
                 kind: "trait".to_string(),
+                path: ctx.path.clone(),
                 name: item_trait.ident.to_string(),
                 signature: slice(
                     source,
@@ -368,6 +448,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
                     .filter_map(|member| match member {
                         syn::TraitItem::Fn(function) => Some(Item {
                             kind: "fn".to_string(),
+                            path: ctx.path.clone(),
                             name: function.sig.ident.to_string(),
                             signature: slice(
                                 source,
@@ -388,6 +469,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
             let start = start_of(&item_type.vis, item_type.span());
             Some(Item {
                 kind: "type".to_string(),
+                path: ctx.path.clone(),
                 name: item_type.ident.to_string(),
                 signature: slice(source, start, end(item_type.span())),
                 cfg: cfgs(source, &item_type.attrs),
@@ -400,12 +482,13 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
             let start = start_of(&item_use.vis, item_use.span());
             Some(Item {
                 kind: "reexport".to_string(),
+                path: ctx.path.clone(),
                 name: use_name(&item_use.tree),
                 signature: slice(source, start, end(item_use.span())),
                 cfg: cfgs(source, &item_use.attrs),
                 doc: outer_doc(&item_use.attrs),
                 line: lines.line_of(start),
-                members: Vec::new(),
+                members: reexported(repo, ctx, &item_use.tree),
             })
         }
         syn::Item::Impl(item_impl) => {
@@ -418,6 +501,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
                 .filter_map(|member| match member {
                     syn::ImplItem::Fn(function) if is_public(&function.vis) => Some(Item {
                         kind: "fn".to_string(),
+                        path: ctx.path.clone(),
                         name: function.sig.ident.to_string(),
                         signature: slice(
                             source,
@@ -442,6 +526,7 @@ fn describe(source: &str, lines: &LineIndex, item: &syn::Item) -> Option<Item> {
             let start = item_impl.impl_token.span().byte_range().start;
             Some(Item {
                 kind: "impl".to_string(),
+                path: ctx.path.clone(),
                 name: slice(
                     source,
                     start,
@@ -497,6 +582,199 @@ fn use_name(tree: &syn::UseTree) -> String {
             .map(use_name)
             .collect::<Vec<_>>()
             .join(", "),
+    }
+}
+
+/// The declarations a `pub use` points at, sliced from the files that declare
+/// them.
+///
+/// The statement itself is already served verbatim, and a statement is not a
+/// signature: `pub use self::headless::{ensure_headless, ..}` tells an
+/// integrator that the name exists and nothing about how to call it. The
+/// wrapper's two front doors are exactly this shape, so without the resolution
+/// the parameter lists an agent most needs are the ones no answer carries.
+///
+/// The resolution stays inside the same crate and inside the same rule as the
+/// rest of this module: the target is located with `syn` and the text handed
+/// back is `source[span]` of the file that declares it. A leaf that does not
+/// resolve - an external crate, a glob, a `super::` path, a chain of further
+/// re-exports - contributes nothing, because a re-export whose target cannot be
+/// found is a fact this crate does not have.
+fn reexported(repo: &Repo, ctx: &SourceFile, tree: &syn::UseTree) -> Vec<Item> {
+    let mut leaves = Vec::new();
+    use_leaves(tree, &mut Vec::new(), &mut leaves);
+    leaves
+        .into_iter()
+        .filter_map(|(segments, public_name)| {
+            let (target, item) = resolve(repo, ctx, &segments, 0)?;
+            let mut described = describe(repo, &target, &item)?;
+            // The name a caller can write, which a rename makes different from
+            // the declared one. The signature stays the declaration's own.
+            described.name = public_name;
+            Some(described)
+        })
+        .filter(|item| !is_test_only(&item.cfg))
+        .collect()
+}
+
+/// Every name a use tree brings into scope, as (path segments, public name).
+fn use_leaves(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    found: &mut Vec<(Vec<String>, String)>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            use_leaves(&path.tree, prefix, found);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name) => {
+            let mut segments = prefix.clone();
+            segments.push(name.ident.to_string());
+            found.push((segments, name.ident.to_string()));
+        }
+        syn::UseTree::Rename(rename) => {
+            let mut segments = prefix.clone();
+            segments.push(rename.ident.to_string());
+            found.push((segments, rename.rename.to_string()));
+        }
+        // A glob re-exports whatever its target holds at the time, so the names
+        // are a property of that module rather than of this statement. Nothing
+        // is resolved from one; the statement is still served verbatim.
+        syn::UseTree::Glob(_) => {}
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                use_leaves(item, prefix, found);
+            }
+        }
+    }
+}
+
+/// Walks a use path to the item it names, within this crate.
+///
+/// `use` paths resolve from the crate root, so a bare first segment is either a
+/// top-level module of this crate or an external crate; the walk finds the
+/// module or gives up. `super::` is not followed: a module file's parent is a
+/// fact about the module tree this walk does not build, and guessing it would
+/// be the one thing this crate refuses to do.
+fn resolve(
+    repo: &Repo,
+    ctx: &SourceFile,
+    segments: &[String],
+    depth: usize,
+) -> Option<(SourceFile, syn::Item)> {
+    if depth > MAX_REEXPORT_DEPTH {
+        return None;
+    }
+    let (first, rest) = segments.split_first()?;
+    let (start_path, rest) = match first.as_str() {
+        "self" => (ctx.path.clone(), rest),
+        "crate" => (format!("{}/src/lib.rs", ctx.crate_dir), rest),
+        "super" => return None,
+        _ => (format!("{}/src/lib.rs", ctx.crate_dir), segments),
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let (start, parsed) = SourceFile::read(repo, &ctx.crate_dir, &start_path).ok()?;
+    resolve_in(repo, start, &parsed.items, rest, depth)
+}
+
+/// How many `pub use` hops the walk follows before giving up.
+///
+/// The wrapper's headless front door is two: `lib.rs` re-exports what
+/// `activation.rs` re-exports out of its private `headless` module. The bound
+/// is what makes a re-export that points back at itself terminate, since a
+/// crate that does not compile is still a crate this server can be pointed at.
+const MAX_REEXPORT_DEPTH: usize = 8;
+
+fn resolve_in(
+    repo: &Repo,
+    ctx: SourceFile,
+    parsed: &[syn::Item],
+    segments: &[String],
+    depth: usize,
+) -> Option<(SourceFile, syn::Item)> {
+    let (name, rest) = segments.split_first()?;
+    if rest.is_empty() {
+        if let Some(found) = parsed
+            .iter()
+            .find(|item| declared_name(item).as_deref() == Some(name.as_str()))
+        {
+            return Some((ctx, found.clone()));
+        }
+        // Not declared here, so this module may itself be re-exporting it from
+        // somewhere further in. Following the hop is what lets the name an
+        // integrator actually writes - `rub3_wrapper::ensure_headless`, two
+        // re-exports away from its declaration - answer with a signature.
+        return follow(repo, &ctx, parsed, name, depth);
+    }
+    let module = parsed.iter().find_map(|item| match item {
+        syn::Item::Mod(module) if module.ident == name.as_str() => Some(module),
+        _ => None,
+    })?;
+    match &module.content {
+        Some((_, inner)) => resolve_in(repo, ctx, inner, rest, depth),
+        None => {
+            let path = module_files(&ctx.path, name)
+                .into_iter()
+                .find(|candidate| repo.is_file(candidate))?;
+            let (child, child_file) = SourceFile::read(repo, &ctx.crate_dir, &path).ok()?;
+            resolve_in(repo, child, &child_file.items, rest, depth)
+        }
+    }
+}
+
+/// The next hop for a name this module re-exports rather than declares.
+fn follow(
+    repo: &Repo,
+    ctx: &SourceFile,
+    parsed: &[syn::Item],
+    name: &str,
+    depth: usize,
+) -> Option<(SourceFile, syn::Item)> {
+    for item in parsed {
+        let syn::Item::Use(item_use) = item else {
+            continue;
+        };
+        if !is_public(&item_use.vis) {
+            continue;
+        }
+        let mut leaves = Vec::new();
+        use_leaves(&item_use.tree, &mut Vec::new(), &mut leaves);
+        let hop = leaves
+            .into_iter()
+            .find(|(_, public_name)| public_name == name)
+            .map(|(segments, _)| segments);
+        if let Some(segments) = hop {
+            return resolve(repo, ctx, &segments, depth + 1);
+        }
+    }
+    None
+}
+
+/// Where `mod name;` declared in one file puts that module's own file.
+fn module_files(parent: &str, name: &str) -> [String; 2] {
+    let (directory, file) = parent.rsplit_once('/').unwrap_or(("", parent));
+    let base = match file {
+        "lib.rs" | "main.rs" | "mod.rs" => directory.to_string(),
+        other => format!("{directory}/{}", other.trim_end_matches(".rs")),
+    };
+    [format!("{base}/{name}.rs"), format!("{base}/{name}/mod.rs")]
+}
+
+/// The name an item declares, for the kinds a `use` path can end at.
+fn declared_name(item: &syn::Item) -> Option<String> {
+    match item {
+        syn::Item::Fn(function) => Some(function.sig.ident.to_string()),
+        syn::Item::Const(constant) => Some(constant.ident.to_string()),
+        syn::Item::Static(item_static) => Some(item_static.ident.to_string()),
+        syn::Item::Struct(item_struct) => Some(item_struct.ident.to_string()),
+        syn::Item::Enum(item_enum) => Some(item_enum.ident.to_string()),
+        syn::Item::Trait(item_trait) => Some(item_trait.ident.to_string()),
+        syn::Item::Type(item_type) => Some(item_type.ident.to_string()),
+        _ => None,
     }
 }
 

@@ -232,7 +232,10 @@ Six tools: `list_documents`, `read_document`, `search_documents`,
 **Everything it returns is derived at call time, and nothing is transcribed.**
 ABIs and selectors come from the artifacts `forge build` wrote; Rust signatures
 are byte ranges of the source files, so a served signature that is not in the
-file is a bug the suite catches rather than a stale copy nobody notices.
+file is a bug the suite catches rather than a stale copy nobody notices. A
+`pub use` is resolved to the declaration behind it, so the front doors the
+wrapper re-exports out of private modules answer with their real parameter
+lists rather than with the re-export line.
 `contracts/out/` is not checked in, so the two contract tools return an error
 naming `forge build` rather than answering a contract question from memory:
 

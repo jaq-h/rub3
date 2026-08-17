@@ -104,17 +104,25 @@ pub struct Match {
 /// `AGENTS.md`, and an inventory listing both would answer two paths with one
 /// document's content and invite a caller to diff them for a difference that
 /// cannot exist.
+///
+/// One entry the walk cannot use - a directory it may not open, a `.md` that is
+/// not UTF-8 - costs that entry and nothing else, the way [`search`] already
+/// treats an unreadable document. The inventory is the spine of all three
+/// document tools, so failing it whole would take `read_document` and
+/// `search_documents` down with it over a file nobody asked for. Only an
+/// unreadable root is fatal, because an empty inventory would read as a
+/// checkout with no documents in it.
 pub fn inventory(repo: &Repo) -> Result<Vec<Document>, RepoError> {
     let mut paths = Vec::new();
     collect(repo.root(), "", &mut paths)?;
     paths.sort();
-    paths
+    Ok(paths
         .into_iter()
-        .map(|path| {
-            let text = repo.read(&path)?;
-            Ok(parse(&path, &text))
+        .filter_map(|path| {
+            let text = repo.read(&path).ok()?;
+            Some(parse(&path, &text))
         })
-        .collect()
+        .collect())
 }
 
 fn collect(
@@ -146,7 +154,7 @@ fn collect(
             if SKIPPED_DIRECTORIES.contains(&relative.as_str()) {
                 continue;
             }
-            collect(&entry.path(), &relative, found)?;
+            let _ = collect(&entry.path(), &relative, found);
         } else if file_type.is_file() && relative.ends_with(".md") {
             found.push(relative);
         }

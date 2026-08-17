@@ -259,13 +259,14 @@ must be unable to answer from a stored copy of anything.
   predicate that decides what is test scaffolding: `test`, `any(test, ..)` and
   `all(test, ..)` are dropped from the served surface, `not(test)` and a plain
   feature gate are not
-- **`tests/derivation.rs`** (14) - the provenance proofs. Six of them build a
+- **`tests/derivation.rs`** (18) - the provenance proofs. Seven of them build a
   throwaway checkout, ask a question, edit the file the answer came from, and ask
   again *through the same server*: a renamed function, a feature gate added to a
-  crate root, an edited ABI entry, a selector removed from an artifact, a moved
-  fingerprint, and a document added after startup. An answer that survives its
-  own source being changed is either hardcoded or cached, and both are the defect
-  the suite exists to catch. The rest run against this repository:
+  crate root, a declaration re-exported out of a private module, an edited ABI
+  entry, a selector removed from an artifact, a moved fingerprint, and a document
+  added after startup. An answer that survives its own source being changed is
+  either hardcoded or cached, and both are the defect the suite exists to catch.
+  The rest run against this repository:
   `every_served_rust_signature_is_a_verbatim_slice_of_its_file` walks the whole
   workspace and asserts each served signature appears byte for byte in the file
   it is attributed to, and
@@ -274,11 +275,18 @@ must be unable to answer from a stored copy of anything.
   which is how a mis-expanded tuple parameter is caught rather than shipped with
   a plausible-looking wrong selector. A third asserts that no served signature
   carries an attribute or a doc comment, since `syn` spans cover both and a
-  signature a caller cannot paste is only half derived. Two refusals are in here
-  too, for the questions where an empty answer would be read as a fact: a
-  contract question with no artifacts names `forge build`, and a module name
-  that no crate declares names the modules that do exist rather than returning
-  an empty surface an agent would read as "nothing public lives there"
+  signature a caller cannot paste is only half derived. A fourth,
+  `the_wrappers_reexported_front_doors_carry_their_declarations`, holds
+  `supervisor_run` and `ensure_headless` to answering with the `pub fn` line
+  their private modules declare, at the file and line the answer names, since a
+  `pub use` statement tells an agent the name exists and nothing about how to
+  call it. Two refusals are in here too, for the questions where an empty answer
+  would be read as a fact: a contract question with no artifacts names `forge
+  build`, and a module name that no crate declares names the modules that do
+  exist rather than returning an empty surface an agent would read as "nothing
+  public lives there". One tolerance is here for the same reason inverted: a
+  document that is not readable UTF-8 costs that document and not the other two
+  document tools, which share the inventory with it
 - **`tests/docs_legibility.rs`** (8) - the gate: every code fence declares a
   language, every relative cross-reference resolves to a file *and* to a heading
   that exists, one title per document with no skipped heading level, a stated
