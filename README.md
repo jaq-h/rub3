@@ -28,9 +28,22 @@ One call runs `tokensOfOwner` → purchase if empty → cooldown check → `acti
 
 ## Project structure
 
-```
+```text
 rub3/
 ├── crates/
+│   ├── rub3-docs-mcp/                # Docs MCP server (developer-facing; the wrapper does not depend on it)
+│   │   ├── src/
+│   │   │   ├── main.rs               # Binary: resolve the checkout, serve MCP on stdio
+│   │   │   ├── lib.rs                # Module map, and why everything served is derived
+│   │   │   ├── repo.rs               # Checkout resolution, and the only file reads in the crate
+│   │   │   ├── docs.rs               # Markdown inventory, heading outlines, sections, search
+│   │   │   ├── solidity.rs           # Contract set + ABIs derived from forge artifacts
+│   │   │   ├── rustapi.rs            # Public Rust API sliced verbatim out of the workspace's source
+│   │   │   └── server.rs             # The six MCP tools
+│   │   └── tests/
+│   │       ├── derivation.rs         # Mutation proofs: the served answer follows the file
+│   │       ├── docs_legibility.rs    # The docs + llms.txt machine-legibility gate
+│   │       └── mcp_stdio.rs          # Spawns the binary and speaks JSON-RPC to it
 │   └── rub3-wrapper/                 # Wrapper runtime
 │       ├── src/
 │       │   ├── main.rs               # CLI entry point (clap), app constants
@@ -98,10 +111,16 @@ rub3/
 ├── implementation.md                 # Phased development plan with status
 ├── ideation.md                       # Project vision and design principles
 ├── testing.md                        # Test inventory and manual testing guide
+├── llms.txt                          # llms.txt (spec v2) - the agent-facing index of all of the above
 └── README.md                         # This file: orientation, build, test, run
 ```
 
 ## Rust dependencies
+
+The wrapper's, which is what ships. `rub3-docs-mcp` is a separate workspace
+member with its own dependencies and the wrapper does not depend on it, so
+nothing it pulls in reaches a shipped binary: `cargo tree -p rub3-wrapper` is the
+check.
 
 | Crate | Purpose |
 |---|---|
@@ -190,6 +209,46 @@ forge test
 ```
 
 See [contracts/contracts.md](contracts/contracts.md) for local Anvil setup, Base Sepolia deployment, and the reproducible-build contract behind the canonical bytecode fingerprints.
+
+## Docs MCP server
+
+`crates/rub3-docs-mcp` serves this repository's own facts to a coding agent over
+MCP on stdio: the documents and their heading outlines, the contract ABIs with
+their 4-byte selectors, and the workspace's public Rust signatures. Wire it into
+an agent so that it reads a real signature instead of inventing one.
+
+```bash
+claude mcp add rub3-docs -- cargo run --quiet -p rub3-docs-mcp
+```
+
+Any MCP client works; the server takes `--repo-root <path>` when it is started
+from outside the checkout, and otherwise walks up from the working directory.
+`llms.txt` at the repository root is the same orientation in static form, for an
+agent that has no MCP client attached.
+
+Six tools: `list_documents`, `read_document`, `search_documents`,
+`list_contracts`, `contract_abi`, `rust_api`.
+
+**Everything it returns is derived at call time, and nothing is transcribed.**
+ABIs and selectors come from the artifacts `forge build` wrote; Rust signatures
+are byte ranges of the source files, so a served signature that is not in the
+file is a bug the suite catches rather than a stale copy nobody notices.
+`contracts/out/` is not checked in, so the two contract tools return an error
+naming `forge build` rather than answering a contract question from memory:
+
+```bash
+cd contracts && forge build      # then the contract tools answer
+```
+
+The same crate owns the machine-legibility gate over the documents themselves -
+every code fence tagged, every cross-reference and anchor resolving, one title
+per document, no skipped heading level, a stated purpose under each title, and
+`llms.txt` conforming to the specification and pointing at every document that
+exists. It runs with the crate's tests:
+
+```bash
+cargo test -p rub3-docs-mcp
+```
 
 ## Running the wrapper
 
@@ -363,7 +422,7 @@ activation failure.
 Failures with structured parameters also print one parseable line, carrying only
 parameters the wrapper actually measured:
 
-```
+```text
 error: cooldown active on token 0: retry in 12 blocks
 rub3-detail: token_id=0 blocks_remaining=12
 ```
@@ -432,3 +491,4 @@ First target market: wallet-gated MCP servers - paid MCP servers have no licensi
 - [implementation.md](implementation.md) - phased development plan with current status
 - [contracts/contracts.md](contracts/contracts.md) - contract setup, local testing, deployment
 - [testing.md](testing.md) - manual testing guide
+- [llms.txt](llms.txt) - the agent-facing index of the above, following the llms.txt specification

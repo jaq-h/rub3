@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/rub3-docs-mcp",
     "crates/rub3-wrapper",
 ]
 resolver = "2"

@@ -16,6 +16,10 @@ cargo test -p rub3-wrapper
 
 This runs all unit tests, integration tests, and license e2e tests. No external tools required - wallet generation and signing are done natively in Rust via `k256`.
 
+The workspace has a second member, the docs MCP server, whose suites are separate
+and described in [Docs MCP server](#docs-mcp-server-cratesrub3-docs-mcp) below:
+`cargo test -p rub3-docs-mcp`.
+
 The default bundle is `tier-2` + `webview`, so it compiles neither the tier-3
 capabilities nor the headless front door. Cargo features are additive, so
 `--no-default-features` is mandatory when selecting another bundle:
@@ -228,6 +232,65 @@ Shared utilities available to all integration test files:
 - `create_license_json(dir, ...)` - write a valid `LicenseProof` JSON file
 - `wrapper_bin()` - path to the compiled wrapper binary
 - `verifying_key_to_address(key)` - derive Ethereum address from public key
+
+### Docs MCP server (`crates/rub3-docs-mcp/`)
+
+The developer-facing docs server of §3.3, and the machine-legibility gate over
+the documents themselves. A separate workspace member, so it runs on its own and
+adds nothing to the wrapper's dependency path:
+
+```bash
+cargo test -p rub3-docs-mcp
+```
+
+Four suites. Their subject is not behaviour so much as *provenance*: the server
+must be unable to answer from a stored copy of anything.
+
+- **`src/` unit tests** (10) - checkout resolution and the read guard (the walk up
+  from a subdirectory, a named directory that is not a checkout refused, a
+  relative path refused for trying to leave the root, and `CLAUDE.md` still
+  readable through its symlink), plus the Markdown parse: a `#` comment inside a
+  shell fence not counted as a heading, a section carrying its subsections and
+  stopping at its peer, resolution by anchor, and an untagged fence reporting an
+  empty language
+- **`tests/derivation.rs`** (13) - the provenance proofs. Six of them build a
+  throwaway checkout, ask a question, edit the file the answer came from, and ask
+  again *through the same server*: a renamed function, a feature gate added to a
+  crate root, an edited ABI entry, a selector removed from an artifact, a moved
+  fingerprint, and a document added after startup. An answer that survives its
+  own source being changed is either hardcoded or cached, and both are the defect
+  the suite exists to catch. The rest run against this repository:
+  `every_served_rust_signature_is_a_verbatim_slice_of_its_file` walks the whole
+  workspace and asserts each served signature appears byte for byte in the file
+  it is attributed to, and
+  `every_rendered_function_signature_matches_the_artifacts_own_selector_map`
+  cross-checks every rendered contract signature against `methodIdentifiers`,
+  which is how a mis-expanded tuple parameter is caught rather than shipped with
+  a plausible-looking wrong selector. A third asserts that no served signature
+  carries an attribute or a doc comment, since `syn` spans cover both and a
+  signature a caller cannot paste is only half derived
+- **`tests/docs_legibility.rs`** (8) - the gate: every code fence declares a
+  language, every relative cross-reference resolves to a file *and* to a heading
+  that exists, one title per document with no skipped heading level, a stated
+  purpose under each title, no em dashes, and `llms.txt` conforming to the
+  specification, linking only files that exist, and covering every document in
+  the inventory
+- **`tests/mcp_stdio.rs`** (1) - spawns the built binary and speaks
+  newline-delimited JSON-RPC to it: `initialize` at protocol revision
+  `2025-11-25`, `tools/list`, three `tools/call`s and one refusal. It is the only
+  test that can see stdout being clean, which the protocol depends on: a stray
+  `println!` anywhere in the crate would corrupt every message after it
+
+The two contract suites need forge artifacts, which are not checked in. Without
+them the contract tests print `SKIP:` and pass, the same convention as the
+anvil-gated suites. CI builds them first and sets
+`RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1`, which turns that skip into a failure, so a
+run that silently tested nothing cannot report green:
+
+```bash
+(cd contracts && forge build)
+RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1 cargo test -p rub3-docs-mcp
+```
 
 ## 3. Seed a license proof for manual testing
 

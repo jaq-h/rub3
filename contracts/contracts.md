@@ -45,7 +45,7 @@ anvil
 
 Anvil pre-funds ten accounts. The first one's private key is always:
 
-```
+```text
 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 ```
 

@@ -596,7 +596,7 @@ Threaded through `script/Deploy.s.sol`, all four Foundry fixtures, and both wrap
 
 Pulled forward from the old Phase 2 - a CLI is the natural agent interface, and every step is already scriptable.
 
-```
+```bash
 rub3 pack --binary ./target/release/myapp --app-id com.example.myapp \
   --contract 0x1234...abcd --chain base --tier cooldown --headless \
   --session-ttl 7 --output ./dist/myapp
@@ -769,15 +769,47 @@ Goal: close the loop - discover → pay → fetch → verify → run - so the co
 - **The registry maintains a recognised-token list, and ranks and lists entries by the token they are priced in.** The protocol fee accrues in whatever asset a contract lists as its `priceToken`, and the contracts deliberately hold no policy about which assets count (`architecture.md` → "Why the fee split is shaped this way"). The registry is where that judgement lives instead: a listing carries the payment token it quotes, entries priced in a recognised token rank above ones that are not, and the native rail counts as recognised - an ETH-only contract quotes no token at all (`priceToken == address(0)`, the default shape) and its fee accrues in ETH, so only a contract quoting a token rail in an unrecognised asset ranks below. The list is registry-maintained rather than baked into a licence contract, so it can move as tokens do without touching anything already deployed. The ranking reads `priceToken` live from chain, or re-validates on `TokenPriceUpdated`, rather than trusting a snapshot taken at registration: `setTokenPrice(address,uint256)` stays owner-callable for the life of a licence contract, so a contract registered while priced in a recognised token can switch afterwards, and a frozen snapshot would keep ranking it on a quote it no longer honours. Delisting or demotion is discovery only, never validity - the same invariant as every other listing decision here. Like the rest of §3.2 this is a requirement on unbuilt work; nothing enforces it today.
 - **The registry reads `contracts/deployments.json` for the factory it trusts.** `register` gates on `factory.isDeployed(contract)`, so "the factory" needs a single committed referent per chain rather than an address baked into registry tooling; that file is it, keyed by chain id and carrying the deploy block an indexer starts from and the generation in the `previousFactory` chain. A registry that must honour an older generation's deploys walks `previousFactory` from the entry rather than keeping a second list. Every entry is null until launch, which is consistent with the factory and the registry launching together.
 
-### 3.3 - Agent-facing surface `[not started]`
+### 3.3 - Agent-facing surface `[partial]`
 
 Distribution to the machines doing the integration research.
 
-- `llms.txt` + docs served as clean Markdown (the repo's docs are already agent-legible; formalize it).
-- Docs MCP server so Claude Code / Cursor pull real method signatures and contract ABIs instead of hallucinating them.
-- One-shot quickstart: a single self-contained prompt/script - "paste this into your coding agent and your binary is wallet-gated on Base Sepolia in minutes" - deterministic, testnet-safe, verifiable. Market that fact explicitly.
-- Listings: blockchain/MCP server directories, x402-adjacent catalogs (once §2.2 lands), ERC-8004 registries.
-- **Beachhead:** wallet-gated MCP servers - ship the example (`examples/hello-mcp/`) and target paid-MCP developers as design partners.
+- `llms.txt` + docs served as clean Markdown (the repo's docs are already agent-legible; formalize it). **Built.**
+- Docs MCP server so Claude Code / Cursor pull real method signatures and contract ABIs instead of hallucinating them. **Built.**
+- One-shot quickstart: a single self-contained prompt/script - "paste this into your coding agent and your binary is wallet-gated on Base Sepolia in minutes" - deterministic, testnet-safe, verifiable. Market that fact explicitly. **Not built; blocked on a testnet deploy, see below.**
+- Listings: blockchain/MCP server directories, x402-adjacent catalogs (once §2.2 lands), ERC-8004 registries. **Not built; not an engineering call.**
+- **Beachhead:** wallet-gated MCP servers - ship the example (`examples/hello-mcp/`) and target paid-MCP developers as design partners. **Not built; deferred with the quickstart it illustrates.**
+
+**`llms.txt`, and agent-legibility as a checked property rather than a habit.** The documents were already written to be read by a machine, so this was never a rewrite: the whole doc-side diff is eighteen code fences that declared no language and now declare `text` or `bash`. What was missing was the *check*. Nothing failed when a fence lost its tag, when a cross-reference pointed at a heading that had since been renamed, or when a new document arrived without the first-paragraph statement of what it owns that makes every other document in this repository quotable on its own. Those are now assertions, stated as properties rather than as lists of known-good files, so a document a later branch adds is held to them too. Measured before writing them: every relative link and anchor in the six subject documents already resolved, no document skipped a heading level, and the em dash sweep of #42 had not regressed - the gate found nothing but the fences, which is the expected result for a check added to work that was already correct.
+
+`llms.txt` itself follows llmstxt.org **v2** (last modified 2026-08-10), read rather than remembered, and the conformance test says so in its own doc comment: title, summary blockquote, heading-free details, then H2-delimited link lists. v2 dropped the `llms_txt2ctx` expansion tooling and the special meaning of the `Optional` section, so nothing here depends on either; the section is used for its conventional meaning only. Links are absolute `raw.githubusercontent.com` URLs, which is the clean-Markdown representation the specification asks for, and absolute because this file is routinely read detached from the tree it describes. The details section carries the three things an integrating agent most needs before it reads anything else: what the contracts guarantee, that those guarantees are absences from bytecode rather than promises, and that **nothing is deployed to any public network yet**.
+
+Two parts of the specification do not apply yet, and are worth naming so that neither reads later as an oversight. v2's discoverability mechanism is HTML link relations (`rel="alternate" type="text/markdown"`, `rel="describedby"`) or the equivalent HTTP headers, and there is no rub3 website to carry either; when there is one, the file also belongs at its `/llms.txt`. And the "clean Markdown version of each page" the specification asks for is already what a repository serves, since the documents are Markdown to begin with - which is why the links point at raw rather than at the `blob` viewer.
+
+**The docs MCP server** - `crates/rub3-docs-mcp`, a second workspace member. Six tools: `list_documents` (inventory, purposes, full heading outlines), `read_document` (whole document or one section by heading text or anchor, subsections included), `search_documents`, `list_contracts`, `contract_abi` and `rust_api`. It runs on stdio, resolves the checkout from `--repo-root`, then `RUB3_REPO_ROOT`, then a walk up from the working directory, then the tree it was compiled in - the last because an MCP client starts a server with whatever working directory it happens to have, often `/`.
+
+**Everything it serves is derived, and that is the tested claim rather than an intention.** Contract facts come from the artifacts `forge build` wrote, discovered the way `scripts/canonical-bytecode-hashes.sh` discovers them - by reading each artifact's own `compilationTarget` - so no Solidity is parsed and no signature is written down anywhere in the crate. Selectors are read out of the artifact's `methodIdentifiers` map rather than hashed here, which keeps a keccak implementation whose agreement with solc would need proving out of the crate entirely. Rust signatures are *byte ranges of the source file*: `syn` locates the item and the text handed back is `source[span]`, so a served signature that is not in the file is a slicing bug the suite catches, not a stale copy nobody notices. Each item carries the `#[cfg(...)]` that governs it and each module the gate the crate root puts on it, because an API listing of this workspace without the feature gate beside it is misleading - whole modules do not exist under the lower tier bundles.
+
+The corollary is the part worth defending: **a fact that cannot be derived is not served.** `contracts/out/` is not checked in, so the two contract tools return an error naming `cd contracts && forge build` instead of answering from a remembered ABI. That is the failure mode `attest`'s manifest mirror test and the fingerprint gate were both built to prevent, and a docs server is the place it would rot fastest, because nothing downstream would notice a wrong signature until an agent had written calldata against it.
+
+**Why the official SDK rather than a hand-rolled JSON-RPC loop.** The protocol moved twice in the year to August 2026, and the `2026-07-28` revision removes the `initialize` handshake outright in favour of a stateless `server/discover`, adds a required `resultType` to every result and cache hints to every list, while clients in the field still speak `2025-11-25` and older. Version negotiation is therefore real work with a real failure mode, and none of it is rub3's work: `rmcp` 3.1.2 implements all four revisions. What this crate owns is the derivation.
+
+**It stays off the wrapper's dependency path**, which was the constraint on where it could live. A separate member that the wrapper does not depend on adds nothing to a shipped binary: `cargo tree -p rub3-wrapper` lists no `rmcp`, `pulldown-cmark`, `schemars` or `toml`, on the default bundle and on `tier-3,headless`. The workspace-wide `cargo clippy --workspace --all-targets -- -D warnings` in CI already covers the new crate; its tests needed a job, which also builds the contracts first and sets `RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1` so that the artifact-dependent tests cannot silently skip and report green.
+
+**Files** - `crates/rub3-docs-mcp/` (`main.rs`, `lib.rs`, `repo.rs`, `docs.rs`, `solidity.rs`, `rustapi.rs`, `server.rs`, and three test suites), `llms.txt`, `Cargo.toml` (the new member), `README.md` (the per-module map, a "Docs MCP server" section, and the dependency table's scope), `testing.md` (the suite inventory), `.github/workflows/ci.yml` (the `docs` job), `AGENTS.md`, and eighteen code-fence tags across `README.md`, `architecture.md`, `implementation.md`, `ideation.md` and `contracts/contracts.md`.
+
+**Tests** - 32 in the new crate: 10 unit, 13 in `derivation.rs`, 8 in `docs_legibility.rs`, 1 in `mcp_stdio.rs`.
+- Six of the derivation tests build a throwaway checkout, ask a question, edit the file the answer came from, and ask again *through the same server instance*. An answer that survives its own source being edited is either a hardcoded string or a cache, and for a docs server those are the same defect. Covered that way: a renamed function, a feature gate added to a crate root, an edited ABI entry, a selector removed from an artifact, a moved canonical fingerprint, and a document added after startup
+- `every_served_rust_signature_is_a_verbatim_slice_of_its_file` walks the whole workspace and asserts every served signature, member signature and `cfg` appears byte for byte in the file it is attributed to. This is the one that would fail the first time a signature was assembled by re-rendering an AST instead of sliced
+- `every_rendered_function_signature_matches_the_artifacts_own_selector_map` cross-checks two independent fields of the same artifact: every rendered canonical signature must be a key of `methodIdentifiers` with the selector to match, and every function solc emitted a selector for must be served. A tuple parameter expanded wrongly - `tuple[]` over two `uint256` members is `(uint256,uint256)[]` - changes the selector while still reading plausibly, and this is what catches it rather than an agent's failed transaction
+- `no_served_signature_carries_an_attribute_or_a_doc_comment` is the other half of "verbatim": a `syn` span covers an item's attributes, so slicing whole spans hands back a doc comment as part of the signature. It caught exactly that on enum variants and impl headers, which is why each kind is now sliced from the token that begins the declaration
+- `mcp_stdio.rs` spawns the built binary and speaks newline-delimited JSON-RPC to it. It is the only test that can observe stdout being clean, which the protocol depends on absolutely: one stray `println!` anywhere in the crate corrupts every message after it. It also holds the server to identifying itself as `rub3-docs-mcp` - `Implementation::from_build_env()` reports the SDK's own name, which is a real confusion in a client listing several rmcp-based servers
+- The gate suite was verified to go red by breaking each property in turn (an untagged fence, an em dash, a dangling anchor, a document removed from `llms.txt`) rather than only observed to pass
+- Full 9-bundle wrapper matrix green and unaffected, as expected for a change that touches no wrapper file. `--lib` counts: `tier-0` 51, `tier-1` 81, `tier-2` 96, `tier-3`/`tier-4`/`tier-3,binary-encryption` 106, `tier-2,webview` 97, `tier-3,webview` 117, `tier-3,headless` 169
+
+**Deliberately not built here, and why each one waits.**
+- **The one-shot quickstart.** It cannot be honest yet. Nothing is deployed to any public network - every entry in `contracts/deployments.json` is `null` on purpose, and §2.3 has the factory and the registry launching together - so a prompt promising a wallet-gated binary on Base Sepolia in minutes would either be untrue or would hardcode an address that does not exist. Filed separately; it unblocks the moment a testnet deploy exists, and not before
+- **`examples/hello-mcp/`.** It exists to illustrate that quickstart, so it is deferred with it rather than shipped orphaned pointing at nothing deployed
+- **Directory and catalog listings, and any positioning toward paid-MCP developers.** How rub3 is presented is not an engineering decision, and no marketing copy was written here
 
 ### 3.4 - Concurrent seats `[not started]`
 
@@ -944,7 +976,7 @@ Current (implemented). The per-module map is not repeated here: README.md →
 "Project structure" names every wrapper module, including the deferred
 `device.rs` / `decrypt.rs` scaffolds.
 
-```
+```text
 rub3/
 ├── crates/
 │   └── rub3-wrapper/                 # Wrapper runtime (src/, assets/activation.html, tests/)
@@ -968,7 +1000,7 @@ rub3/
 
 Planned (not yet created):
 
-```
+```text
 ├── crates/
 │   ├── rub3-sdk/                # §3.5 - heartbeat, session info
 │   ├── rub3-cli/                # §2.5 - pack, deploy, fetch, register

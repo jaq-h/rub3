@@ -18,7 +18,7 @@ The wrapper is the runtime that enforces this on the machine where the software 
 
 The unit of adoption is a single closed loop a machine can complete end to end, with no human in it:
 
-```
+```text
 discover → pay → fetch → verify → run → (resell)
 ```
 

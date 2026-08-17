@@ -164,6 +164,53 @@ jobs:
         run: forge test -vv
 
   # ---------------------------------------------------------------------------
+  # Docs surface (implementation.md §3.3): the docs MCP server and the
+  # machine-legibility gate over the documents themselves.
+  #
+  # This job exists because `cargo test -p rub3-wrapper` does not reach a second
+  # workspace member. `cargo clippy --workspace` in the lint job above already
+  # covers the crate for lint; nothing covered its tests.
+  #
+  # WHY forge RUNS FIRST
+  # The server derives contract ABIs from the artifacts forge wrote, and
+  # contracts/out is not checked in. Without them the artifact-dependent tests
+  # print `SKIP:` and pass, which is the right behaviour for a contributor who
+  # has never run forge and exactly the wrong behaviour for a gate.
+  # RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1 turns that skip into a failure, so this job
+  # cannot go green having tested nothing - the same reason
+  # scripts/assert-e2e-ran.sh exists for the anvil suites.
+  #
+  # forge is deliberately unpinned here, like every foundry job except the
+  # fingerprint one: this job cares only about what forge *compiles* into the ABI
+  # and methodIdentifiers, and foundry.toml pins solc_version, so any forge
+  # produces the same artifact fields it reads.
+  # ---------------------------------------------------------------------------
+  docs:
+    name: docs surface (mcp server + legibility gate)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1.9.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: docs
+
+      - name: forge build
+        working-directory: contracts
+        run: forge build
+
+      - name: cargo test -p rub3-docs-mcp
+        env:
+          # Without this the contract-derivation tests would skip and this job
+          # would report green on an unbuilt artifact directory.
+          RUB3_DOCS_MCP_REQUIRE_ARTIFACTS: 1
+        run: cargo test -p rub3-docs-mcp
+
+  # ---------------------------------------------------------------------------
   # Canonical bytecode fingerprints. BLOCKING, not advisory.
   #
   # The canonical fingerprint of a rub3 contract is sha256 of the compiler's
