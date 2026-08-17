@@ -281,7 +281,7 @@ must be unable to answer from a stored copy of anything.
   predicate that decides what is test scaffolding: `test`, `any(test, ..)` and
   `all(test, ..)` are dropped from the served surface, `not(test)` and a plain
   feature gate are not
-- **`tests/derivation.rs`** (26) - the provenance proofs. Seven of them build a
+- **`tests/derivation.rs`** (27) - the provenance proofs. Seven of them build a
   throwaway checkout, ask a question, edit the file the answer came from, and ask
   again *through the same server*: a renamed function, a feature gate added to a
   crate root, a declaration re-exported out of a private module, an edited ABI
@@ -297,7 +297,10 @@ must be unable to answer from a stored copy of anything.
   which is how a mis-expanded tuple parameter is caught rather than shipped with
   a plausible-looking wrong selector. A third asserts that no served signature
   carries an attribute or a doc comment, since `syn` spans cover both and a
-  signature a caller cannot paste is only half derived. A fourth,
+  signature a caller cannot paste is only half derived; its fixture companion,
+  `a_braced_variant_is_cut_at_its_brace_and_serves_its_fields`, pins the cut a
+  braced enum variant needs to satisfy it, because a variant's body carries doc
+  comments of its own and its fields are served as members instead. A fourth,
   `the_wrappers_reexported_front_doors_carry_their_declarations`, holds
   `supervisor_run` and `ensure_headless` to answering with the `pub fn` line
   their private modules declare, at the file and line the answer names, since a
