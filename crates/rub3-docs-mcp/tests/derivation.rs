@@ -751,14 +751,75 @@ fn a_module_that_derived_no_items_keeps_its_doc() {
     assert_eq!(root.doc, "What the demo crate is.");
 }
 
-/// A module that exists and exposes nothing refuses, like the three typos do.
+/// A module that exists and exposes nothing is answered, not refused.
 ///
-/// No `pub mod` of this workspace is empty today, so the condition is built
-/// rather than found: without it the module guard passes, the name guard is
-/// skipped, and the caller gets `{"crates": []}`, which reads as "no public API
-/// here" and sends an agent back to inventing the signature.
+/// One rule holds at every filter: a module doc is derived content this tool
+/// serves, so a module that derived no public items is an answer rather than an
+/// absence. Only a module that does not exist is refused, and that refusal
+/// names the modules that do. Narrowing to a module the unfiltered listing just
+/// showed would otherwise be an error, which reads as the module not existing
+/// and is the belief every guard here was written to prevent.
 #[test]
-fn a_module_with_no_public_items_is_refused_rather_than_answered_empty() {
+fn a_module_with_no_public_items_answers_with_its_doc() {
+    let fixture = Fixture::new();
+    let server = fixture.server();
+    fixture.write(
+        "crates/demo/src/lib.rs",
+        "//! Demo crate.\n\npub mod widget;\npub mod plumbing;\n",
+    );
+    fixture.write(
+        "crates/demo/src/plumbing.rs",
+        "//! Internals only.\n\nfn helper() -> u8 {\n    1\n}\n",
+    );
+    let ask = |module: Option<&str>| {
+        server.rust_api(Parameters(RustApi {
+            crate_name: None,
+            module: module.map(str::to_string),
+            name: None,
+            limit: None,
+        }))
+    };
+
+    let unfiltered = ask(None).expect("the crate derives").0.crates;
+    let listed = unfiltered
+        .iter()
+        .flat_map(|crate_api| crate_api.modules.iter())
+        .find(|module| module.name == "plumbing")
+        .expect("the unfiltered listing carries the module");
+    assert_eq!(listed.doc, "Internals only.");
+
+    // The same module, asked for directly, is the same answer.
+    let narrowed = ask(Some("plumbing"))
+        .expect("a module that exists answers")
+        .0;
+    assert_eq!(narrowed.crates.len(), 1);
+    assert_eq!(narrowed.crates[0].modules.len(), 1);
+    assert_eq!(narrowed.crates[0].modules[0].name, "plumbing");
+    assert!(narrowed.crates[0].modules[0].items.is_empty());
+    assert_eq!(narrowed.crates[0].modules[0].doc, "Internals only.");
+
+    // A module that does not exist is still refused, and still says what does.
+    let error = match ask(Some("plumbin")) {
+        Err(error) => error,
+        Ok(served) => panic!(
+            "a module that does not exist must not answer, got {} crates",
+            served.0.crates.len()
+        ),
+    };
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("plumbin") && message.contains("widget"),
+        "the refusal must name the modules that do exist, got: {message}"
+    );
+}
+
+/// A refusal never trails an empty list.
+///
+/// The list is the whole reason the refusal exists, so a scope with no public
+/// names has to say that rather than print a colon and stop, which reads as the
+/// server having lost the answer.
+#[test]
+fn a_refusal_with_nothing_to_list_says_so() {
     let fixture = Fixture::new();
     let server = fixture.server();
     fixture.write(
@@ -773,36 +834,87 @@ fn a_module_with_no_public_items_is_refused_rather_than_answered_empty() {
     let error = match server.rust_api(Parameters(RustApi {
         crate_name: None,
         module: Some("plumbing".to_string()),
-        name: None,
+        name: Some("helper".to_string()),
         limit: None,
     })) {
         Err(error) => error,
         Ok(served) => panic!(
-            "a module with no public API must not answer, got {} crates",
+            "nothing public is named helper, got {} crates",
             served.0.crates.len()
         ),
     };
     let message = format!("{error:?}");
     assert!(
-        message.contains("plumbing") && message.contains("demo"),
-        "the refusal must name what was asked and what has an API, got: {message}"
+        message.contains("There are no public names in scope"),
+        "a refusal with nothing to list must say so, got: {message}"
     );
+    assert!(
+        !message.contains("scope: "),
+        "an empty list must not be printed at all, got: {message}"
+    );
+}
 
-    // The module that does have a surface still answers.
-    let served = server
-        .rust_api(Parameters(RustApi {
-            crate_name: None,
-            module: Some("widget".to_string()),
-            name: None,
-            limit: None,
-        }))
-        .expect("widget exposes public items")
-        .0
-        .crates;
-    assert_eq!(
-        only_signature(&served, "widget", "alpha").as_deref(),
-        Some("pub fn alpha(count: u32) -> bool"),
+/// The cap drops a crate it emptied, and keeps one that had nothing to cut.
+///
+/// A crate whose every item the cap took is an artifact of truncation and
+/// answers nothing, so a page carrying it spends context on an empty entry. A
+/// crate that derived no items in the first place is a real answer, and its
+/// `//!` survives the cap the way it survives the filters.
+#[test]
+fn the_cap_drops_a_crate_it_emptied_and_keeps_a_doc_only_one() {
+    let fixture = Fixture::new();
+    let server = fixture.server();
+    fixture.write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/demo\", \"crates/second\", \"crates/notes\"]\nresolver = \"2\"\n",
     );
+    fixture.write(
+        "crates/second/Cargo.toml",
+        "[package]\nname = \"second\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    fixture.write(
+        "crates/second/src/lib.rs",
+        "//! Second crate.\n\n/// Does the only thing.\npub fn only(flag: bool) -> bool {\n    flag\n}\n",
+    );
+    fixture.write(
+        "crates/notes/Cargo.toml",
+        "[package]\nname = \"notes\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    fixture.write("crates/notes/src/lib.rs", "//! Nothing public here.\n");
+    let ask = |limit: Option<usize>| {
+        server
+            .rust_api(Parameters(RustApi {
+                crate_name: None,
+                module: None,
+                name: None,
+                limit,
+            }))
+            .expect("the workspace derives")
+            .0
+    };
+
+    let whole = ask(None);
+    assert!(!whole.truncated);
+    for member in ["demo", "second", "notes"] {
+        assert!(
+            whole.crates.iter().any(|api| api.name == member),
+            "{member} is a workspace member with a library"
+        );
+    }
+
+    let capped = ask(Some(1));
+    assert!(capped.truncated);
+    let served: Vec<&str> = capped.crates.iter().map(|api| api.name.as_str()).collect();
+    assert!(
+        !served.contains(&"second"),
+        "the cap took every item of second, so it answers nothing, got {served:?}"
+    );
+    let notes = capped
+        .crates
+        .iter()
+        .find(|api| api.name == "notes")
+        .expect("a crate the cap took nothing from is still an answer");
+    assert_eq!(notes.modules[0].doc, "Nothing public here.");
 }
 
 // ── The real repository ───────────────────────────────────────────────────────

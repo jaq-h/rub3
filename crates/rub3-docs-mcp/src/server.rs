@@ -291,8 +291,8 @@ impl DocsServer {
             if crates.is_empty() {
                 return Err(ErrorData::invalid_params(
                     format!(
-                        "no workspace crate named {wanted} with a library. Members with one: {}",
-                        known.join(", ")
+                        "no workspace crate named {wanted} with a library. {}",
+                        listing("members with a library", known)
                     ),
                     None,
                 ));
@@ -300,9 +300,11 @@ impl DocsServer {
         }
         if let Some(wanted) = &request.module {
             // A misspelled module name has to refuse for the same reason the
-            // crate name above it does: an empty success reads as "that module
-            // exposes no public API", and an agent believing that goes back to
-            // inventing the signature this tool exists to hand it.
+            // crate name above it does: an empty success reads as "there is no
+            // such API", and an agent believing that goes back to inventing the
+            // signature this tool exists to hand it. A module that exists and
+            // exposes nothing is the other case entirely: it is answered, with
+            // its `//!`, because that documentation is derived content.
             let known: BTreeSet<String> = crates
                 .iter()
                 .flat_map(|api| api.modules.iter().map(|module| module.name.clone()))
@@ -312,10 +314,7 @@ impl DocsServer {
             }
             if crates.iter().all(|api| api.modules.is_empty()) {
                 return Err(ErrorData::invalid_params(
-                    format!(
-                        "no module named {wanted}. Modules in scope: {}",
-                        known.into_iter().collect::<Vec<_>>().join(", ")
-                    ),
+                    format!("no module named {wanted}. {}", listing("modules", known)),
                     None,
                 ));
             }
@@ -359,25 +358,20 @@ impl DocsServer {
             {
                 return Err(ErrorData::invalid_params(
                     format!(
-                        "no public item whose name contains {wanted}. Names in scope: {}",
-                        known.into_iter().collect::<Vec<_>>().join(", ")
+                        "no public item whose name contains {wanted}. {}",
+                        listing("public names", known)
                     ),
                     None,
                 ));
             }
         }
-        crates.retain(|api| api.modules.iter().any(|module| !module.items.is_empty()));
+        crates.retain(|api| !api.modules.is_empty());
         if crates.is_empty() {
-            // The residual of the three guards above: a module that exists and
-            // exposes nothing passes all of them, and the retain then empties
-            // the listing. `{"crates": []}` reads the same way here as it does
-            // for a typo, so it refuses the same way rather than answering.
+            // Reachable only with no filter at all, when no member of the
+            // workspace has a library to describe. A filter that matches
+            // nothing has already refused above and named what does exist.
             return Err(ErrorData::invalid_params(
-                format!(
-                    "no public items{}. Members with a library: {}",
-                    scope(&request),
-                    members.join(", ")
-                ),
+                "no workspace member has a library to describe".to_string(),
                 None,
             ));
         }
@@ -387,13 +381,25 @@ impl DocsServer {
     }
 }
 
-/// What the caller asked for, for a refusal that has to name it.
-fn scope(request: &RustApi) -> String {
-    match (&request.crate_name, &request.module) {
-        (Some(krate), Some(module)) => format!(" in {krate}::{module}"),
-        (Some(krate), None) => format!(" in {krate}"),
-        (None, Some(module)) => format!(" in module {module}"),
-        (None, None) => String::new(),
+/// What a refusal names instead of the thing that was asked for.
+///
+/// The list is the whole reason these refusals exist: it turns a typo into a
+/// correction. When there is nothing to list, saying so is the answer, since a
+/// colon followed by nothing reads as a bug in the server.
+fn listing(what: &str, known: impl IntoIterator<Item = String>) -> String {
+    let known: Vec<String> = known.into_iter().collect();
+    if known.is_empty() {
+        format!("There are no {what} in scope.")
+    } else {
+        format!("{} in scope: {}", capitalise(what), known.join(", "))
+    }
+}
+
+fn capitalise(what: &str) -> String {
+    let mut characters = what.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
     }
 }
 
@@ -410,26 +416,32 @@ fn scope(request: &RustApi) -> String {
 /// comment ride along with it, and the doc comments are the bulk of the
 /// payload.
 ///
-/// A module the cap emptied is dropped, the way one the name filter emptied is.
-/// A module that derived no items in the first place is kept: a crate root of
-/// `//! What this is.` over nothing but `pub mod` declarations is an ordinary
-/// shape, and that documentation is derived content with nowhere else to
-/// surface, since the walk describes no `mod` item.
+/// What the cap emptied is dropped, module and crate alike; what derived
+/// nothing to begin with is kept.
+///
+/// A module of `//! What this is.` over nothing but `pub mod` declarations is
+/// an ordinary shape, and that documentation is derived content with nowhere
+/// else to surface, since the walk describes no `mod` item. A crate the cap
+/// took every item from is the opposite: an artifact of truncation with nothing
+/// left to say, and a page that carried it would be spending the caller's
+/// context on an entry that answers nothing.
 fn truncate(crates: &mut Vec<rustapi::CrateApi>, limit: usize) -> bool {
     let mut left = limit;
     let mut truncated = false;
-    for api in crates.iter_mut() {
+    crates.retain_mut(|api| {
+        let described = api.modules.iter().any(|module| !module.items.is_empty());
         api.modules.retain_mut(|module| {
-            let described = !module.items.is_empty();
+            let module_described = !module.items.is_empty();
             if module.items.len() > left {
                 module.items.truncate(left);
                 truncated = true;
             }
             left -= module.items.len();
-            !described || !module.items.is_empty()
+            !module_described || !module.items.is_empty()
         });
-    }
-    crates.retain(|api| !api.modules.is_empty());
+        let remaining = api.modules.iter().any(|module| !module.items.is_empty());
+        !api.modules.is_empty() && (remaining || !described)
+    });
     truncated
 }
 

@@ -259,7 +259,7 @@ must be unable to answer from a stored copy of anything.
   predicate that decides what is test scaffolding: `test`, `any(test, ..)` and
   `all(test, ..)` are dropped from the served surface, `not(test)` and a plain
   feature gate are not
-- **`tests/derivation.rs`** (24) - the provenance proofs. Seven of them build a
+- **`tests/derivation.rs`** (26) - the provenance proofs. Seven of them build a
   throwaway checkout, ask a question, edit the file the answer came from, and ask
   again *through the same server*: a renamed function, a feature gate added to a
   crate root, a declaration re-exported out of a private module, an edited ABI
@@ -284,19 +284,21 @@ must be unable to answer from a stored copy of anything.
   workspace twice and holds the second answer to the same verbatim slices as the
   first: `rustapi::workspace` drops the spans of every earlier derivation before
   it starts, and dropping them any later would silently start slicing the right
-  shape out of the wrong file. Four refusals are in here too, for the questions
+  shape out of the wrong file. Three refusals are in here too, for the questions
   where an empty answer would be read as a fact: a contract question with no
   artifacts names `forge build`, a module name that no crate declares names the
-  modules that do exist, an item name nothing matches names the items that do,
-  and a filter selecting a real module that exposes nothing names the members
-  that have an API, rather than returning an empty surface an agent would read
-  as "nothing public lives there". The last builds its own empty module in the
-  fixture, since no `pub mod` of this workspace is empty today. Two more hold
-  the item cap: an unfiltered `rust_api` is capped at `limit` items and reports
-  `truncated`, and the capped answer is a prefix of the whole one rather than a
-  different derivation; and a module that derived no items keeps its `//!`, since
-  only a module the filter or the cap emptied is dropped. Both build the shape
-  they need in the fixture, since no module of this workspace has it. Two tolerances are here for the same reason inverted: a
+  modules that do exist, and an item name nothing matches names the items that
+  do, rather than returning an empty surface an agent would read as "nothing
+  public lives there". A fourth holds the shape of those refusals: a scope with
+  no public names in it must say so rather than print a colon and stop, since
+  the list is the whole reason the refusal exists. Four more hold the single
+  rule about modules that expose nothing, which are answered rather than
+  refused: such a module keeps its `//!` unfiltered and answers the same way
+  when asked for by name, only an unknown module is refused, an unfiltered
+  `rust_api` is capped at `limit` items and reports `truncated` with the capped
+  answer a prefix of the whole one, and the cap drops a crate it emptied while
+  keeping one that had nothing to cut. All of them build the shape they need in
+  the fixture, since no module of this workspace has it. Two tolerances are here for the same reason inverted: a
   document that is not readable UTF-8 costs that document and not the other two
   document tools, which share the inventory with it, and a missing
   `contracts/canonical-bytecode.json` costs the fingerprints and not the whole
