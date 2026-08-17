@@ -555,17 +555,44 @@ The distinction matters because an agent can verify the first list before buying
 | Deploy-time parameters frozen | `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` are `immutable` - no `setPredecessor(address)` selector. On `Rub3Factory`, `previousFactory` is `immutable` in the same way, with no `setPreviousFactory(address)`: it decides which predecessors a canonical deploy may name, so repointing it would grant a laundered contract standing after the fact |
 | The protocol fee is frozen per contract | `feeBps` and `treasury` are `immutable` on the licence contract and on the `Rub3Factory` that stamped them; `setFeeBps(uint16)` and `setTreasury(address)` are absent from the runtime bytecode. Read `feeBps()` / `treasury()` before buying and they are what that contract will charge for as long as it exists |
 | Migration cannot be forced | `claimFromPredecessor` is the only mint path outside `purchase` / `purchaseWithAuthorization`, and it checks `ownerOf(...) == msg.sender` on the predecessor |
-| The deployed code is this repository's template, not a modified copy | Zero the immutable byte ranges published in `contracts/canonical-bytecode.json`, `sha256` the result, and compare against that contract's `deployed_bytecode_sha256`. This is the check every row above depends on: they describe the template, and only a fingerprint match says the deployed contract *is* the template. It is name-independent, so a modified copy exposing seizure under an unguessed name fails it while passing the selector scan. `crates/rub3-wrapper/src/attest.rs` pins the same fingerprints and refuses to purchase without a match. `Rub3Factory.isDeployed(addr)` narrows the same question from the other side - a factory deploy is provably an unmodified template on that factory's terms - but the factory's own code has to be fingerprinted first, and its runtime code does not contain the licence implementations, so verifying one means also comparing `accessDeployer()` / `subscriptionDeployer()` against the manifest, which pins all five |
+| The deployed code is this repository's template, not a modified copy | Zero the immutable byte ranges published in `contracts/canonical-bytecode.json`, `sha256` the result, and compare against that contract's `deployed_bytecode_sha256`. This is the check every row above depends on: they describe the template, and only a fingerprint match says the deployed contract *is* the template. It is name-independent, so a modified copy exposing seizure under an unguessed name fails it while passing the selector scan. `crates/rub3-wrapper/src/attest.rs` pins the same fingerprints and refuses to purchase without a match. `Rub3Factory.isDeployed(addr)` narrows the same question from the other side - a factory deploy is provably an unmodified template on that factory's terms - but the factory's own code has to be fingerprinted first, and its runtime code does not contain the licence implementations, so verifying one means also comparing `accessDeployer()` / `subscriptionDeployer()` against the manifest, which pins all six. A published fingerprint only covers the releases the comparator already has, so a contract built from a **later** release fails this row indistinguishably from a modified copy. `Rub3CodeRegistry` is the append-only on-chain record that tells the two apart (implementation.md §2.9); it is consulted only on a miss, its own code is fingerprinted by this same row before its answer is believed, and none is deployed yet |
 
 **Convention** - real commitments, but not provable from the bytecode:
 
 | Property | Why it isn't bytecode |
 |---|---|
 | Registry delisting never invalidates a token | `Rub3Registry` is not built yet (§3.2). Today it is a design commitment; once built, the property holds because the registry has no call into the license contract at all |
-| An honest answer from the RPC endpoint | The fingerprint row above reduces to `eth_getCode` being answered truthfully by whatever endpoint the wrapper was packed with. An endpoint that lies returns canonical code for a hostile contract, and nothing on the machine can tell. The honest form of the claim is "an honest view of chain state implies canonical code"; a quorum across independent endpoints, or a light-client-verified read, is what would close it, and neither is built |
+| Code-registry deprecation never invalidates a token | `Rub3CodeRegistry` (§2.9) has no status that could - `Deprecated` is "not recommended for new purchases", and the record stays whole. Bytecode proves the absence of removal and rewrite, which is asserted in `test/Rub3CodeRegistry.t.sol`; what stays convention is how a *consumer* reads the status. The wrapper's reading is to warn and buy, and nothing on its launch path consults the registry at all |
+| The code registry's owner key is not misused | Append-only bounds a compromise of it to *additions*, each a permanent public `Published` event, and leaves it unable to remove, rewrite, or invalidate. That is a bound and a detection surface, not a prevention: alarming on those events is monitoring, and no watcher is built |
+| An honest answer from the RPC endpoint | The fingerprint row above reduces to `eth_getCode`, and its code-registry fallback to `eth_call`, being answered truthfully by whatever endpoint the wrapper was packed with. An endpoint that lies returns canonical code for a hostile contract, and lies about the registry's own code in the same breath, so the second authority neither dilutes this nor compounds it - one dishonest view of chain state defeats both reads at once, and nothing on the machine can tell. **This is the largest residual risk in the whole scheme and it is unclosed.** The honest form of the claim is "an honest view of chain state implies canonical code"; a quorum across independent endpoints, or a light-client-verified read, is what would close it, and neither is built |
 | The immutables behind a canonical fingerprint | The comparison zeroes them by construction, so a match says nothing about `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` or the fee terms. Byte-identical canonical code pointed at an attacker-controlled ERC-6551 implementation still matches. Read the getters and check them against a buyer policy - separate work, and not built into the wrapper |
 | A revoked binary already running keeps running | Deliberate. The hash set informs new downloads and activations; a switch that could stop a running binary would be a revocation surface |
 | The developer keeps publishing builds and hashes | Unenforceable by anyone. It is also the failure mode the invariants are designed to survive: an abandoned contract keeps validating forever, so vendor death depreciates a license rather than confiscating it |
+
+#### Rub3CodeRegistry *(implementation.md §2.9)*
+
+The version authority behind the wrapper's pinned fingerprint table, and **not** a listing of products - `Rub3Registry` above is that, and the two share nothing but a word.
+
+```solidity
+contract Rub3CodeRegistry is Ownable2Step {   // no proxy, no removal, no status downgrade
+    function record(bytes32 maskedCodeHash) external view returns (Release memory);
+    function offsetTables() external view returns (ByteRange[][] memory);
+    function publish(bytes32 mch, Role role, string calldata contractName, string calldata version,
+                     bytes32 sourceCommit, string calldata solcVersion,
+                     ByteRange[] calldata offsets) external onlyOwner;
+    function deprecate(bytes32 mch, string calldata reason) external onlyOwner;  // advises, never invalidates
+}
+```
+
+A fingerprint table compiled into a binary can only recognise the releases that build was packed against, so a contract from a **later** release is a table miss and so is a modified copy. This maps a masked code hash to the release that produced it, so a buyer's agent whose table misses can ask the chain instead of refusing. The hash *is* the version; `version` is a label nothing branches on.
+
+Three properties carry the design:
+
+- **Append-only.** No removal, no overwrite, no un-deprecate, no proxy. A compromised owner key can only *add*, and every addition is a permanent public `Published` event.
+- **`Deprecated` never invalidates.** It means "not recommended for new purchases"; a held token, its validation and its renewal terms are untouched, and nothing on any launch path reads this contract. Anything else would be the revocation surface the ownership invariants rule out, reached through a different door.
+- **Its own code is verified before its answer is believed.** One address and one masked hash, both frozen into the wrapper at pack time; the deployer is trusted for nothing. `offsetTables()` publishes the distinct immutable layouts in use so an agent can compute a hash before it has a record to look one up in - one table today, shared by `Rub3Access` and `Rub3Subscription`.
+
+Nothing is deployed: `code_registry` is `null` for every chain in `contracts/deployments.json`, so every wrapper refuses on a table miss exactly as it did before this contract existed.
 
 #### Rub3Registry *(planned - implementation.md §3.2)*
 
@@ -946,7 +973,9 @@ This is intentional and matches the semantics: **transfer sells the account to t
 ### Defense layers summary
 
 ```text
-Attestation:   masked code hash vs fingerprints pinned in the binary (pre-purchase, both front doors: refuses to buy from non-canonical code, never blocks a launch)
+Attestation:   masked code hash vs fingerprints pinned in the binary, then vs the append-only
+               Rub3CodeRegistry on a miss (pre-purchase, both front doors: refuses to buy from
+               non-canonical code, never blocks a launch)
 Distribution:  on-chain binary hash (verify download)
 Encryption:    AES-256-GCM binary encryption (tiers 3-4: binary useless without valid session)
 Identity:      ENS resolution (verify developer identity)

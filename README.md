@@ -56,7 +56,7 @@ rub3/
 │       │   ├── signer.rs             # `Signer` trait + `LocalSigner` - the only holder of raw key material (feature `headless`)
 │       │   ├── tx.rs                 # EIP-1559 build / sign / broadcast for headless (feature `headless`)
 │       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner, chainId, getCode) via alloy
-│       │   ├── attest.rs             # Pre-purchase contract attestation: masked code hash vs the pinned canonical table (feature `onchain-read`, tier 2+)
+│       │   ├── attest.rs             # Pre-purchase contract attestation: masked code hash vs the pinned canonical table, then vs Rub3CodeRegistry on a miss (feature `onchain-read`, tier 2+)
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC message handling (feature `webview`)
 │       │   ├── webview/session_flow.rs # Test-only: the §1.8 activation flows driven at the IPC seam, three of them anvil-gated (`#[cfg(test)]`, never shipped)
 │       │   ├── webview/session_flow/onchain.rs # Test-only: the anvil harness behind those three (spawn/deploy/mine helpers, port 8551)
@@ -79,13 +79,15 @@ rub3/
 │   │   ├── Rub3License.sol           # Abstract base (ERC-721 + Enumerable + Ownable)
 │   │   ├── Rub3Access.sol            # One-time purchase license
 │   │   ├── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
-│   │   └── Rub3Factory.sol           # §2.3 - fee-stamping deploys + isDeployed, and its two deployer helpers
+│   │   ├── Rub3Factory.sol           # §2.3 - fee-stamping deploys + isDeployed, and its two deployer helpers
+│   │   └── Rub3CodeRegistry.sol      # §2.9 - append-only record of which masked code hashes are genuine releases
 │   ├── test/
 │   │   ├── Rub3Access.t.sol
 │   │   ├── Rub3Subscription.t.sol
 │   │   ├── Rub3Invariants.t.sol      # Ownership invariants (§2.4) + no-revocation bytecode audit
 │   │   ├── Rub3TokenPurchase.t.sol   # Stablecoin rail (§2.2): EIP-3009 authorization, replay, front-running
 │   │   ├── Rub3Factory.t.sol         # §2.3: fee immutability, exact split on both rails, direct deploys
+│   │   ├── Rub3CodeRegistry.t.sol    # §2.9: append-only publish, deprecation that invalidates nothing, owner-only writes
 │   │   └── mocks/
 │   │       ├── MockEIP3009Token.sol  # Faithful EIP-3009 stand-in for USDC, plus its negative fixtures
 │   │       └── NonCanonicalRub3Access.sol # §2.6 - a licence deliberately not canonical; never move to src/
@@ -96,7 +98,7 @@ rub3/
 │   ├── remappings.txt                # Import remappings pinned in-tree (a reproducibility input)
 │   ├── foundry.lock                  # Pinned dependency revisions, mirrors the submodule gitlinks
 │   ├── canonical-bytecode.json       # Expected sha256 of each contract's deployedBytecode + immutable ranges
-│   ├── deployments.json              # The canonical Rub3Factory per chain id (address, deploy block, generation); unpopulated until launch
+│   ├── deployments.json              # The canonical Rub3Factory and Rub3CodeRegistry per chain id; unpopulated until launch
 │   ├── .env.example
 │   └── contracts.md                  # Setup guide (Anvil, Base Sepolia) + reproducible builds
 ├── licenses/
@@ -354,10 +356,19 @@ hashes the result, and compares that against a table of canonical fingerprints
 compiled into the binary. A match needs no further network round trip and is
 the common case; it prints one stderr line naming what matched
 (`rub3: 0x... verified as canonical Rub3Access (...)`) and the purchase goes
-ahead. A miss refuses the purchase before anything is signed and with no
-transaction sent. Both front doors run the same check and differ only in how
-they say no: the headless door exits 23 with a machine-readable detail line, and
-the activation window shows a person what was found and what to do about it.
+ahead.
+
+A miss is not the end of the question, because a contract built from a template
+release newer than the binary looks exactly like a modified copy from there. The
+wrapper then asks `Rub3CodeRegistry`, the append-only on-chain record of which
+code is a genuine rub3 release, having first checked that the registry's own
+code is what it should be. Code neither authority knows refuses the purchase
+before anything is signed and with no transaction sent. No registry is deployed
+yet, so today a miss is a refusal and costs no extra round trip.
+
+Both front doors run the same check and differ only in how they say no: the
+headless door exits 23 with a machine-readable detail line, and the activation
+window shows a person what was found and what to do about it.
 
 Masking the immutables is what makes the comparison work at all: they hold the
 constructor's arguments, so two legitimate deploys of identical code that chose
@@ -470,8 +481,9 @@ the authority on what each covers, what it cost, and what comes next.
 - **Stablecoin rail (§2.2)** - USDC purchases and renewals through EIP-3009 authorizations anyone may submit, including from EIP-1271 smart-contract wallets, so an agent holding no ETH can still buy the price
 - **`Rub3Factory` + protocol fee (§2.3)** - immutable fee terms stamped into every canonical deploy and recorded in `isDeployed`; direct deploys stay fee-free and unrecorded. The registry and marketplace the row is for are not built, and the factory and the registry launch together: nothing reaches mainnet or is declared ready before then
 - **Ownership invariants (§2.4)** - append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor`, the contract-side `honorsContract` trust rule, per-token renewal snapshots, and a no-revocation bytecode audit over four deployed contracts
-- **Reproducible builds** - canonical bytecode fingerprints for five contracts, gated in CI
-- **Pre-purchase contract attestation (§2.6, §2.8)** - before anything is spent, from either front door, the wrapper compares the contract's masked code hash against fingerprints pinned in the binary and refuses on a miss, catching a modified copy that a selector-name scan passes in silence. An agent gets exit 23; a person gets a screen saying what was found and what to do about it, in place of the purchase screen rather than beside it. It gates purchases only, never launches
+- **Reproducible builds** - canonical bytecode fingerprints for six contracts, gated in CI
+- **Pre-purchase contract attestation (§2.6, §2.8, §2.9)** - before anything is spent, from either front door, the wrapper compares the contract's masked code hash against fingerprints pinned in the binary and refuses on a miss, catching a modified copy that a selector-name scan passes in silence. An agent gets exit 23; a person gets a screen saying what was found and what to do about it, in place of the purchase screen rather than beside it. It gates purchases only, never launches
+- **`Rub3CodeRegistry` (§2.9)** - the append-only on-chain authority a wrapper asks when its own table misses, so a release newer than the binary is told apart from a modified copy. Nothing can remove, overwrite or invalidate a record, `Deprecated` means "not recommended" and never strands a licence, and the registry's own code is fingerprinted before its answer is believed. Built and tested; unpopulated in `deployments.json`, so it is inert until a deploy exists
 - **Spend ceilings (§2.2, §2.7)** - one operator policy bounds both rails before anything is spent: `RUB3_AGENT_MAX_TOKEN_AMOUNT` gates the stablecoin rail before an authorization is signed, `RUB3_AGENT_MAX_ETH_WEI` gates the ETH rail before the transaction is sent, and the ETH one defaults to 0.1 ETH so neither rail is ever unbounded (exit 22)
 - **Deploy scripts** - `forge script` deploys either licence contract to any EVM chain from env vars, directly or through a factory; `DeployFactory.s.sol` deploys the factory itself
 

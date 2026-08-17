@@ -1,0 +1,372 @@
+//! End-to-end test for the code registry against a live EVM node.
+//!
+//! Every other test of the registry path drives a scripted chain, which proves
+//! the decisions and proves nothing about the wire. This one deploys the real
+//! `Rub3CodeRegistry` and a real `Rub3Access`, publishes a record through
+//! `cast`, and reads it back through the wrapper's own decoder. Two things can
+//! only be checked here:
+//!
+//!   * **the ABI mirror.** `rpc::IRub3CodeRegistry` restates the registry's
+//!     `Release` struct field for field, and field order *is* the encoding. A
+//!     mirror that has drifted decodes garbage or reverts, and no unit test in
+//!     this crate can see that.
+//!   * **the pinned fingerprint against a real deploy.** `consult_registry`
+//!     believes an answer only after the registry's own runtime code hashes to
+//!     the `attest::CANONICAL` row for it. That row is a number in a table until
+//!     something compiles the contract, deploys it, and fetches the code back.
+//!
+//! Requires the Foundry toolchain (`anvil`, `forge`, `cast`) on PATH. Ignored by
+//! default - run with:
+//!
+//!     cargo test -p rub3-wrapper --no-default-features --features tier-2 \
+//!         -- --ignored code_registry
+//!
+//! The test prints `SKIP: ...` and returns when the toolchain is missing, so it
+//! is safe to run in any environment. **A pass in 0.00s is a skip**, not a
+//! green run.
+
+#![cfg(feature = "onchain-read")]
+
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use rub3_wrapper::attest::{
+    self, ChainReader, ImmutableRange, RecordStatus, RegistryVerdict, Role, RpcChain,
+};
+
+// Anvil's built-in account #0 (deterministic, documented, no real value).
+const DEPLOYER_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const DEPLOYER_ADDR: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+
+// Its own port, so this suite and the three other anvil suites (8547, 8549 and
+// webview::session_flow's 8551) can run at the same time.
+const PORT: u16 = 8553;
+
+const ZERO_ADDR: &str = "0x0000000000000000000000000000000000000000";
+
+// ── Harness ───────────────────────────────────────────────────────────────────
+
+fn rpc_url() -> String {
+    format!("http://127.0.0.1:{PORT}")
+}
+
+fn tool_available(bin: &str) -> bool {
+    Command::new(bin)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn contracts_dir() -> PathBuf {
+    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    crate_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("contracts")
+}
+
+struct AnvilGuard {
+    child: Child,
+}
+
+impl Drop for AnvilGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+// `AnvilGuard::drop` does kill + wait; clippy cannot see through the guard.
+#[allow(clippy::zombie_processes)]
+fn start_anvil() -> AnvilGuard {
+    let child = Command::new("anvil")
+        .args(["--port", &PORT.to_string(), "--silent"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn anvil");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let ready = Command::new("cast")
+            .args(["block-number", "--rpc-url", &rpc_url()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ready {
+            return AnvilGuard { child };
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    panic!("anvil did not become ready within 10s");
+}
+
+fn forge_create(target: &str, args: &[&str]) -> String {
+    let mut cmd = Command::new("forge");
+    cmd.current_dir(contracts_dir()).args([
+        "create",
+        target,
+        "--broadcast",
+        "--private-key",
+        DEPLOYER_KEY,
+        "--rpc-url",
+        &rpc_url(),
+        "--constructor-args",
+    ]);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().expect("failed to run forge create");
+    if !output.status.success() {
+        panic!(
+            "forge create {target} failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("Deployed to: ") {
+            return rest.trim().to_string();
+        }
+    }
+    panic!("could not find 'Deployed to:' in forge output:\n{stdout}");
+}
+
+fn cast_send(contract: &str, sig: &str, args: &[&str]) {
+    let mut cmd = Command::new("cast");
+    cmd.args([
+        "send",
+        contract,
+        sig,
+        "--private-key",
+        DEPLOYER_KEY,
+        "--rpc-url",
+        &rpc_url(),
+    ]);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    let output = cmd.output().expect("failed to run cast send");
+    if !output.status.success() {
+        panic!(
+            "cast send {sig} failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+}
+
+/// A directly deployed `Rub3Access`, priced at zero on the ETH rail with no
+/// stablecoin rail and no protocol fee. The constructor is the one
+/// `session_onchain_e2e.rs` uses; see it for the tuple arguments.
+fn deploy_access() -> String {
+    forge_create(
+        "src/Rub3Access.sol:Rub3Access",
+        &[
+            "Rub3 Registry Test",
+            "RUB3",
+            "(0,0x0000000000000000000000000000000000000000)",
+            "[0x1111111111111111111111111111111111111111111111111111111111111111]",
+            "(0,0x0000000000000000000000000000000000000000,0)",
+            "(0,0x0000000000000000000000000000000000000000)",
+            "0",
+            "15",
+            ZERO_ADDR,
+            DEPLOYER_ADDR,
+        ],
+    )
+}
+
+// ── Fixtures built out of the pinned table ────────────────────────────────────
+
+/// The pinned entry for `contract`, so the test publishes what this build
+/// already believes rather than a number of its own.
+fn pinned(contract: &str) -> &'static attest::CanonicalContract {
+    attest::CANONICAL
+        .iter()
+        .find(|entry| entry.contract == contract)
+        .unwrap_or_else(|| panic!("attest::CANONICAL pins no {contract}"))
+}
+
+/// `cast`'s literal for a `(uint32,uint32)[]` of byte ranges.
+fn ranges_arg(ranges: &[ImmutableRange]) -> String {
+    let inner: Vec<String> = ranges
+        .iter()
+        .map(|r| format!("({},{})", r.start, r.length))
+        .collect();
+    format!("[{}]", inner.join(","))
+}
+
+fn addr(text: &str) -> alloy::primitives::Address {
+    text.parse().expect("a deployed address parses")
+}
+
+const PUBLISH_SIG: &str = "publish(bytes32,uint8,string,string,bytes32,string,(uint32,uint32)[])";
+
+// ── The test ──────────────────────────────────────────────────────────────────
+
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn code_registry_answers_the_wrapper_over_a_real_chain_e2e() {
+    for bin in ["anvil", "forge", "cast"] {
+        if !tool_available(bin) {
+            println!("SKIP: {bin} not found on PATH");
+            return;
+        }
+    }
+    let _anvil = start_anvil();
+
+    let registry_addr = forge_create(
+        "src/Rub3CodeRegistry.sol:Rub3CodeRegistry",
+        &[DEPLOYER_ADDR],
+    );
+    let licence_addr = deploy_access();
+    let registry = addr(&registry_addr);
+    let licence = addr(&licence_addr);
+
+    let chain = RpcChain {
+        rpc_url: &rpc_url(),
+    };
+    let licence_code = chain.code(licence).expect("the licence's code is readable");
+    assert!(
+        !licence_code.is_empty(),
+        "the fixture licence deployed no code"
+    );
+
+    // ── The pinned fingerprints, against real deploys ────────────────────────
+    //
+    // Both halves of the trust root, checked against bytecode a compiler
+    // actually produced and a chain actually stored. Until something does this,
+    // `attest::CANONICAL` is a table of numbers agreeing with another table of
+    // numbers.
+    let registry_entry = pinned("Rub3CodeRegistry");
+    assert_eq!(
+        attest::masked_code_hash(
+            &chain
+                .code(registry)
+                .expect("the registry's code is readable"),
+            registry_entry.immutable_ranges,
+        )
+        .as_deref(),
+        Some(registry_entry.masked_sha256),
+        "the deployed Rub3CodeRegistry does not hash to the row this build pins for it, so no \
+         wrapper would ever believe a real registry"
+    );
+
+    let licence_entry = pinned("Rub3Access");
+    assert_eq!(
+        attest::masked_code_hash(&licence_code, licence_entry.immutable_ranges).as_deref(),
+        Some(licence_entry.masked_sha256),
+        "a live Rub3Access, immutables filled in by its constructor, does not hash to the pinned \
+         row once those ranges are zeroed"
+    );
+
+    // ── The offsets bootstrap ────────────────────────────────────────────────
+    //
+    // Published under the licence's real immutable layout, then read back
+    // through the wrapper's decoder. A drifted ABI mirror shows up here first.
+    let masked = attest::masked_code_hash(&licence_code, licence_entry.immutable_ranges)
+        .expect("the pinned ranges fit a live deploy");
+    let commit = "0x2222222222222222222222222222222222222222222222222222222222222222";
+
+    cast_send(
+        &registry_addr,
+        PUBLISH_SIG,
+        &[
+            &format!("0x{masked}"),
+            "0", // Role.Licence
+            "Rub3Access",
+            "2026-09, a release newer than this binary",
+            commit,
+            "0.8.28+commit.7893614a",
+            &ranges_arg(licence_entry.immutable_ranges),
+        ],
+    );
+
+    let tables = chain
+        .offset_tables(registry)
+        .expect("the registry answers offsetTables()");
+    assert_eq!(tables.len(), 1, "one release, one distinct table");
+    assert_eq!(
+        tables[0], licence_entry.immutable_ranges,
+        "the published ranges did not survive the round trip through the ABI mirror"
+    );
+
+    // ── The three-way verdict, over the wire ─────────────────────────────────
+
+    match attest::consult_registry(&chain, registry, &licence_code) {
+        RegistryVerdict::Known(record) => {
+            assert_eq!(record.contract, "Rub3Access");
+            assert_eq!(record.version, "2026-09, a release newer than this binary");
+            assert_eq!(record.status, RecordStatus::Active);
+            assert_eq!(record.role, Some(Role::Licence));
+            assert_eq!(record.offsets, licence_entry.immutable_ranges);
+            assert!(
+                record.registered_at_block > 0,
+                "the block is recorded by the contract, so it is never zero"
+            );
+        }
+        other => panic!("the registry published this code and must vouch for it, got {other:?}"),
+    }
+
+    // Code the registry has never seen. The same call, a different answer, and
+    // no record means no purchase.
+    let unknown_code: Vec<u8> = (0..512u16).map(|i| (i % 251) as u8).collect();
+    assert_eq!(
+        attest::consult_registry(&chain, registry, &unknown_code),
+        RegistryVerdict::Unknown,
+        "code nobody published is unknown, not canonical"
+    );
+
+    // ── Deprecation advises; it does not invalidate ──────────────────────────
+
+    cast_send(
+        &registry_addr,
+        "deprecate(bytes32,string)",
+        &[&format!("0x{masked}"), "superseded by a later release"],
+    );
+
+    match attest::consult_registry(&chain, registry, &licence_code) {
+        RegistryVerdict::Known(record) => {
+            assert_eq!(
+                record.status,
+                RecordStatus::Deprecated,
+                "the deprecation did not reach the wrapper"
+            );
+            assert_eq!(
+                record.offsets, licence_entry.immutable_ranges,
+                "a deprecated release keeps everything a comparator needs"
+            );
+        }
+        other => panic!(
+            "a deprecated release is still genuine rub3 code and must still be recognised, got \
+             {other:?}. A registry that could stop a purchase would be a revocation surface."
+        ),
+    }
+
+    // ── An address that is not the registry is not an authority ──────────────
+    //
+    // The licence contract is canonical rub3 code, deployed from this
+    // repository, and it is still not a version authority. Driven against real
+    // bytecode rather than a fixture, because this is the check the whole
+    // fallback rests on.
+    match attest::consult_registry(&chain, licence, &licence_code) {
+        RegistryVerdict::Unavailable(why) => assert!(
+            why.contains("not a code registry"),
+            "the reason must name what was wrong, got: {why}"
+        ),
+        other => {
+            panic!("a licence contract must never be believed as the code registry, got {other:?}")
+        }
+    }
+}

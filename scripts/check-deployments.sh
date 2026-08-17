@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 #
 # Schema check for contracts/deployments.json, the committed answer to "which
-# Rub3Factory is the canonical one on this chain".
+# Rub3Factory is the canonical one on this chain" and "which Rub3CodeRegistry
+# does a wrapper ask when its pinned table misses".
 #
 # Nothing is deployed yet, so today this mostly guards the shape. Its real job
-# starts at launch: a wrong address here sends a developer's deploy - and its
-# immutable fee - to a factory nobody agreed on, and that is unfixable after the
-# fact. So the rules are deliberately strict about what may be written:
+# starts at launch: a wrong factory address here sends a developer's deploy -
+# and its immutable fee - to a factory nobody agreed on, and a wrong code
+# registry address points every buyer's agent at an authority nobody agreed on.
+# Both are unfixable after the fact. So the rules are deliberately strict about
+# what may be written:
 #
 #   * every field is either a real value or null; there is no placeholder form,
 #     because a placeholder that reads like an address is exactly the failure
 #     this file exists to prevent
-#   * an entry is wholly unpopulated or wholly populated, never half of each: a
-#     factory address with no deploy block is a record nobody can verify
+#   * each record is wholly unpopulated or wholly populated, never half of each:
+#     a factory address with no deploy block is a record nobody can verify, and
+#     the same goes for a code registry with no block for a watcher to start at
+#   * the factory record and the code registry record are checked independently,
+#     because they are independent deploys: one may be published while the other
+#     is still null, and requiring them to move together would either block a
+#     registry launch on a factory launch or invite a placeholder to unblock it
 #   * an address is checksummed 0x-hex and never the zero address, which the
 #     deploy scripts already read as "no factory"
 #   * both chains the project targets stay present, so deleting the entry the
@@ -71,6 +79,32 @@ expected_chains='{"8453": "base", "84532": "base_sepolia"}'
 # a no-op that still prints "ok". Kept as one program rather than a loop of
 # shell tests so the whole schema is readable in one place.
 errors="$(jq -r --argjson aliases "$aliases_json" --argjson expected "$expected_chains" '
+  # One address rule, applied to every published address, so the factory and the
+  # code registry cannot drift into being held to different standards. A second
+  # copy of these four checks is how one of them ends up missing from whichever
+  # field was added last.
+  def address_errors($id; $field; $value):
+    [
+      (if $value != null and (($value | type) != "string" or ($value | test("^0x[0-9a-fA-F]{40}$") | not))
+        then "chain \($id): \($field) must be null or 0x-prefixed 40-hex" else empty end),
+      (if ($value | type) == "string" and ($value | ascii_downcase) == "0x0000000000000000000000000000000000000000"
+        then "chain \($id): \($field) must not be the zero address" else empty end),
+      (if ($value | type) == "string" and ($value | test("^0x[0-9a-f]{40}$")) and ($value | test("[a-f]"))
+        then "chain \($id): \($field) must be EIP-55 checksummed, not all lower case" else empty end),
+      (if ($value | type) == "string" and ($value | test("^0x[0-9A-F]{40}$")) and ($value | test("[A-F]"))
+        then "chain \($id): \($field) must be EIP-55 checksummed, not all upper case" else empty end)
+    ] | .[];
+
+  def block_errors($id; $field; $value):
+    (if $value != null and (($value | type) != "number" or ($value | floor) != $value or $value < 0)
+      then "chain \($id): \($field) must be null or a non-negative integer" else empty end);
+
+  # A record is wholly populated or wholly null. Each deploy is its own record.
+  def together($id; $record; $values):
+    (if ($values | map(. == null) | unique | length) != 1
+      then "chain \($id): the \($record) record is wholly populated or wholly null, never partly"
+      else empty end);
+
   [
     (if .schema != 1 then "schema must be 1" else empty end),
     (if (.note | type) != "string" then "note must be a string" else empty end),
@@ -98,8 +132,8 @@ errors="$(jq -r --argjson aliases "$aliases_json" --argjson expected "$expected_
             (if ($c | type) != "object"
               then "chain \($id): entry must be an object"
               else (
-                (if ($c | keys) != ["deploy_block", "factory", "generation", "name"]
-                  then "chain \($id): keys must be exactly name, factory, deploy_block, generation" else empty end),
+                (if ($c | keys) != ["code_registry", "code_registry_deploy_block", "deploy_block", "factory", "generation", "name"]
+                  then "chain \($id): keys must be exactly name, factory, deploy_block, generation, code_registry, code_registry_deploy_block" else empty end),
                 (if ($c.name | type) != "string" or ($c.name | length) == 0
                   then "chain \($id): name must be a non-empty string"
                   elif ($expected | has($id)) and ($c.name != $expected[$id])
@@ -108,22 +142,16 @@ errors="$(jq -r --argjson aliases "$aliases_json" --argjson expected "$expected_
                     then "chain \($id): name \"\($c.name)\" is not an [rpc_endpoints] key in contracts/foundry.toml (\($aliases | join(", ")))"
                   else empty end),
 
-                (if $c.factory != null and (($c.factory | type) != "string" or ($c.factory | test("^0x[0-9a-fA-F]{40}$") | not))
-                  then "chain \($id): factory must be null or 0x-prefixed 40-hex" else empty end),
-                (if ($c.factory | type) == "string" and ($c.factory | ascii_downcase) == "0x0000000000000000000000000000000000000000"
-                  then "chain \($id): factory must not be the zero address" else empty end),
-                (if ($c.factory | type) == "string" and ($c.factory | test("^0x[0-9a-f]{40}$")) and ($c.factory | test("[a-f]"))
-                  then "chain \($id): factory must be EIP-55 checksummed, not all lower case" else empty end),
-                (if ($c.factory | type) == "string" and ($c.factory | test("^0x[0-9A-F]{40}$")) and ($c.factory | test("[A-F]"))
-                  then "chain \($id): factory must be EIP-55 checksummed, not all upper case" else empty end),
+                address_errors($id; "factory";       $c.factory),
+                address_errors($id; "code_registry"; $c.code_registry),
 
-                (if $c.deploy_block != null and (($c.deploy_block | type) != "number" or ($c.deploy_block | floor) != $c.deploy_block or $c.deploy_block < 0)
-                  then "chain \($id): deploy_block must be null or a non-negative integer" else empty end),
+                block_errors($id; "deploy_block";               $c.deploy_block),
+                block_errors($id; "code_registry_deploy_block"; $c.code_registry_deploy_block),
                 (if $c.generation != null and (($c.generation | type) != "number" or ($c.generation | floor) != $c.generation or $c.generation < 1)
                   then "chain \($id): generation must be null or an integer >= 1" else empty end),
 
-                (if ([$c.factory, $c.deploy_block, $c.generation] | map(. == null) | unique | length) != 1
-                  then "chain \($id): an entry is wholly populated or wholly null, never partly" else empty end)
+                together($id; "factory";       [$c.factory,       $c.deploy_block, $c.generation]),
+                together($id; "code registry"; [$c.code_registry, $c.code_registry_deploy_block])
               )
               end)
           )
@@ -139,6 +167,7 @@ if [ -n "$errors" ]; then
   exit 1
 fi
 
-populated="$(jq -r '[.chains | to_entries[] | select(.value.factory != null) | .key] | length' "$manifest")"
+factories="$(jq -r '[.chains | to_entries[] | select(.value.factory != null) | .key] | length' "$manifest")"
+registries="$(jq -r '[.chains | to_entries[] | select(.value.code_registry != null) | .key] | length' "$manifest")"
 total="$(jq -r '.chains | length' "$manifest")"
-echo "contracts/deployments.json ok: $total chain(s), $populated with a published canonical factory"
+echo "contracts/deployments.json ok: $total chain(s), $factories with a published canonical factory, $registries with a published code registry"

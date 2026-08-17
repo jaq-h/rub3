@@ -459,13 +459,17 @@ impl IpcState {
         recipient: alloy::primitives::Address,
         contract_addr: alloy::primitives::Address,
     ) {
-        match crate::attest::verify_before_purchase(&self.rpc_url, contract_addr) {
+        match crate::attest::verify_before_purchase(&self.rpc_url, self.chain_id, contract_addr) {
             // One line, on the one path in this file that spends money, naming
-            // what the money is about to go to. Mirrors the agent door.
-            Ok(canonical) => eprintln!(
-                "rub3: {contract_addr} verified as canonical {} ({})",
-                canonical.contract, canonical.release
-            ),
+            // what the money is about to go to. Mirrors the agent door, warning
+            // included: a superseded release is still genuine code and still
+            // buyable, so it is said and not refused.
+            Ok(canonical) => {
+                eprintln!("rub3: {contract_addr} verified as canonical {canonical}");
+                if let Some(advisory) = canonical.advisory() {
+                    eprintln!("rub3: warning: {advisory}");
+                }
+            }
             Err(e) => {
                 let notice = refusal_notice(&self.contract, &e);
                 eprintln!("rub3: refusing to present a purchase: {e}");
@@ -788,7 +792,7 @@ struct RefusalNotice {
 /// rather than inferred from a screenshot.
 #[cfg(feature = "onchain-write")]
 fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNotice {
-    use crate::attest::{GateError, Refusal, Role};
+    use crate::attest::{GateError, Refusal, RegistryOutcome, Role};
     use crate::rpc::RpcError;
 
     match error {
@@ -858,13 +862,20 @@ fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNo
                 ),
                 next_step: "Either the address or the network is wrong. Check both with \
                             whoever published this software before sending anything.",
-                detail: finding.to_string(),
+                detail: finding.shareable_detail(),
                 retryable: false,
             },
 
             // Code is there and it is not ours. Both innocent explanations are
             // stated first, because the honest reading of a miss is "this app
             // does not know that contract", not "that contract is a fake".
+            //
+            // What the on-chain code registry said, if anything, changes which
+            // of the two is likelier, so it changes the words and the next step
+            // rather than being left in the technical detail. It never changes
+            // `retryable`: a refused address is a settled answer for this
+            // attempt, and a Try Again button beside one invites clicking until
+            // the check passes.
             Refusal::Unrecognised(finding) => RefusalNotice {
                 title: "This app does not recognise the contract's code",
                 body: format!(
@@ -873,12 +884,32 @@ fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNo
                      than this copy of the app knows about, or it may be a modified copy that \
                      does not behave the way a rub3 licence does. From here the two look the \
                      same, so you are not being asked to pay either of them. Nothing has been \
-                     signed and nothing has been sent."
+                     signed and nothing has been sent.{}",
+                    match &finding.registry {
+                        // The published record of genuine rub3 releases was
+                        // asked and had no record of this code, so "newer than
+                        // this app" is a much thinner explanation than it looks
+                        // above. Said plainly, and still without accusing
+                        // anyone: a release published somewhere else would look
+                        // the same way.
+                        RegistryOutcome::Unknown =>
+                            " This app also checked the on-chain record of genuine rub3 \
+                             releases, which has no entry for this code either.",
+                        // The second opinion was not available, so the check
+                        // that would have told a newer release from a modified
+                        // copy did not happen. Saying so is the difference
+                        // between "we looked and found nothing" and "we could
+                        // not look".
+                        RegistryOutcome::Unavailable(_) =>
+                            " This app could not reach the on-chain record of genuine rub3 \
+                             releases, so it could not tell those two apart.",
+                        RegistryOutcome::NotConsulted => "",
+                    }
                 ),
                 next_step: "Confirm the address with whoever published this software. If they \
                             say it is current, this copy of the app is older than the contract \
                             and needs updating.",
-                detail: finding.to_string(),
+                detail: finding.shareable_detail(),
                 retryable: false,
             },
 
@@ -894,16 +925,24 @@ fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNo
                      to it would buy nothing and would not come back. The address is wrong; \
                      the code is not.",
                     match role {
-                        Role::Factory =>
+                        Some(Role::Factory) =>
                             "the factory that deploys licence contracts rather than one that \
                              sells them",
-                        Role::Deployer =>
+                        Some(Role::Deployer) =>
                             "an internal helper the factory uses to deploy licence contracts",
+                        Some(Role::CodeRegistry) =>
+                            "the registry that records which rub3 code is genuine, which is how \
+                             this app checked the address in the first place",
                         // Not a state the gate produces - it accepts every
                         // licence-role match - but kept total rather than
                         // unreachable so a role added to the table later
                         // cannot panic a buyer's window.
-                        Role::Licence => "which this app did not accept as a purchase target",
+                        Some(Role::Licence) => "which this app did not accept as a purchase target",
+                        // A role published by a code registry newer than this
+                        // app. The code is vouched for and the app still cannot
+                        // say what it is for, which is the honest reading and
+                        // the reason it is refused rather than guessed at.
+                        None => "a kind of rub3 contract this app is too old to know about",
                     }
                 ),
                 next_step: "Ask whoever published this software for the address of its \
@@ -949,7 +988,7 @@ mod session_flow;
 #[cfg(all(test, feature = "onchain-write"))]
 mod tests {
     use super::*;
-    use crate::attest::{Refusal, Role, Unrecognised};
+    use crate::attest::{Refusal, RegistryOutcome, Role, Unrecognised};
     use crate::test_support::StubNode;
 
     /// An address that is not the zero address, so nothing short-circuits on
@@ -1090,13 +1129,14 @@ mod tests {
             &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
                 code_len: 4_096,
                 exposed: vec!["seize(uint256)"],
+                registry: RegistryOutcome::NotConsulted,
             })),
         );
         let not_a_licence = refusal_notice(
             CONTRACT,
             &crate::attest::GateError::Refused(Refusal::NotALicence {
-                contract: "Rub3Factory",
-                role: Role::Factory,
+                contract: "Rub3Factory".to_string(),
+                role: Some(Role::Factory),
             }),
         );
 
@@ -1134,6 +1174,7 @@ mod tests {
             &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
                 code_len: 0,
                 exposed: vec![],
+                registry: RegistryOutcome::NotConsulted,
             })),
         );
         assert_eq!(notice.title, "Nothing is deployed at this address");
@@ -1162,6 +1203,7 @@ mod tests {
                 &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
                     code_len: 0,
                     exposed: vec![],
+                    registry: RegistryOutcome::NotConsulted,
                 })),
             ),
             refusal_notice(
@@ -1169,13 +1211,14 @@ mod tests {
                 &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
                     code_len: 4_096,
                     exposed: vec![],
+                    registry: RegistryOutcome::NotConsulted,
                 })),
             ),
             refusal_notice(
                 CONTRACT,
                 &crate::attest::GateError::Refused(Refusal::NotALicence {
-                    contract: "Rub3Factory",
-                    role: Role::Factory,
+                    contract: "Rub3Factory".to_string(),
+                    role: Some(Role::Factory),
                 }),
             ),
         ];
@@ -1279,6 +1322,163 @@ mod tests {
         assert!(
             !shown.contains(KEY),
             "the packed endpoint's key reached the window: {shown}"
+        );
+    }
+
+    /// What the registry said changes the words, because it changes which of
+    /// the two innocent explanations is still standing.
+    ///
+    /// Three wordings, not one: "we did not ask" (no registry published on this
+    /// chain, which is every chain today), "we asked and it had no record", and
+    /// "we could not ask". Only the last leaves the buyer's own check
+    /// incomplete, and only the middle one weakens "this app is older than the
+    /// contract" - so a screen that said the same thing in all three would be
+    /// telling a buyer something false in two of them.
+    #[test]
+    fn the_registrys_answer_changes_what_the_screen_says() {
+        let notice_for = |registry: RegistryOutcome| {
+            refusal_notice(
+                CONTRACT,
+                &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
+                    code_len: 4_096,
+                    exposed: vec![],
+                    registry,
+                })),
+            )
+        };
+
+        let not_consulted = notice_for(RegistryOutcome::NotConsulted);
+        let unknown = notice_for(RegistryOutcome::Unknown);
+        let unavailable = notice_for(RegistryOutcome::Unavailable(
+            "the node did not answer".into(),
+        ));
+
+        assert!(
+            !not_consulted.body.contains("on-chain record"),
+            "with no registry published the screen must read exactly as it did before this \
+             step existed: {}",
+            not_consulted.body
+        );
+        assert!(
+            unknown.body.contains("has no entry for this code either"),
+            "{}",
+            unknown.body
+        );
+        assert!(
+            unavailable.body.contains("could not reach"),
+            "{}",
+            unavailable.body
+        );
+
+        // All three are the same settled answer about the address. A Try Again
+        // button on any of them invites clicking until the check passes.
+        for notice in [&not_consulted, &unknown, &unavailable] {
+            assert!(!notice.retryable);
+            assert_eq!(notice.title, not_consulted.title);
+        }
+    }
+
+    /// The registry is canonical rub3 code and is still not a licence, so
+    /// pointing a purchase at it is the wrong-address mistake rather than the
+    /// wrong-code one - and the buyer is told what that address actually is.
+    #[test]
+    fn the_code_registry_is_named_as_the_wrong_address_not_as_bad_code() {
+        let notice = refusal_notice(
+            CONTRACT,
+            &crate::attest::GateError::Refused(Refusal::NotALicence {
+                contract: "Rub3CodeRegistry".to_string(),
+                role: Some(Role::CodeRegistry),
+            }),
+        );
+        assert!(notice.body.contains("genuine rub3 code"), "{}", notice.body);
+        assert!(
+            notice.body.contains("records which rub3 code is genuine"),
+            "{}",
+            notice.body
+        );
+        assert!(
+            notice.body.contains("The address is wrong"),
+            "{}",
+            notice.body
+        );
+    }
+
+    /// A role a code registry newer than this app published. The code is
+    /// vouched for and the app still cannot say what it is for, so it refuses
+    /// and says that rather than guessing at the first role it knows - which is
+    /// a licence, and would be a purchase.
+    #[test]
+    fn a_role_this_build_has_no_name_for_is_refused_in_words_a_person_can_read() {
+        let notice = refusal_notice(
+            CONTRACT,
+            &crate::attest::GateError::Refused(Refusal::NotALicence {
+                contract: "Rub3SomethingNew".to_string(),
+                role: None,
+            }),
+        );
+        assert!(
+            notice.body.contains("too old to know about"),
+            "{}",
+            notice.body
+        );
+        assert!(notice.body.contains("Rub3SomethingNew"), "{}", notice.body);
+    }
+
+    /// A failed registry read never puts the packed endpoint on a buyer's
+    /// screen.
+    ///
+    /// The blocked screen tells the buyer to send `detail` to whoever published
+    /// the software, so anything in it is as good as published. §2.8 settled
+    /// that for the contract's own code read; §2.9 added a second chain read
+    /// whose failure reason travels inside the refusal rather than beside it,
+    /// which is a different route to the same leak. `rpc` has already reduced
+    /// the URL to `scheme://host[:port]`, so what is at stake here is the host
+    /// of the endpoint this build was packed with - not the buyer's to publish,
+    /// and no use to them either.
+    ///
+    /// The registry's *answer* is a different thing and is kept: `Unknown`
+    /// names no endpoint and is half of what the refusal means.
+    #[test]
+    fn a_failed_registry_read_never_puts_the_packed_endpoint_on_screen() {
+        const HOST: &str = "rpc.example.invalid";
+        const KEY: &str = "sk-live-do-not-publish";
+
+        let notice = refusal_notice(
+            CONTRACT,
+            &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
+                code_len: 4_096,
+                exposed: vec![],
+                registry: RegistryOutcome::Unavailable(format!(
+                    "its record could not be read: transport error: error sending request for url \
+                     (https://{HOST}/v2/{KEY})"
+                )),
+            })),
+        );
+
+        for field in [&notice.body, &notice.detail, &notice.title.to_string()] {
+            assert!(!field.contains(KEY), "the packed endpoint's key: {field}");
+            assert!(!field.contains(HOST), "the packed endpoint's host: {field}");
+        }
+        assert!(
+            notice.body.contains("could not reach"),
+            "the buyer still has to be told the check was incomplete: {}",
+            notice.body
+        );
+
+        // The registry's answer, as opposed to its failure, names no endpoint
+        // and stays in the detail the buyer is asked to forward.
+        let answered = refusal_notice(
+            CONTRACT,
+            &crate::attest::GateError::Refused(Refusal::Unrecognised(Unrecognised {
+                code_len: 4_096,
+                exposed: vec![],
+                registry: RegistryOutcome::Unknown,
+            })),
+        );
+        assert!(
+            answered.detail.contains("has no record of it either"),
+            "{}",
+            answered.detail
         );
     }
 }

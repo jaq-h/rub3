@@ -104,6 +104,11 @@
       "deployed_bytecode_sha256": "6a1e8ae8ec90d5c2204184b92ea15111f6cf4889a05cd8316e8758a190b7647a",
       "immutable_ranges": []
     },
+    "Rub3CodeRegistry": {
+      "source": "src/Rub3CodeRegistry.sol",
+      "deployed_bytecode_sha256": "2c5d60e1b5430a0b8531ebf91c39d09f6dc0f31b0562eabd4d96cfb0f79032b4",
+      "immutable_ranges": []
+    },
     "Rub3Factory": {
       "source": "src/Rub3Factory.sol",
       "deployed_bytecode_sha256": "0b03cc18efb8dd487b52d57bc28b7a3e18bb7575f6575c20810c8517d77f4076",

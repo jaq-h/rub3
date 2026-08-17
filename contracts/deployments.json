@@ -1,24 +1,30 @@
 {
   "schema": 1,
-  "note": "The canonical Rub3Factory per chain: the single address that gives \"deployed through the factory\" a verifiable referent. Nothing is deployed to a public network yet, so every entry below is unpopulated. `null` is the ONLY marker for that, in every field: there is deliberately no placeholder address, no zero address and no TBD string anywhere in this file, so no value here can be mistaken for a deploy. A consumer MUST read a null `factory` as \"this chain has no canonical factory\" and MUST NOT substitute any other address. Validated by scripts/check-deployments.sh, which CI runs. See contracts/contracts.md -> Deploying through the factory.",
+  "note": "The canonical rub3 contracts per chain: the single Rub3Factory address that gives \"deployed through the factory\" a verifiable referent, and the single Rub3CodeRegistry address a wrapper consults when a contract's code is newer than its own pinned table. Nothing is deployed to a public network yet, so every entry below is unpopulated. `null` is the ONLY marker for that, in every field: there is deliberately no placeholder address, no zero address and no TBD string anywhere in this file, so no value here can be mistaken for a deploy. A consumer MUST read a null `factory` as \"this chain has no canonical factory\" and a null `code_registry` as \"this chain has no code registry, so there is nothing to ask\", and MUST NOT substitute any other address for either. The two are independent records with independent lifecycles: one may be published while the other is still null. Validated by scripts/check-deployments.sh, which CI runs. See contracts/contracts.md -> Deploying through the factory and -> The code registry.",
   "fields": {
     "name": "Human-readable chain name, matching the [rpc_endpoints] key in contracts/foundry.toml.",
     "factory": "The canonical Rub3Factory address on this chain, 0x-prefixed and EIP-55 checksummed. null until deployed.",
     "deploy_block": "The block the factory was deployed in, so an indexer starts there rather than at genesis. null until deployed.",
-    "generation": "1-based position in the factory's immutable previousFactory chain: 1 is the first factory on this chain (previousFactory == 0x0), 2 is the factory that supersedes it, and so on. null until deployed."
+    "generation": "1-based position in the factory's immutable previousFactory chain: 1 is the first factory on this chain (previousFactory == 0x0), 2 is the factory that supersedes it, and so on. null until deployed.",
+    "code_registry": "The canonical Rub3CodeRegistry address on this chain - the append-only version authority a buyer's agent asks when a contract's masked code hash is absent from the table compiled into its binary. 0x-prefixed and EIP-55 checksummed. null until deployed, which leaves every wrapper refusing on a table miss exactly as it does today.",
+    "code_registry_deploy_block": "The block the code registry was deployed in, so a watcher alarming on its Published events starts there rather than at genesis. null until deployed."
   },
   "chains": {
     "8453": {
       "name": "base",
       "factory": null,
       "deploy_block": null,
-      "generation": null
+      "generation": null,
+      "code_registry": null,
+      "code_registry_deploy_block": null
     },
     "84532": {
       "name": "base_sepolia",
       "factory": null,
       "deploy_block": null,
-      "generation": null
+      "generation": null,
+      "code_registry": null,
+      "code_registry_deploy_block": null
     }
   }
 }

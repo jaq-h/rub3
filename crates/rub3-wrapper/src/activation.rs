@@ -1040,9 +1040,22 @@ mod headless {
                 // exposed list is a diagnostic and nothing more: an empty one
                 // is not a clean bill of health.
                 HeadlessError::NotCanonicalContract { contract, refusal } => Some(match refusal {
+                    // `registry=` is the second authority's answer, and it is
+                    // three-valued on purpose: `not_consulted` (this build
+                    // knows no code registry on this chain), `unknown` (asked,
+                    // and it has no record), `unavailable` (could not be
+                    // asked). An orchestrator retries none of them, but only
+                    // the last one means the question went unanswered.
+                    //
+                    // `exposed=` stays last, and every field added here has to
+                    // go in front of it: its values carry commas, parentheses
+                    // and its own separator's neighbours, so it is terminated
+                    // by the end of the line and nothing else. A field after it
+                    // is swallowed by the final signature.
                     attest::Refusal::Unrecognised(finding) => format!(
-                        "contract={contract} code_bytes={} exposed={}",
+                        "contract={contract} code_bytes={} registry={} exposed={}",
                         finding.code_len,
+                        finding.registry.as_label(),
                         if finding.exposed.is_empty() {
                             "none".to_string()
                         } else {
@@ -1367,8 +1380,8 @@ mod headless {
         // complete: refusing to spend money on code that could not be verified
         // is the correct default here. It is emphatically *not* the default on
         // the launch path, which never calls this - see `attest`'s module docs.
-        let canonical =
-            attest::verify_before_purchase(&ctx.rpc_url, contract).map_err(|e| match e {
+        let canonical = attest::verify_before_purchase(&ctx.rpc_url, ctx.chain_id, contract)
+            .map_err(|e| match e {
                 attest::GateError::Fetch(e) => HeadlessError::Rpc(e.to_string()),
                 attest::GateError::Refused(refusal) => HeadlessError::NotCanonicalContract {
                     contract: crate::identity::format_addr(contract),
@@ -1377,10 +1390,14 @@ mod headless {
             })?;
         // One line, on the one path that spends money, naming what the money
         // is about to go to. Mirrors the rail-fallback note below.
-        eprintln!(
-            "rub3: {contract} verified as canonical {} ({})",
-            canonical.contract, canonical.release
-        );
+        eprintln!("rub3: {contract} verified as canonical {canonical}");
+        // A deprecated release is advice, never a refusal: it is still genuine
+        // rub3 code, and refusing it would make the registry able to stop a
+        // purchase, which is the one thing an append-only version authority
+        // must not be able to do. The agent is told and it buys.
+        if let Some(advisory) = canonical.advisory() {
+            eprintln!("rub3: warning: {advisory}");
+        }
 
         let supply_cap = rpc::supply_cap(&ctx.rpc_url, contract)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
@@ -1936,6 +1953,7 @@ mod tests {
                     refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
                         code_len: 4096,
                         exposed: vec!["seize(uint256)"],
+                        registry: attest::RegistryOutcome::NotConsulted,
                     }),
                 },
                 23,
@@ -2308,6 +2326,7 @@ mod tests {
                 // comma-separated list is not recoverable by the orchestrator
                 // the detail line exists for.
                 exposed: vec!["seize(uint256)", "burn(address,uint256)", "pause()"],
+                registry: attest::RegistryOutcome::NotConsulted,
             }),
         };
 
@@ -2345,6 +2364,7 @@ mod tests {
             refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
                 code_len: 0,
                 exposed: vec![],
+                registry: attest::RegistryOutcome::NotConsulted,
             }),
         };
         let detail = err.machine_detail().expect("still a detail line");
@@ -2360,8 +2380,8 @@ mod tests {
         let err = HeadlessError::NotCanonicalContract {
             contract: "0x00000000000000000000000000000000000000ab".into(),
             refusal: attest::Refusal::NotALicence {
-                contract: "Rub3Factory",
-                role: attest::Role::Factory,
+                contract: "Rub3Factory".to_string(),
+                role: Some(attest::Role::Factory),
             },
         };
         assert_eq!(err.exit_code(), EXIT_NOT_CANONICAL_CONTRACT);
@@ -2850,5 +2870,54 @@ mod tests {
 
         let mapped: HeadlessError = TxError::Signer(SignerError::NoSource).into();
         assert_eq!(mapped.exit_code(), EXIT_SIGNER);
+    }
+
+    /// The detail line carries what the second authority said, three-valued.
+    ///
+    /// An orchestrator retries none of these - a refusal is a refusal - but
+    /// "the code registry has no record of it" and "the code registry could not
+    /// be asked" are different things to alert on, and today's shipped answer
+    /// is neither: no registry is published on any chain, so the field reads
+    /// `not_consulted` and the sentence a buyer sees is unchanged.
+    #[test]
+    fn the_refusal_line_says_what_the_code_registry_answered() {
+        let line_for = |registry: attest::RegistryOutcome| {
+            HeadlessError::NotCanonicalContract {
+                contract: "0x00000000000000000000000000000000000000ab".into(),
+                refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
+                    code_len: 4096,
+                    exposed: vec![],
+                    registry,
+                }),
+            }
+            .machine_detail()
+            .expect("a refusal must carry a detail line")
+        };
+
+        assert!(
+            line_for(attest::RegistryOutcome::NotConsulted).contains("registry=not_consulted"),
+            "with no registry published the field must say so rather than implying an answer"
+        );
+        assert!(line_for(attest::RegistryOutcome::Unknown).contains("registry=unknown"));
+        assert!(
+            line_for(attest::RegistryOutcome::Unavailable("dead node".into()))
+                .contains("registry=unavailable")
+        );
+
+        // The prose the operator reads names the outcome too, so a refusal read
+        // off a terminal says as much as one parsed by a machine.
+        let message = HeadlessError::NotCanonicalContract {
+            contract: "0x00000000000000000000000000000000000000ab".into(),
+            refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
+                code_len: 4096,
+                exposed: vec![],
+                registry: attest::RegistryOutcome::Unknown,
+            }),
+        }
+        .to_string();
+        assert!(
+            message.contains("the on-chain code registry has no record of it either"),
+            "{message}"
+        );
     }
 }
