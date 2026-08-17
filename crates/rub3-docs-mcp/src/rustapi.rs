@@ -183,8 +183,10 @@ fn modules(repo: &Repo, crate_dir: &str, root_path: &str) -> Result<Vec<Module>,
             format!("{crate_dir}/src/{name}/mod.rs"),
         ];
         let Some(path) = candidates.into_iter().find(|path| repo.is_file(path)) else {
-            // An inline `pub mod name { .. }` keeps its items in the root file,
-            // where the root module listing above already reports them.
+            // An inline `pub mod name { .. }` is not described: `describe` has
+            // no `Item::Mod` arm, so neither the module nor its items reach the
+            // listing. No crate in this workspace declares one, and a recursion
+            // no test could exercise would be the worse of the two answers.
             continue;
         };
         let module_source = repo.read(&path)?;
@@ -543,8 +545,49 @@ fn cfgs(source: &str, attrs: &[syn::Attribute]) -> Vec<String> {
 /// both `#[cfg(test)]` in this workspace and are never shipped, so serving them
 /// as part of the surface would invite an integrator to call something that does
 /// not exist in their build.
+///
+/// The predicate is parsed rather than searched for a substring, because the
+/// substring reading is wrong in both directions and both directions are silent:
+/// `cfg(not(test))` gates an item to exactly the builds an integrator ships and
+/// would have been dropped from the surface, while `cfg(any(test, feature =
+/// "x"))` is scaffolding that would have been served. A missing item is the
+/// failure this crate exists to exclude, so a cfg whose tokens do not parse is
+/// served rather than dropped.
 fn is_test_only(cfgs: &[String]) -> bool {
-    cfgs.iter().any(|cfg| cfg.contains("test)"))
+    cfgs.iter().any(|cfg| gates_on_test(cfg))
+}
+
+/// True when one verbatim `#[cfg(...)]` requires `test`.
+fn gates_on_test(cfg: &str) -> bool {
+    use syn::parse::Parser;
+
+    let Ok(attrs) = syn::Attribute::parse_outer.parse_str(cfg) else {
+        return false;
+    };
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("cfg"))
+        .filter_map(|attr| attr.parse_args::<syn::Meta>().ok())
+        .any(|meta| predicate_names_test(&meta))
+}
+
+/// True when `test` appears as a bare ident the predicate turns on.
+///
+/// `all(..)` and `any(..)` are walked into: under `all` the item is compiled
+/// only in a test build, and under `any` it is scaffolding that happens to have
+/// a second way in. `not(..)` deliberately is not, since everything inside it
+/// means the opposite of what the walk is looking for.
+fn predicate_names_test(meta: &syn::Meta) -> bool {
+    match meta {
+        syn::Meta::Path(path) => path.is_ident("test"),
+        syn::Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => {
+            let parser = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+            list.parse_args_with(parser)
+                .map(|nested| nested.iter().any(predicate_names_test))
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 fn outer_doc(attrs: &[syn::Attribute]) -> String {
@@ -575,4 +618,40 @@ fn doc_lines(attrs: &[syn::Attribute], style: syn::AttrStyle) -> String {
         .join("\n")
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_predicate_that_requires_test_is_test_only() {
+        for cfg in [
+            "#[cfg(test)]",
+            "#[cfg(any(test, feature = \"headless\"))]",
+            "#[cfg(all(test, unix))]",
+        ] {
+            assert!(
+                is_test_only(&[cfg.to_string()]),
+                "{cfg} gates an item to a test build"
+            );
+        }
+    }
+
+    #[test]
+    fn a_predicate_that_does_not_require_test_is_served() {
+        // `not(test)` is the one the substring reading got backwards: it names
+        // `test` while describing exactly the builds an integrator ships.
+        for cfg in [
+            "#[cfg(not(test))]",
+            "#[cfg(feature = \"headless\")]",
+            "#[cfg(all(unix, feature = \"webview\"))]",
+            "#[cfg(any(feature = \"session\", feature = \"cooldown\"))]",
+        ] {
+            assert!(
+                !is_test_only(&[cfg.to_string()]),
+                "{cfg} belongs in the served surface"
+            );
+        }
+    }
 }

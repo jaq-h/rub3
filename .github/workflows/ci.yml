@@ -86,9 +86,9 @@ jobs:
   # Formatting and lint. BOTH checks are REAL GATES: a rustfmt drift or a clippy
   # warning turns this job red.
   #
-  # Scope. Both commands run over the whole workspace. `rub3-wrapper` is
-  # currently its only member, so the workspace form is about staying correct
-  # when a second crate lands rather than about covering more code today.
+  # Scope. Both commands run over the whole workspace, which now means both
+  # members: `rub3-wrapper` and `rub3-docs-mcp`. implementation.md §3.3 relies
+  # on that scope, since the docs crate has no lint job of its own.
   #
   # `-D warnings` is load-bearing: plain `cargo clippy` exits 0 even when it
   # emits warnings, so a permissive clippy job would sit green forever and prove

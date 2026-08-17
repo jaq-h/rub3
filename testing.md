@@ -246,13 +246,19 @@ cargo test -p rub3-docs-mcp
 Four suites. Their subject is not behaviour so much as *provenance*: the server
 must be unable to answer from a stored copy of anything.
 
-- **`src/` unit tests** (10) - checkout resolution and the read guard (the walk up
-  from a subdirectory, a named directory that is not a checkout refused, a
-  relative path refused for trying to leave the root, and `CLAUDE.md` still
-  readable through its symlink), plus the Markdown parse: a `#` comment inside a
-  shell fence not counted as a heading, a section carrying its subsections and
-  stopping at its peer, resolution by anchor, and an untagged fence reporting an
-  empty language
+- **`src/` unit tests** (14) - checkout resolution and the read guard (the walk up
+  from a subdirectory, a named directory that is not a checkout refused, that
+  same refusal held through `resolve_from_env` so a stale `RUB3_REPO_ROOT` never
+  falls back to serving the compiled-in tree instead, a relative path refused for
+  trying to leave the root, and `CLAUDE.md` still readable through its symlink),
+  the Markdown parse (a `#` comment inside a shell fence not counted as a
+  heading, a section carrying its subsections and stopping at its peer,
+  resolution by anchor, and an untagged fence reporting an empty language), a
+  search that finds exactly as many hits as its limit reporting itself
+  untruncated while one more hit past the limit sets the flag, and the `cfg`
+  predicate that decides what is test scaffolding: `test`, `any(test, ..)` and
+  `all(test, ..)` are dropped from the served surface, `not(test)` and a plain
+  feature gate are not
 - **`tests/derivation.rs`** (13) - the provenance proofs. Six of them build a
   throwaway checkout, ask a question, edit the file the answer came from, and ask
   again *through the same server*: a renamed function, a feature gate added to a

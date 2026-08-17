@@ -115,6 +115,16 @@ pub struct Abi {
     pub source: String,
     /// Repository-relative artifact path the ABI was read from.
     pub artifact: String,
+    /// `contract`, `abstract contract`, `interface` or `library`, from the AST
+    /// rather than from a keyword scan.
+    pub kind: String,
+    /// False for an abstract base or an interface, which compile to no runtime
+    /// code and cannot be deployed or bought from.
+    ///
+    /// An ABI reads the same either way, so a caller asking for `Rub3License`
+    /// would otherwise get a full, correct, entirely unusable answer: the base
+    /// declares `purchase` and `activate` but exists at no address.
+    pub deployable: bool,
     /// The constructor, when the contract declares one.
     pub constructor: Option<Entry>,
     /// External and public functions.
@@ -327,6 +337,8 @@ pub fn abi(repo: &Repo, name: &str, include_raw: bool) -> Result<Abi, SolidityEr
         contract: contract.name.clone(),
         source: contract.source.clone(),
         artifact: contract.artifact.clone(),
+        kind: contract.kind.clone(),
+        deployable: contract.deployable,
         constructor: None,
         functions: Vec::new(),
         events: Vec::new(),

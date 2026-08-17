@@ -258,25 +258,45 @@ pub fn section(text: &str, selector: &str) -> Option<Section> {
     })
 }
 
+/// What a search found, and whether it stopped short of the corpus.
+///
+/// The flag is a fact the search establishes rather than one a caller infers
+/// from the count: a search that found exactly `limit` hits and a search that
+/// found more return the same number, and an agent told "truncated" re-queries
+/// at a larger limit for evidence that is not there, or concludes the corpus
+/// holds more than it does.
+#[derive(Debug, Clone)]
+pub struct Hits {
+    /// The hits, capped at the limit.
+    pub matches: Vec<Match>,
+    /// True when at least one further hit exists past the limit.
+    pub truncated: bool,
+}
+
 /// Case-insensitive substring search across an inventory.
 ///
 /// Substring rather than regex on purpose: the caller is an agent looking for
 /// where a term is specified, the corpus is a few thousand lines, and a regex
 /// surface would add an error mode ("your pattern did not compile") to a tool
 /// whose whole job is to answer.
-pub fn search(repo: &Repo, documents: &[Document], needle: &str, limit: usize) -> Vec<Match> {
+pub fn search(repo: &Repo, documents: &[Document], needle: &str, limit: usize) -> Hits {
     let needle = needle.to_lowercase();
     let mut matches = Vec::new();
-    for document in documents {
+    let mut truncated = false;
+    'documents: for document in documents {
         let Ok(text) = repo.read(&document.path) else {
             continue;
         };
         for (index, line) in text.lines().enumerate() {
-            if matches.len() >= limit {
-                return matches;
-            }
             if !line.to_lowercase().contains(&needle) {
                 continue;
+            }
+            if matches.len() == limit {
+                // The one hit past the limit is looked for and never returned.
+                // It is the only thing that distinguishes a full page from the
+                // whole corpus.
+                truncated = true;
+                break 'documents;
             }
             let line_number = index + 1;
             matches.push(Match {
@@ -292,7 +312,7 @@ pub fn search(repo: &Repo, documents: &[Document], needle: &str, limit: usize) -
             });
         }
     }
-    matches
+    Hits { matches, truncated }
 }
 
 /// The prose between the title and the first section heading.
@@ -437,6 +457,38 @@ tail
         assert_eq!(fences[0].language, "");
         assert_eq!(fences[0].line, 1);
         assert_eq!(fences[1].language, "bash");
+    }
+
+    #[test]
+    fn a_full_page_of_hits_is_only_truncated_when_another_one_exists() {
+        // A scratch checkout rather than this repository, because the assertion
+        // is about an exact hit count and the real corpus moves under it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Cargo.toml"), "").expect("marker");
+        std::fs::create_dir(dir.path().join("contracts")).expect("contracts");
+        std::fs::write(dir.path().join("contracts/foundry.toml"), "").expect("marker");
+        std::fs::write(
+            dir.path().join("notes.md"),
+            "# Notes\n\nneedle one\nneedle two\nneedle three\n",
+        )
+        .expect("document");
+        let repo = Repo::resolve(
+            Some(dir.path().to_path_buf()),
+            std::path::PathBuf::from("/"),
+        )
+        .expect("the scratch directory carries both markers");
+        let documents = inventory(&repo).expect("the inventory reads");
+
+        let whole = search(&repo, &documents, "needle", 3);
+        assert_eq!(whole.matches.len(), 3);
+        assert!(
+            !whole.truncated,
+            "three hits under a limit of three is the whole corpus, not a page of it"
+        );
+
+        let capped = search(&repo, &documents, "needle", 2);
+        assert_eq!(capped.matches.len(), 2);
+        assert!(capped.truncated, "a third hit sits past the limit");
     }
 
     #[test]

@@ -797,7 +797,7 @@ The corollary is the part worth defending: **a fact that cannot be derived is no
 
 **Files** - `crates/rub3-docs-mcp/` (`main.rs`, `lib.rs`, `repo.rs`, `docs.rs`, `solidity.rs`, `rustapi.rs`, `server.rs`, and three test suites), `llms.txt`, `Cargo.toml` (the new member), `README.md` (the per-module map, a "Docs MCP server" section, and the dependency table's scope), `testing.md` (the suite inventory), `.github/workflows/ci.yml` (the `docs` job), `AGENTS.md`, and eighteen code-fence tags across `README.md`, `architecture.md`, `implementation.md`, `ideation.md` and `contracts/contracts.md`.
 
-**Tests** - 32 in the new crate: 10 unit, 13 in `derivation.rs`, 8 in `docs_legibility.rs`, 1 in `mcp_stdio.rs`.
+**Tests** - 36 in the new crate: 14 unit, 13 in `derivation.rs`, 8 in `docs_legibility.rs`, 1 in `mcp_stdio.rs`.
 - Six of the derivation tests build a throwaway checkout, ask a question, edit the file the answer came from, and ask again *through the same server instance*. An answer that survives its own source being edited is either a hardcoded string or a cache, and for a docs server those are the same defect. Covered that way: a renamed function, a feature gate added to a crate root, an edited ABI entry, a selector removed from an artifact, a moved canonical fingerprint, and a document added after startup
 - `every_served_rust_signature_is_a_verbatim_slice_of_its_file` walks the whole workspace and asserts every served signature, member signature and `cfg` appears byte for byte in the file it is attributed to. This is the one that would fail the first time a signature was assembled by re-rendering an AST instead of sliced
 - `every_rendered_function_signature_matches_the_artifacts_own_selector_map` cross-checks two independent fields of the same artifact: every rendered canonical signature must be a key of `methodIdentifiers` with the selector to match, and every function solc emitted a selector for must be served. A tuple parameter expanded wrongly - `tuple[]` over two `uint256` members is `(uint256,uint256)[]` - changes the selector while still reading plausibly, and this is what catches it rather than an agent's failed transaction
@@ -979,7 +979,8 @@ Current (implemented). The per-module map is not repeated here: README.md →
 ```text
 rub3/
 ├── crates/
-│   └── rub3-wrapper/                 # Wrapper runtime (src/, assets/activation.html, tests/)
+│   ├── rub3-wrapper/                 # Wrapper runtime (src/, assets/activation.html, tests/)
+│   └── rub3-docs-mcp/                # §3.3 - docs MCP server, off the wrapper's dependency path
 ├── contracts/                        # Foundry project (§1.5, §1.6)
 │   ├── src/
 │   │   ├── Rub3License.sol           # Abstract base: ERC-721 + Enumerable + Ownable, activation
@@ -995,6 +996,7 @@ rub3/
 ├── implementation.md
 ├── ideation.md
 ├── testing.md
+├── llms.txt                          # §3.3 - the agent's entry point to the documents
 └── README.md
 ```
 
@@ -1008,8 +1010,6 @@ Planned (not yet created):
 ├── contracts/src/
 │   ├── Rub3Metered.sol          # §4.1 - per-launch billing
 │   └── Rub3Registry.sol         # §3.2 - discovery + agent cards
-├── llms.txt                     # §3.3
-├── docs-mcp/                    # §3.3 - docs MCP server
 └── examples/
     ├── hello-mcp/               # §3.3 beachhead - wallet-gated MCP server
     ├── hello-rust/

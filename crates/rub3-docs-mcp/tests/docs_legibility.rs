@@ -182,15 +182,23 @@ fn every_document_states_its_purpose_under_its_title() {
 }
 
 /// The repository writes plain dashes. This is the regression guard for that.
+///
+/// `llms.txt` is swept alongside the Markdown inventory rather than left to it:
+/// the walk collects `*.md` only, and the one prose file an integrating agent
+/// reads first is the last one that should sit outside the rule.
 #[test]
 fn no_document_uses_an_em_dash() {
     let repo = repo();
     let mut offenders = Vec::new();
-    for document in inventory(&repo) {
-        let text = repo.read(&document.path).expect("a document reads");
+    let paths = inventory(&repo)
+        .into_iter()
+        .map(|document| document.path)
+        .chain(std::iter::once("llms.txt".to_string()));
+    for path in paths {
+        let text = repo.read(&path).expect("a document reads");
         for (number, line) in text.lines().enumerate() {
             if line.contains('\u{2014}') {
-                offenders.push(format!("{}:{}", document.path, number + 1));
+                offenders.push(format!("{}:{}", path, number + 1));
             }
         }
     }

@@ -218,11 +218,11 @@ impl DocsServer {
     ) -> Result<Json<SearchHits>, ErrorData> {
         let limit = request.limit.unwrap_or(50).clamp(1, 500);
         let inventory = docs::inventory(&self.repo).map_err(internal)?;
-        let matches = docs::search(&self.repo, &inventory, &request.query, limit);
+        let hits = docs::search(&self.repo, &inventory, &request.query, limit);
         Ok(Json(SearchHits {
             query: request.query,
-            truncated: matches.len() >= limit,
-            matches,
+            truncated: hits.truncated,
+            matches: hits.matches,
         }))
     }
 

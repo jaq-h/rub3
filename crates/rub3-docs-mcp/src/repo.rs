@@ -120,11 +120,21 @@ impl Repo {
     /// outlive or be copied away from the tree it was built in, and it is
     /// checked against the same markers as any other candidate, so a stale
     /// compile-time path is a refusal to start and not a wrong answer.
+    ///
+    /// The fallback is reached only from the walk. A named root - `--repo-root`
+    /// or `RUB3_REPO_ROOT`, the latter typically frozen into an MCP client's
+    /// config and left there while the tree moves - is the caller's answer to
+    /// this question, so a wrong one has to surface as a refusal naming that
+    /// path. Serving some other checkout's documents, ABIs and signatures under
+    /// it would be a wrong answer dressed as a working one, which is the whole
+    /// failure mode this crate exists to exclude.
     pub fn resolve_from_env(explicit: Option<PathBuf>) -> Result<Repo, RepoError> {
         let explicit = explicit.or_else(|| std::env::var_os("RUB3_REPO_ROOT").map(PathBuf::from));
+        let named = explicit.is_some();
         let cwd = std::env::current_dir().map_err(RepoError::NoWorkingDirectory)?;
         match Repo::resolve(explicit, cwd) {
             Ok(repo) => Ok(repo),
+            Err(named_failed) if named => Err(named_failed),
             Err(walk_failed) => Repo::compiled_in().map_err(|_| walk_failed),
         }
     }
@@ -218,6 +228,20 @@ mod tests {
             matches!(err, RepoError::NotARub3Repo { .. }),
             "expected NotARub3Repo, got {err}"
         );
+    }
+
+    #[test]
+    fn a_named_root_that_is_not_a_checkout_does_not_fall_back() {
+        // The compiled-in checkout is a real one and is right there, so this is
+        // the case where a silent fallback would look like a working server
+        // answering from the wrong tree.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = Repo::resolve_from_env(Some(dir.path().to_path_buf()))
+            .expect_err("a named directory that is not a checkout is a refusal to start");
+        match err {
+            RepoError::NotARub3Repo { path, .. } => assert_eq!(path, dir.path()),
+            other => panic!("expected NotARub3Repo naming the path, got {other}"),
+        }
     }
 
     #[test]
