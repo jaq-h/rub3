@@ -71,7 +71,8 @@ pub struct RustApi {
     /// Module name, for example `activation`. Omit for every module.
     pub module: Option<String>,
     /// Case-insensitive substring an item's name must contain. Omit for every
-    /// item.
+    /// item. A substring nothing matches is refused with the names in scope,
+    /// rather than answered with an empty listing.
     pub name: Option<String>,
 }
 
@@ -309,18 +310,44 @@ impl DocsServer {
             }
         }
         if let Some(wanted) = &request.name {
-            let wanted = wanted.to_lowercase();
+            // A name that matches nothing refuses for the reason the two
+            // filters above it do: an agent reading `{"crates": []}` reads it
+            // as "there is no such API", and goes back to inventing the
+            // signature this tool exists to hand it. A typo is one letter away
+            // from a name in the list the refusal carries.
+            let known: BTreeSet<String> = crates
+                .iter()
+                .flat_map(|api| api.modules.iter())
+                .flat_map(|module| module.items.iter())
+                .flat_map(|item| {
+                    std::iter::once(item.name.clone())
+                        .chain(item.members.iter().map(|member| member.name.clone()))
+                })
+                .collect();
+            let needle = wanted.to_lowercase();
             for api in &mut crates {
                 for module in &mut api.modules {
                     module.items.retain(|item| {
-                        item.name.to_lowercase().contains(&wanted)
-                            || item.signature.to_lowercase().contains(&wanted)
+                        item.name.to_lowercase().contains(&needle)
+                            || item.signature.to_lowercase().contains(&needle)
                             || item
                                 .members
                                 .iter()
-                                .any(|member| member.name.to_lowercase().contains(&wanted))
+                                .any(|member| member.name.to_lowercase().contains(&needle))
                     });
                 }
+            }
+            if crates
+                .iter()
+                .all(|api| api.modules.iter().all(|module| module.items.is_empty()))
+            {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "no public item whose name contains {wanted}. Names in scope: {}",
+                        known.into_iter().collect::<Vec<_>>().join(", ")
+                    ),
+                    None,
+                ));
             }
         }
         crates.retain(|api| api.modules.iter().any(|module| !module.items.is_empty()));

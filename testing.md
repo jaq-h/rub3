@@ -259,7 +259,7 @@ must be unable to answer from a stored copy of anything.
   predicate that decides what is test scaffolding: `test`, `any(test, ..)` and
   `all(test, ..)` are dropped from the served surface, `not(test)` and a plain
   feature gate are not
-- **`tests/derivation.rs`** (18) - the provenance proofs. Seven of them build a
+- **`tests/derivation.rs`** (21) - the provenance proofs. Seven of them build a
   throwaway checkout, ask a question, edit the file the answer came from, and ask
   again *through the same server*: a renamed function, a feature gate added to a
   crate root, a declaration re-exported out of a private module, an edited ABI
@@ -280,13 +280,20 @@ must be unable to answer from a stored copy of anything.
   `supervisor_run` and `ensure_headless` to answering with the `pub fn` line
   their private modules declare, at the file and line the answer names, since a
   `pub use` statement tells an agent the name exists and nothing about how to
-  call it. Two refusals are in here too, for the questions where an empty answer
-  would be read as a fact: a contract question with no artifacts names `forge
-  build`, and a module name that no crate declares names the modules that do
-  exist rather than returning an empty surface an agent would read as "nothing
-  public lives there". One tolerance is here for the same reason inverted: a
+  call it. A fifth, `a_second_derivation_agrees_with_the_first`, derives the
+  workspace twice and holds the second answer to the same verbatim slices as the
+  first: `rustapi::workspace` drops the spans of every earlier derivation before
+  it starts, and dropping them any later would silently start slicing the right
+  shape out of the wrong file. Three refusals are in here too, for the questions
+  where an empty answer would be read as a fact: a contract question with no
+  artifacts names `forge build`, a module name that no crate declares names the
+  modules that do exist, and an item name nothing matches names the items that
+  do, rather than returning an empty surface an agent would read as "nothing
+  public lives there". Two tolerances are here for the same reason inverted: a
   document that is not readable UTF-8 costs that document and not the other two
-  document tools, which share the inventory with it
+  document tools, which share the inventory with it, and a missing
+  `contracts/canonical-bytecode.json` costs the fingerprints and not the whole
+  contract surface, which is derived from the artifacts instead
 - **`tests/docs_legibility.rs`** (8) - the gate: every code fence declares a
   language, every relative cross-reference resolves to a file *and* to a heading
   that exists, one title per document with no skipped heading level, a stated

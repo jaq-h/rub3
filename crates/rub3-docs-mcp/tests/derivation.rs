@@ -112,6 +112,10 @@ impl Fixture {
         fs::remove_dir_all(self.directory.path().join(relative)).expect("rmdir");
     }
 
+    fn remove_file(&self, relative: &str) {
+        fs::remove_file(self.directory.path().join(relative)).expect("rm");
+    }
+
     fn server(&self) -> DocsServer {
         let repo = Repo::resolve(
             Some(self.directory.path().to_path_buf()),
@@ -556,7 +560,132 @@ fn a_reexport_of_an_already_listed_declaration_is_not_repeated() {
     );
 }
 
+/// A name that matches nothing refuses, the way a bad crate or module does.
+#[test]
+fn an_unmatched_name_is_refused_with_the_names_that_exist() {
+    let fixture = Fixture::new();
+    let server = fixture.server();
+
+    let error = match server.rust_api(Parameters(RustApi {
+        crate_name: Some("demo".to_string()),
+        module: None,
+        name: Some("alpah".to_string()),
+    })) {
+        Err(error) => error,
+        Ok(served) => panic!(
+            "a name that matches nothing must not answer, got {} crates",
+            served.0.crates.len()
+        ),
+    };
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("alpah") && message.contains("alpha"),
+        "the refusal must name the items that do exist, got: {message}"
+    );
+
+    let served = server
+        .rust_api(Parameters(RustApi {
+            crate_name: Some("demo".to_string()),
+            module: None,
+            name: Some("alpha".to_string()),
+        }))
+        .expect("the name that does exist answers")
+        .0
+        .crates;
+    assert_eq!(
+        only_signature(&served, "widget", "alpha").as_deref(),
+        Some("pub fn alpha(count: u32) -> bool"),
+    );
+}
+
+/// A missing fingerprint manifest is no fingerprints, not a broken tool.
+///
+/// Everything else `list_contracts` reports is derived from the artifacts, and
+/// `contract_abi` needs the same set to name the contracts that do exist, so
+/// failing both over a record neither derives anything from would take the
+/// contract surface down for a checkout that simply has not run the gate.
+#[test]
+fn a_missing_fingerprint_manifest_leaves_the_contract_surface_answering() {
+    let fixture = Fixture::new();
+    let server = fixture.server();
+    fixture.remove_file("contracts/canonical-bytecode.json");
+
+    let contracts = server
+        .list_contracts()
+        .expect("the artifact-derived facts do not need the manifest")
+        .0
+        .contracts;
+    let demo = contracts
+        .iter()
+        .find(|contract| contract.name == "Demo")
+        .expect("Demo is still derived from its artifact");
+    assert!(demo.deployable);
+    assert!(
+        demo.canonical.is_none(),
+        "no manifest means no published fingerprint, not a wrong one"
+    );
+
+    let abi = server
+        .contract_abi(Parameters(ContractAbi {
+            contract: "Demo".to_string(),
+            include_raw: None,
+        }))
+        .expect("the ABI is derived from the artifact")
+        .0;
+    assert_eq!(abi.functions[0].signature, "purchase()");
+
+    // The unknown-contract refusal builds its "known" list from the same set.
+    let error = match server.contract_abi(Parameters(ContractAbi {
+        contract: "Demoo".to_string(),
+        include_raw: None,
+    })) {
+        Err(error) => error,
+        Ok(_) => panic!("a contract with no artifact must not answer"),
+    };
+    assert!(
+        format!("{error:?}").contains("Demo"),
+        "the refusal still names the contracts that do exist"
+    );
+}
+
 // ── The real repository ───────────────────────────────────────────────────────
+
+/// Two derivations in a row agree, and the second is still verbatim.
+///
+/// `workspace` drops the spans of every earlier derivation before it starts,
+/// which is what stops `proc_macro2`'s thread-local source map growing for the
+/// life of the server. Dropping them anywhere later would invalidate spans that
+/// a derivation in progress still holds, and the damage is silent: the slices
+/// would keep their shape and start coming out of the wrong file. This is the
+/// assertion that fails if that call moves.
+#[test]
+fn a_second_derivation_agrees_with_the_first() {
+    let repo = Repo::compiled_in().expect("this crate lives in a rub3 checkout");
+    let first = rustapi::workspace(&repo).expect("the workspace derives");
+    let second = rustapi::workspace(&repo).expect("the workspace derives again");
+
+    assert_eq!(
+        serde_json::to_value(&first).expect("serialises"),
+        serde_json::to_value(&second).expect("serialises"),
+        "a second derivation of an unchanged workspace must not move"
+    );
+    for crate_api in &second {
+        for module in &crate_api.modules {
+            for item in &module.items {
+                let source = repo.read(&item.path).expect("a declaring file reads");
+                let served = item
+                    .signature
+                    .strip_suffix(" = ...;")
+                    .unwrap_or(&item.signature);
+                assert!(
+                    source.contains(served),
+                    "{} serves {served:?} on the second derivation, which is not in the file",
+                    item.path
+                );
+            }
+        }
+    }
+}
 
 /// The wrapper's two front doors answer with their real declarations.
 ///

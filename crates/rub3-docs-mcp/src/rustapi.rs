@@ -10,7 +10,10 @@
 //! The crates come from the workspace's `members` list rather than from a name
 //! written here, so a crate a sibling branch adds is served without an edit.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
+use std::rc::Rc;
 
 use serde::Serialize;
 
@@ -114,7 +117,18 @@ pub struct Item {
 }
 
 /// Derives the public API of every workspace member that has a library.
+///
+/// The first thing it does is drop the spans of every earlier derivation.
+/// `proc_macro2` records each parsed file in a thread-local source map that it
+/// grows on every parse and never shrinks by itself, which for a server that
+/// answers `rust_api` for as long as an agent session lasts is unbounded: the
+/// map's positions are a `u32`, so a process that parsed its way to four
+/// gigabytes would wrap them and start slicing the wrong bytes out of the right
+/// files. `invalidate_current_thread_spans` is the API `proc_macro2` documents
+/// for exactly that workload. It is safe here because no parse outlives the
+/// call that made it: everything crossing this boundary is an owned `String`.
 pub fn workspace(repo: &Repo) -> Result<Vec<CrateApi>, RustApiError> {
+    proc_macro2::extra::invalidate_current_thread_spans();
     let mut derived = Vec::new();
     for member in members(repo)? {
         let root = format!("{member}/src/lib.rs");
@@ -172,49 +186,80 @@ fn members(repo: &Repo) -> Result<Vec<String>, RustApiError> {
 /// not always in the file the caller started from: a `pub use` is resolved back
 /// to the file that declares it, and the answer has to say which file that was.
 struct SourceFile {
-    /// The crate directory, so a module path can be resolved from the root.
-    crate_dir: String,
     /// Repository-relative path of this file.
     path: String,
     /// The file, verbatim. Every signature served is a slice of this.
     text: String,
     lines: LineIndex,
+    /// The parse the items are read out of.
+    parsed: syn::File,
 }
 
-impl SourceFile {
-    fn read(
-        repo: &Repo,
-        crate_dir: &str,
-        path: &str,
-    ) -> Result<(SourceFile, syn::File), RustApiError> {
-        let text = repo.read(path)?;
+/// Every file one crate's derivation reads, read and parsed at most once.
+///
+/// A `pub use` is resolved a leaf at a time, and the wrapper re-exports
+/// fourteen names out of `activation.rs`, so without this the largest file in
+/// the workspace is read and parsed fourteen times to answer one question. The
+/// cost is not only the work: a `syn` parse is also an entry in the
+/// thread-local source map described on [`workspace`], so a parse this crate
+/// does not need is memory the process holds until the next derivation.
+///
+/// It lives for one crate's derivation and no longer. A cache that outlived the
+/// call would be a docs server answering from a snapshot, which is the one
+/// thing this crate must never do.
+struct Sources<'a> {
+    repo: &'a Repo,
+    crate_dir: String,
+    files: RefCell<BTreeMap<String, Rc<SourceFile>>>,
+}
+
+impl<'a> Sources<'a> {
+    fn new(repo: &'a Repo, crate_dir: &str) -> Sources<'a> {
+        Sources {
+            repo,
+            crate_dir: crate_dir.to_string(),
+            files: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    fn file(&self, path: &str) -> Result<Rc<SourceFile>, RustApiError> {
+        if let Some(known) = self.files.borrow().get(path) {
+            return Ok(Rc::clone(known));
+        }
+        let text = self.repo.read(path)?;
         let parsed = parse(path, &text)?;
         let lines = LineIndex::new(&text);
-        Ok((
-            SourceFile {
-                crate_dir: crate_dir.to_string(),
-                path: path.to_string(),
-                text,
-                lines,
-            },
+        let file = Rc::new(SourceFile {
+            path: path.to_string(),
+            text,
+            lines,
             parsed,
-        ))
+        });
+        self.files
+            .borrow_mut()
+            .insert(path.to_string(), Rc::clone(&file));
+        Ok(file)
+    }
+
+    fn crate_root(&self) -> String {
+        format!("{}/src/lib.rs", self.crate_dir)
     }
 }
 
 /// The crate root and every `pub mod` it declares.
 fn modules(repo: &Repo, crate_dir: &str, root_path: &str) -> Result<Vec<Module>, RustApiError> {
-    let (root, file) = SourceFile::read(repo, crate_dir, root_path)?;
+    let sources = Sources::new(repo, crate_dir);
+    let root = sources.file(root_path)?;
 
     let mut modules = vec![Module {
         name: "lib".to_string(),
         path: root_path.to_string(),
         cfg: Vec::new(),
-        doc: inner_doc(&file.attrs),
-        items: items(repo, &root, &file.items),
+        doc: inner_doc(&root.parsed.attrs),
+        items: items(&sources, &root, &root.parsed.items),
     }];
 
-    for item in &file.items {
+    for item in &root.parsed.items {
         let syn::Item::Mod(module) = item else {
             continue;
         };
@@ -233,13 +278,13 @@ fn modules(repo: &Repo, crate_dir: &str, root_path: &str) -> Result<Vec<Module>,
             // no test could exercise would be the worse of the two answers.
             continue;
         };
-        let (module_source, module_file) = SourceFile::read(repo, crate_dir, &path)?;
+        let module_source = sources.file(&path)?;
         modules.push(Module {
             name,
             path,
             cfg: cfgs(&root.text, &module.attrs),
-            doc: inner_doc(&module_file.attrs),
-            items: items(repo, &module_source, &module_file.items),
+            doc: inner_doc(&module_source.parsed.attrs),
+            items: items(&sources, &module_source, &module_source.parsed.items),
         });
     }
     drop_reexports_of_listed_items(&mut modules);
@@ -283,10 +328,10 @@ fn parse(path: &str, source: &str) -> Result<syn::File, RustApiError> {
 }
 
 /// Every public item of one parsed file.
-fn items(repo: &Repo, ctx: &SourceFile, parsed: &[syn::Item]) -> Vec<Item> {
+fn items(sources: &Sources, ctx: &SourceFile, parsed: &[syn::Item]) -> Vec<Item> {
     let mut derived = Vec::new();
     for item in parsed {
-        let Some(described) = describe(repo, ctx, item) else {
+        let Some(described) = describe(sources, ctx, item) else {
             continue;
         };
         if is_test_only(&described.cfg) {
@@ -297,7 +342,7 @@ fn items(repo: &Repo, ctx: &SourceFile, parsed: &[syn::Item]) -> Vec<Item> {
     derived
 }
 
-fn describe(repo: &Repo, ctx: &SourceFile, item: &syn::Item) -> Option<Item> {
+fn describe(sources: &Sources, ctx: &SourceFile, item: &syn::Item) -> Option<Item> {
     use syn::spanned::Spanned;
 
     let source = ctx.text.as_str();
@@ -488,7 +533,7 @@ fn describe(repo: &Repo, ctx: &SourceFile, item: &syn::Item) -> Option<Item> {
                 cfg: cfgs(source, &item_use.attrs),
                 doc: outer_doc(&item_use.attrs),
                 line: lines.line_of(start),
-                members: reexported(repo, ctx, &item_use.tree),
+                members: reexported(sources, ctx, &item_use.tree),
             })
         }
         syn::Item::Impl(item_impl) => {
@@ -600,14 +645,14 @@ fn use_name(tree: &syn::UseTree) -> String {
 /// resolve - an external crate, a glob, a `super::` path, a chain of further
 /// re-exports - contributes nothing, because a re-export whose target cannot be
 /// found is a fact this crate does not have.
-fn reexported(repo: &Repo, ctx: &SourceFile, tree: &syn::UseTree) -> Vec<Item> {
+fn reexported(sources: &Sources, ctx: &SourceFile, tree: &syn::UseTree) -> Vec<Item> {
     let mut leaves = Vec::new();
     use_leaves(tree, &mut Vec::new(), &mut leaves);
     leaves
         .into_iter()
         .filter_map(|(segments, public_name)| {
-            let (target, item) = resolve(repo, ctx, &segments, 0)?;
-            let mut described = describe(repo, &target, &item)?;
+            let (target, item) = resolve(sources, ctx, &segments, 0)?;
+            let mut described = describe(sources, &target, &item)?;
             // The name a caller can write, which a rename makes different from
             // the declared one. The signature stays the declaration's own.
             described.name = public_name;
@@ -659,26 +704,26 @@ fn use_leaves(
 /// fact about the module tree this walk does not build, and guessing it would
 /// be the one thing this crate refuses to do.
 fn resolve(
-    repo: &Repo,
+    sources: &Sources,
     ctx: &SourceFile,
     segments: &[String],
     depth: usize,
-) -> Option<(SourceFile, syn::Item)> {
+) -> Option<(Rc<SourceFile>, syn::Item)> {
     if depth > MAX_REEXPORT_DEPTH {
         return None;
     }
     let (first, rest) = segments.split_first()?;
     let (start_path, rest) = match first.as_str() {
         "self" => (ctx.path.clone(), rest),
-        "crate" => (format!("{}/src/lib.rs", ctx.crate_dir), rest),
+        "crate" => (sources.crate_root(), rest),
         "super" => return None,
-        _ => (format!("{}/src/lib.rs", ctx.crate_dir), segments),
+        _ => (sources.crate_root(), segments),
     };
     if rest.is_empty() {
         return None;
     }
-    let (start, parsed) = SourceFile::read(repo, &ctx.crate_dir, &start_path).ok()?;
-    resolve_in(repo, start, &parsed.items, rest, depth)
+    let start = sources.file(&start_path).ok()?;
+    resolve_in(sources, &start, &start.parsed.items, rest, depth)
 }
 
 /// How many `pub use` hops the walk follows before giving up.
@@ -690,50 +735,50 @@ fn resolve(
 const MAX_REEXPORT_DEPTH: usize = 8;
 
 fn resolve_in(
-    repo: &Repo,
-    ctx: SourceFile,
+    sources: &Sources,
+    ctx: &Rc<SourceFile>,
     parsed: &[syn::Item],
     segments: &[String],
     depth: usize,
-) -> Option<(SourceFile, syn::Item)> {
+) -> Option<(Rc<SourceFile>, syn::Item)> {
     let (name, rest) = segments.split_first()?;
     if rest.is_empty() {
         if let Some(found) = parsed
             .iter()
             .find(|item| declared_name(item).as_deref() == Some(name.as_str()))
         {
-            return Some((ctx, found.clone()));
+            return Some((Rc::clone(ctx), found.clone()));
         }
         // Not declared here, so this module may itself be re-exporting it from
         // somewhere further in. Following the hop is what lets the name an
         // integrator actually writes - `rub3_wrapper::ensure_headless`, two
         // re-exports away from its declaration - answer with a signature.
-        return follow(repo, &ctx, parsed, name, depth);
+        return follow(sources, ctx, parsed, name, depth);
     }
     let module = parsed.iter().find_map(|item| match item {
         syn::Item::Mod(module) if module.ident == name.as_str() => Some(module),
         _ => None,
     })?;
     match &module.content {
-        Some((_, inner)) => resolve_in(repo, ctx, inner, rest, depth),
+        Some((_, inner)) => resolve_in(sources, ctx, inner, rest, depth),
         None => {
             let path = module_files(&ctx.path, name)
                 .into_iter()
-                .find(|candidate| repo.is_file(candidate))?;
-            let (child, child_file) = SourceFile::read(repo, &ctx.crate_dir, &path).ok()?;
-            resolve_in(repo, child, &child_file.items, rest, depth)
+                .find(|candidate| sources.repo.is_file(candidate))?;
+            let child = sources.file(&path).ok()?;
+            resolve_in(sources, &child, &child.parsed.items, rest, depth)
         }
     }
 }
 
 /// The next hop for a name this module re-exports rather than declares.
 fn follow(
-    repo: &Repo,
+    sources: &Sources,
     ctx: &SourceFile,
     parsed: &[syn::Item],
     name: &str,
     depth: usize,
-) -> Option<(SourceFile, syn::Item)> {
+) -> Option<(Rc<SourceFile>, syn::Item)> {
     for item in parsed {
         let syn::Item::Use(item_use) = item else {
             continue;
@@ -748,7 +793,7 @@ fn follow(
             .find(|(_, public_name)| public_name == name)
             .map(|(segments, _)| segments);
         if let Some(segments) = hop {
-            return resolve(repo, ctx, &segments, depth + 1);
+            return resolve(sources, ctx, &segments, depth + 1);
         }
     }
     None

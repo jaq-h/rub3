@@ -370,8 +370,18 @@ pub fn abi(repo: &Repo, name: &str, include_raw: bool) -> Result<Abi, SolidityEr
 }
 
 /// The published fingerprints, keyed by contract name.
+///
+/// A manifest that cannot be read is no fingerprints rather than no answer. The
+/// fingerprint is optional wherever it is served, every other fact in the
+/// contract surface comes from the artifacts instead, and a checkout without
+/// the file would otherwise lose `list_contracts` and `contract_abi` together
+/// over a record neither of them derives anything from. A manifest that is
+/// present and malformed is still an error: that is a broken record rather than
+/// an absent one, and it is the fingerprint gate's own output.
 fn canonical_manifest(repo: &Repo) -> Result<BTreeMap<String, Canonical>, SolidityError> {
-    let text = repo.read("contracts/canonical-bytecode.json")?;
+    let Ok(text) = repo.read("contracts/canonical-bytecode.json") else {
+        return Ok(BTreeMap::new());
+    };
     let manifest: Value = serde_json::from_str(&text).map_err(|e| SolidityError::Malformed {
         artifact: "canonical-bytecode.json".to_string(),
         detail: format!("not JSON: {e}"),
