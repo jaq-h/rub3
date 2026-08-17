@@ -705,8 +705,6 @@ The number is not a claim about what a licence is worth; ETH's value moves and n
 - `headless_buys_at_exactly_the_eth_ceiling_and_under_the_default_e2e` checks the inclusive boundary against a real chain, then buys the same listing with a second agent that has no ceiling variable set at all - the property that keeps the default from being a breaking change
 - Full 8-bundle matrix green, `cargo fmt --check` and `cargo clippy -- -D warnings` clean, and all 25 headless e2e tests pass against anvil. Only the `--lib` count for `tier-3,headless` moves, 156 → 162: `SpendPolicy` is behind the `headless` feature, so every other bundle is untouched at `tier-0` 46, `tier-1` 76, `tier-2` 91, `tier-3`/`tier-4` 101
 
-**Left alone deliberately** - `contracts/contracts.md` describes the stablecoin ceiling in its purchase recipe and does not mention this one. Nothing it says became false, and `contracts/` was off limits here because a separate lane is editing it; adding the ETH sentence there is follow-up work.
-
 **Phase 2 deliverable:** `rub3 deploy` → fund a fresh key → `rub3-wrapper --headless` completes purchase → activation → launch with no human present, and the deployed contract carries the fee split and ownership invariants.
 
 ---
