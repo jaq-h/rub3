@@ -27,7 +27,10 @@
 //! stderr and the wrapped binary runs anyway. Refusing to start a program the
 //! user has already paid for because a socket could not be created would be a
 //! revocation surface, which `architecture.md` -> "Ownership invariants" rules
-//! out; the same fail-open-on-launch posture as §2.6's attestation.
+//! out; the same fail-open-on-launch posture as §2.6's attestation. The child is
+//! still told a wrapper launched it - `supervisor::SDK_ADDRESS_NO_CHANNEL` goes
+//! into the variable in place of an address - so what it reports is a wrapper
+//! serving no channel rather than no wrapper, which is the one thing it is not.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufReader, Read, Write};
@@ -483,13 +486,18 @@ mod tests {
 
     use std::sync::Mutex;
 
-    /// The wrapper scrubs the channel variable from every child's environment,
-    /// including in builds that cannot name `rub3::wire::ADDRESS_ENV` because
-    /// they do not compile the SDK channel at all. That second copy is only safe
-    /// while the two agree, and this is what makes disagreeing fail loudly.
+    /// The wrapper sets the channel variable on every child's environment, to a
+    /// real address or to the no-channel sentinel, including in builds that
+    /// cannot name `rub3::wire`'s constants because they do not compile the SDK
+    /// channel at all. Those second copies are only safe while they agree, and
+    /// this is what makes disagreeing fail loudly.
     #[test]
-    fn the_scrubbed_variable_name_matches_the_sdk_crates_constant() {
+    fn the_published_variable_and_sentinel_match_the_sdk_crates_constants() {
         assert_eq!(crate::supervisor::SDK_ADDRESS_ENV, wire::ADDRESS_ENV);
+        assert_eq!(
+            crate::supervisor::SDK_ADDRESS_NO_CHANNEL,
+            wire::ADDRESS_NO_CHANNEL
+        );
     }
 
     // ── Request handling ─────────────────────────────────────────────────────

@@ -25,6 +25,20 @@ use crate::SessionInfo;
 /// recognised, so the wrapper must set it on the child and nowhere else.
 pub const ADDRESS_ENV: &str = "RUB3_SDK_SOCKET";
 
+/// The value [`ADDRESS_ENV`] carries when a wrapper launched this application
+/// and has no channel for it to talk to: a wrapper built without its `sdk`
+/// feature, or one whose channel failed to start.
+///
+/// The variable's absence and this value are different facts, and the developer
+/// reading the failure needs both: absent means nothing wrapped this process,
+/// this means something did and published no endpoint. Without it the second
+/// case is reported as the first, and the advice that follows - "launch this
+/// through the wrapper" - is what the developer already did.
+///
+/// It cannot collide with an address a wrapper would really publish: a unix
+/// address is an absolute path and a pipe name begins `\\.\pipe\`.
+pub const ADDRESS_NO_CHANNEL: &str = "rub3:no-channel";
+
 /// Protocol version. Both sides send it and both sides check it.
 ///
 /// A wrapper and the application it launches are packaged separately - the

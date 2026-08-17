@@ -568,7 +568,10 @@ RUB3_LICENSE_DIR=/tmp/rub3-test \
 
 That last one prints `heartbeat=ok` and then `error_kind=no_session`: the seeded
 record is a legacy licence proof, which predates the identity model and carries no
-`user_id`. A session to report needs the `cooldown` capability and a launch that
+`user_id`. The `error_kind` is the thing to read: `not_wrapped` means nothing
+launched this process, `no_channel` means a wrapper did and serves none (built
+without `sdk`, or its channel failed to start - its stderr says which), and
+`unreachable` means the wrapper that published the address is gone. A session to report needs the `cooldown` capability and a launch that
 actually activated one - `tests/sdk_e2e.rs` covers that case end to end, and
 [testing.md](testing.md) says how it seeds one.
 

@@ -710,7 +710,7 @@ The crate a wrapped app links: `rub3::heartbeat()` and `rub3::session()`, talkin
 
 **Exactly six fields cross it** - `app_id`, `token_id`, `user_id`, `wallet`, `identity`, `expires_at`. The session signature, its nonce, the activation transaction and the device key stay on the wrapper's side: an application that could read the signature could replay the session somewhere the wrapper never launched it.
 
-**It never gates a launch.** A channel that fails to start is a warning on stderr and the binary runs anyway; refusing to start a paid-for program because a socket could not be created would be a revocation surface (see "Ownership invariants"). Whether the application requires the channel is the developer's call, made by calling `heartbeat()` or not.
+**It never gates a launch.** A channel that fails to start is a warning on stderr and the binary runs anyway; refusing to start a paid-for program because a socket could not be created would be a revocation surface (see "Ownership invariants"). The child is still told a wrapper launched it - `RUB3_SDK_SOCKET` carries a sentinel in place of an address, in that case and in a build without the `sdk` feature - so the application reports a wrapper serving no channel rather than no wrapper at all. Whether the application requires the channel is the developer's call, made by calling `heartbeat()` or not.
 
 ---
 

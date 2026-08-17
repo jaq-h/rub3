@@ -8,7 +8,7 @@
 //! dependency either.
 
 use std::ffi::OsStr;
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Read, Write};
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -39,21 +39,30 @@ pub(crate) fn request(request: Request) -> Result<Response, Error> {
     if address.is_empty() {
         return Err(Error::NotWrapped);
     }
+    if address.as_os_str() == OsStr::new(wire::ADDRESS_NO_CHANNEL) {
+        return Err(Error::NoChannel);
+    }
 
     let stream = connect(&address).map_err(Error::Unreachable)?;
     exchange(stream, request)
 }
 
-fn exchange(stream: Stream, request: Request) -> Result<Response, Error> {
+/// Generic over the stream so the version-before-body rule below can be driven
+/// without a socket; production passes a [`Stream`].
+pub(crate) fn exchange<S: Read + Write>(stream: S, request: Request) -> Result<Response, Error> {
     let mut writer = stream;
     wire::write_message(&mut writer, &Envelope::new(request)).map_err(Error::Transport)?;
 
+    // The version is read before the body, the way the wrapper reads ours: a
+    // future protocol may change the body's shape entirely, and a peer speaking
+    // one deserves "we speak different versions" rather than a JSON complaint
+    // that sends its reader looking for a broken connection.
     let mut reader = BufReader::new(writer);
-    let envelope: Envelope<Response> = wire::read_message(&mut reader)
+    let envelope: Envelope<serde_json::Value> = wire::read_message(&mut reader)
         .map_err(Error::Transport)?
         .ok_or_else(|| {
-        Error::Protocol("the wrapper closed the connection without answering".to_string())
-    })?;
+            Error::Protocol("the wrapper closed the connection without answering".to_string())
+        })?;
 
     if envelope.protocol != wire::PROTOCOL_VERSION {
         return Err(Error::ProtocolVersion {
@@ -61,7 +70,8 @@ fn exchange(stream: Stream, request: Request) -> Result<Response, Error> {
             found: envelope.protocol,
         });
     }
-    Ok(envelope.body)
+    serde_json::from_value(envelope.body)
+        .map_err(|e| Error::Protocol(format!("the wrapper's answer did not parse: {e}")))
 }
 
 #[cfg(unix)]

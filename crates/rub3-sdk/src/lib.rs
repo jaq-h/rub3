@@ -55,8 +55,11 @@
 //!
 //! So the failures it genuinely catches are the ordinary ones: an application
 //! run directly instead of through its wrapper, a wrapper that died mid-run, a
-//! stale or absent channel address, a version-skewed pair. Those are worth
-//! catching, they are common, and a plain local socket catches all of them.
+//! stale or absent channel address, a wrapper that serves no channel at all, a
+//! version-skewed pair. Those are worth catching, they are common, and a plain
+//! local socket catches all of them, each as its own [`Error`] rather than as
+//! one undifferentiated "no wrapper" - which of them a developer hit is the
+//! whole of what they need to know next.
 //! rub3's enforcement lives on-chain and in the wrapper's pre-launch check;
 //! `architecture.md` -> "Security Model" owns that side.
 //!
@@ -102,6 +105,11 @@ pub enum Error {
     /// No channel address in the environment: this process was almost certainly
     /// not launched by a rub3 wrapper.
     NotWrapped,
+    /// A wrapper launched this application and published no channel to talk to:
+    /// one built without its `sdk` feature, or one whose channel failed to
+    /// start. Distinct from [`Error::NotWrapped`] on purpose - there *is* a
+    /// wrapper here, so "launch this through the wrapper" is not the fix.
+    NoChannel,
     /// There is an address, but nothing is listening on it. A wrapper that
     /// exited leaves exactly this.
     Unreachable(std::io::Error),
@@ -130,6 +138,11 @@ impl fmt::Display for Error {
                 f,
                 "no rub3 wrapper: {} is not set, so this process was not launched by one",
                 wire::ADDRESS_ENV
+            ),
+            Error::NoChannel => write!(
+                f,
+                "the rub3 wrapper that launched this application serves no channel: it was \
+                 built without its `sdk` feature, or its channel failed to start"
             ),
             Error::Unreachable(e) => write!(f, "the rub3 wrapper is not answering: {e}"),
             Error::Transport(e) => write!(f, "the rub3 wrapper connection failed: {e}"),
@@ -223,6 +236,10 @@ fn panic_message(e: &Error) -> String {
         Error::NotWrapped | Error::Unreachable(_) => {
             "launch this binary through the rub3 wrapper: \
              rub3-wrapper --binary <this binary>"
+        }
+        Error::NoChannel => {
+            "a wrapper did launch this application, so repack it with the `sdk` feature; \
+             if it has one, its stderr says why the channel could not start"
         }
         Error::ProtocolVersion { .. } => {
             "the wrapper and this application were built against different \
@@ -420,6 +437,95 @@ mod tests {
         assert!(matches!(got, Err(Error::Unreachable(_))), "got {got:?}");
     }
 
+    /// A wrapper that serves no channel publishes the sentinel rather than
+    /// leaving the variable unset, and it must not read as "no wrapper": the
+    /// advice that failure carries is to launch through a wrapper, which is
+    /// exactly what the developer already did.
+    #[test]
+    fn the_no_channel_sentinel_reads_as_a_wrapper_without_a_channel() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(wire::ADDRESS_ENV, wire::ADDRESS_NO_CHANNEL);
+        let alive = try_heartbeat();
+        let session = try_session();
+        std::env::remove_var(wire::ADDRESS_ENV);
+
+        assert!(matches!(alive, Err(Error::NoChannel)), "got {alive:?}");
+        assert!(matches!(session, Err(Error::NoChannel)), "got {session:?}");
+        assert!(
+            panic_message(&Error::NoChannel).contains("`sdk` feature"),
+            "the way out is to repack the wrapper: {}",
+            panic_message(&Error::NoChannel)
+        );
+    }
+
+    /// The version is checked before the body is parsed, which is what the
+    /// wrapper does with our requests and what [`wire::PROTOCOL_VERSION`]
+    /// promises. A protocol 2 wrapper may answer in a shape this build has never
+    /// seen; reported as a parse failure it would send its reader after a broken
+    /// connection rather than a mismatched pair.
+    #[test]
+    fn an_answer_at_another_protocol_version_reports_the_mismatch_rather_than_the_parse() {
+        let peer = tests_support::Duplex::answering(r#"{"protocol":2,"shape":"unheard of"}"#);
+        let got = transport::exchange(peer, wire::Request::Heartbeat);
+
+        assert!(
+            matches!(
+                got,
+                Err(Error::ProtocolVersion {
+                    expected: 1,
+                    found: 2
+                })
+            ),
+            "got {got:?}"
+        );
+    }
+
+    /// The same shape at *this* version really is a broken answer, so the two
+    /// failures stay distinguishable.
+    #[test]
+    fn an_unparseable_answer_at_this_version_is_a_protocol_error() {
+        let peer = tests_support::Duplex::answering(r#"{"protocol":1,"shape":"unheard of"}"#);
+        let got = transport::exchange(peer, wire::Request::Heartbeat);
+
+        assert!(matches!(got, Err(Error::Protocol(_))), "got {got:?}");
+    }
+
+    mod tests_support {
+        use std::io::{self, Read, Write};
+
+        /// A peer in memory: it answers with one scripted line and swallows
+        /// whatever is written to it, which is all the exchange needs of a
+        /// socket.
+        pub struct Duplex {
+            answer: io::Cursor<Vec<u8>>,
+        }
+
+        impl Duplex {
+            pub fn answering(line: &str) -> Self {
+                let mut bytes = line.as_bytes().to_vec();
+                bytes.push(b'\n');
+                Self {
+                    answer: io::Cursor::new(bytes),
+                }
+            }
+        }
+
+        impl Read for Duplex {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.answer.read(buf)
+            }
+        }
+
+        impl Write for Duplex {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+    }
+
     /// The panic text is the whole user interface for the commonest failure -
     /// a developer running a wrapped binary directly - so it says what happened
     /// and what to do next.
@@ -434,6 +540,7 @@ mod tests {
     fn every_error_reads_as_finished_prose() {
         let errors = [
             Error::NotWrapped,
+            Error::NoChannel,
             Error::Unreachable(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)),
             Error::Transport(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
             Error::Protocol("nonsense".to_string()),

@@ -94,6 +94,7 @@ fn report() -> i32 {
 fn kind(e: &rub3::Error) -> &'static str {
     match e {
         rub3::Error::NotWrapped => "not_wrapped",
+        rub3::Error::NoChannel => "no_channel",
         rub3::Error::Unreachable(_) => "unreachable",
         rub3::Error::Transport(_) => "transport",
         rub3::Error::Protocol(_) => "protocol",

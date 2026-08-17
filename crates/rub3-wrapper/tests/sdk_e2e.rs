@@ -182,6 +182,50 @@ fn an_address_pointing_at_nothing_reports_a_dead_wrapper_rather_than_no_wrapper(
     );
 }
 
+/// A channel that fails to start does not gate the launch, and the application
+/// is told which failure it hit: a wrapper is there, serving nothing.
+///
+/// The failure is forced rather than simulated. The endpoint's directory is
+/// created under `TMPDIR`, so a `TMPDIR` that does not exist fails that `mkdir`
+/// the way an unwritable or missing temp directory does on a real machine. The
+/// path is kept short deliberately: `endpoint_dir` falls back to `/tmp` when the
+/// socket path would exceed `sockaddr_un`, and that fallback would start a
+/// channel and quietly stop this test testing what it names.
+#[cfg(unix)]
+#[test]
+fn a_channel_that_fails_to_start_reports_a_wrapper_without_a_channel() {
+    let tmp = licensed();
+    let missing = PathBuf::from("/tmp").join(format!("rub3-absent-{}", std::process::id()));
+    assert!(
+        !missing.exists(),
+        "the test needs a TMPDIR that is not there"
+    );
+
+    let out = Command::new(helpers::wrapper_bin())
+        .arg("--binary")
+        .arg(probe_bin())
+        .args(["--", "try"])
+        .env("RUB3_LICENSE_DIR", tmp.path().join("licenses"))
+        .env("RUB3_SESSION_DIR", empty_sessions(tmp.path()))
+        .env("TMPDIR", &missing)
+        .output()
+        .expect("the wrapper should run");
+
+    let text = stdout(&out);
+    assert_eq!(
+        field(&text, "error_kind").as_deref(),
+        Some("no_channel"),
+        "the application should report a wrapper without a channel, \
+         not one that never ran it: {text}\n{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("the SDK channel could not start"),
+        "the wrapper should say why on its own stderr too: {}",
+        stderr(&out)
+    );
+}
+
 // ── What a legacy-proof launch reports ────────────────────────────────────────
 
 /// A launch served from the legacy `LicenseProof` has a heartbeat and no
