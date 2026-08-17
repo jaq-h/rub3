@@ -211,6 +211,15 @@ fn addr(text: &str) -> alloy::primitives::Address {
     text.parse().expect("a deployed address parses")
 }
 
+/// A masked code hash no deploy produces, for the record fixtures that are
+/// about a record's own fields rather than about any contract's code. `publish`
+/// asks only that a hash is non-zero and not already published.
+fn role_fixture_hash(index: u8) -> [u8; 32] {
+    let mut hash = [0xf0; 32];
+    hash[31] = index;
+    hash
+}
+
 const PUBLISH_SIG: &str = "publish(bytes32,uint8,string,string,bytes32,string,(uint32,uint32)[])";
 
 // ── The test ──────────────────────────────────────────────────────────────────
@@ -353,6 +362,93 @@ fn code_registry_answers_the_wrapper_over_a_real_chain_e2e() {
              {other:?}. A registry that could stop a purchase would be a revocation surface."
         ),
     }
+
+    // ── The enum numbering, over the wire ────────────────────────────────────
+    //
+    // `Role` and `Status` cross the ABI as raw `uint8`s, and the numbering is
+    // the encoding: renumbering either side silently turns a factory into a
+    // licence, which is a purchase target the gate exists to refuse. Names
+    // cannot be that encoding, so every value is published through the real
+    // contract and decoded back here.
+    //
+    // Read through `ChainReader::record` directly rather than through
+    // `consult_registry`, because a role is a property of a record and not of
+    // the code: this asks about four records without needing four contracts.
+    for (index, (role, expected)) in [
+        ("0", Role::Licence),
+        ("1", Role::Factory),
+        ("2", Role::Deployer),
+        ("3", Role::CodeRegistry),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let hash = role_fixture_hash(index as u8);
+        cast_send(
+            &registry_addr,
+            PUBLISH_SIG,
+            &[
+                &format!("0x{}", hex::encode(hash)),
+                role,
+                "Rub3Access",
+                "a role fixture",
+                commit,
+                "0.8.28+commit.7893614a",
+                &ranges_arg(licence_entry.immutable_ranges),
+            ],
+        );
+
+        let published = chain
+            .record(registry, hash)
+            .expect("the registry answers record()")
+            .expect("a record published one line ago is there");
+        assert_eq!(
+            published.role,
+            Some(expected),
+            "role {role} decoded as {:?}. The numbers are on the wire: append to \
+             Rub3CodeRegistry.Role and to attest::Role together, and never renumber.",
+            published.role
+        );
+        assert_eq!(
+            published.status,
+            RecordStatus::Active,
+            "a freshly published record is Active, which is Status = 1 on the wire"
+        );
+    }
+
+    // The rest of the Status encoding. `Unknown` is the zero value and is not
+    // publishable - it *is* the mapping miss - so it is covered as the answer
+    // to a hash nobody published, which is the only way a wrapper ever meets
+    // it. `Deprecated` is covered by moving one of the fixtures.
+    let never_published = role_fixture_hash(99);
+    assert_eq!(
+        chain
+            .record(registry, never_published)
+            .expect("the registry answers record() for an unknown hash"),
+        None,
+        "Status::Unknown is a mapping miss and must decode to no record at all, not to a record \
+         with a status a wrapper might act on"
+    );
+
+    let deprecated_fixture = role_fixture_hash(0);
+    cast_send(
+        &registry_addr,
+        "deprecate(bytes32,string)",
+        &[
+            &format!("0x{}", hex::encode(deprecated_fixture)),
+            "superseded, for the status round trip",
+        ],
+    );
+    assert_eq!(
+        chain
+            .record(registry, deprecated_fixture)
+            .expect("the registry answers record()")
+            .expect("deprecation never removes a record")
+            .status,
+        RecordStatus::Deprecated,
+        "Deprecated is Status = 2 on the wire, and `rpc::code_registry_record` maps that number \
+         by hand"
+    );
 
     // ── An address that is not the registry is not an authority ──────────────
     //

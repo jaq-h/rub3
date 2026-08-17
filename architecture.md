@@ -592,6 +592,8 @@ Three properties carry the design:
 - **`Deprecated` never invalidates.** It means "not recommended for new purchases"; a held token, its validation and its renewal terms are untouched, and nothing on any launch path reads this contract. Anything else would be the revocation surface the ownership invariants rule out, reached through a different door.
 - **Its own code is verified before its answer is believed.** One address and one masked hash, both frozen into the wrapper at pack time; the deployer is trusted for nothing. `offsetTables()` publishes the distinct immutable layouts in use so an agent can compute a hash before it has a record to look one up in - one table today, shared by `Rub3Access` and `Rub3Subscription`.
 
+An agent checks a registry-supplied offset table against the code it fetched before masking with it - each range one 32-byte word, sorted, disjoint, in bounds, and preceded by a `PUSH32` opcode - which bounds the blind spot a masked hash accepts. It does not close it the way the wrapper's own pinned table does: those ranges arrive with the binary from solc, where a masked byte provably cannot execute, while a one-byte lookback cannot prove the `PUSH32` is an instruction rather than data inside an earlier push's immediate. Shaping code and table together to exploit that needs the registry's owner key, which could more simply publish an empty table; the bound on that key is append-only publication and a permanent public event per addition, not this check.
+
 Nothing is deployed: `code_registry` is `null` for every chain in `contracts/deployments.json`, so every wrapper refuses on a table miss exactly as it did before this contract existed.
 
 #### Rub3Registry *(planned - implementation.md §3.2)*

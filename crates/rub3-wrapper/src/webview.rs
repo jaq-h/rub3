@@ -459,16 +459,23 @@ impl IpcState {
         recipient: alloy::primitives::Address,
         contract_addr: alloy::primitives::Address,
     ) {
-        match crate::attest::verify_before_purchase(&self.rpc_url, self.chain_id, contract_addr) {
+        let advisory = match crate::attest::verify_before_purchase(
+            &self.rpc_url,
+            self.chain_id,
+            contract_addr,
+        ) {
             // One line, on the one path in this file that spends money, naming
             // what the money is about to go to. Mirrors the agent door, warning
             // included: a superseded release is still genuine code and still
-            // buyable, so it is said and not refused.
+            // buyable, so it is said and not refused - and it is said to the
+            // person too, on the screen below, because a buyer does not read
+            // stderr.
             Ok(canonical) => {
                 eprintln!("rub3: {contract_addr} verified as canonical {canonical}");
-                if let Some(advisory) = canonical.advisory() {
-                    eprintln!("rub3: warning: {advisory}");
+                if let Some(warning) = canonical.advisory() {
+                    eprintln!("rub3: warning: {warning}");
                 }
+                purchase_advisory(&canonical)
             }
             Err(e) => {
                 let notice = refusal_notice(&self.contract, &e);
@@ -485,7 +492,7 @@ impl IpcState {
                 ));
                 return;
             }
-        }
+        };
 
         let cap = match crate::rpc::supply_cap(&self.rpc_url, contract_addr) {
             Ok(c) => c,
@@ -527,6 +534,7 @@ impl IpcState {
             "supplyCap":       cap,
             "nextTokenId":     next_id,
             "calldata":        calldata,
+            "advisory":        advisory,
         });
         self.eval(format!("window.rub3.onShowPurchase({})", payload));
     }
@@ -740,6 +748,40 @@ impl IpcState {
     fn eval_err(&self, msg: &str) {
         self.eval(format!("window.rub3.onError({})", serde_json::json!(msg)));
     }
+}
+
+// ── The deprecation advisory, in a person's words ────────────────────────────
+
+/// What the window says beside a purchase the code registry no longer
+/// recommends, or `None` when it recommends it.
+///
+/// A person cannot read bytecode, which is the premise the whole purchase
+/// screen is built on, and a person does not read stderr either - so an
+/// advisory that only ever reached a terminal would reach the automated buyer
+/// and not the human one, which is the inversion this screen exists to close.
+/// [`crate::attest::Attestation::advisory`] returns the sentence rather than
+/// printing it precisely so each door can say it in its own voice; this is the
+/// window's.
+///
+/// **It is advice and never a refusal.** A superseded release is genuine rub3
+/// code, the purchase is not blocked, and a licence bought from it stays valid,
+/// so the words carry that reassurance and the screen renders them beside the
+/// price rather than in place of it. A version authority able to stop a
+/// purchase would be a revocation surface with an extra step, and neither the
+/// contract nor this screen gives it one. Emitted as `"advisory"`, written into
+/// `#p-advisory-body`, which stays hidden when this is `None`.
+#[cfg(feature = "onchain-write")]
+fn purchase_advisory(canonical: &crate::attest::Attestation) -> Option<String> {
+    canonical.advisory().map(|_| {
+        format!(
+            "A later release of this contract has been published, so {} ({}) is no longer the \
+             one recommended for a new purchase. Its code is genuine rub3 code, this purchase \
+             works normally, and the licence you buy from it stays valid. If you would rather \
+             have the newer version, cancel and ask whoever published this software for an \
+             updated copy.",
+            canonical.contract, canonical.release
+        )
+    })
 }
 
 // ── The purchase refusal, in a person's words ────────────────────────────────
@@ -1117,6 +1159,61 @@ mod tests {
     }
 
     // ── The words ────────────────────────────────────────────────────────────
+
+    /// A superseded release reaches the person, and reaches them as advice.
+    ///
+    /// The premise of this whole screen is that a person cannot read bytecode,
+    /// and a person does not read stderr either: an advisory that only ever
+    /// went to a terminal would be seen by the automated buyer and not by the
+    /// human one. The second half is that it must not read as a refusal. The
+    /// purchase completes, the code is genuine, and the licence stays valid, so
+    /// the reassurance the sentence carries is asserted as tightly as its
+    /// presence is.
+    #[test]
+    fn a_superseded_release_advises_the_buyer_rather_than_alarming_them() {
+        use crate::attest::{Attestation, Authority, RecordStatus};
+
+        let attested = |status| Attestation {
+            contract: "Rub3Access".to_string(),
+            release: "2026-04".to_string(),
+            authority: Authority::Registry {
+                status,
+                registered_at_block: 31_415_926,
+            },
+        };
+
+        assert_eq!(
+            purchase_advisory(&attested(RecordStatus::Active)),
+            None,
+            "a current release has nothing to say, and a note that is always there is noise"
+        );
+
+        let advisory = purchase_advisory(&attested(RecordStatus::Deprecated))
+            .expect("a superseded release has to reach the person doing the buying");
+        assert!(
+            advisory.contains("Rub3Access") && advisory.contains("2026-04"),
+            "the advisory must name what it is about: {advisory}"
+        );
+        assert!(
+            advisory.contains("genuine rub3 code"),
+            "a person told only that their contract is superseded hears 'this is a fake': \
+             {advisory}"
+        );
+        assert!(
+            advisory.contains("stays valid"),
+            "the licence being unaffected is the half that keeps this advice rather than a \
+             warning: {advisory}"
+        );
+        assert!(
+            purchase_advisory(&Attestation {
+                contract: "Rub3Access".to_string(),
+                release: "2026-04".to_string(),
+                authority: Authority::Pinned,
+            })
+            .is_none(),
+            "the pinned table publishes no status, so it can never advise"
+        );
+    }
 
     /// Two refusal causes, two different explanations. A buyer told "the code
     /// did not verify" for both has been told nothing they can act on: one of

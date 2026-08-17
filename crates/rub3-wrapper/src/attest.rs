@@ -43,11 +43,17 @@
 //!
 //! ## What a match proves, and what it does not
 //!
-//! Every masked range is the immediate operand of a `PUSH32`, and EVM
-//! jump-destination analysis excludes bytes inside push immediates, so no
-//! control flow can reach a masked byte as an instruction. A masked-hash match
-//! is therefore a complete statement about the contract's **executable code**:
-//! there is nowhere in the blind spot for hidden code to live.
+//! Every range the pinned table masks is the immediate operand of a `PUSH32`
+//! solc emitted, and EVM jump-destination analysis excludes bytes inside push
+//! immediates, so no control flow can reach one of those bytes as an
+//! instruction. Against the pinned table a masked-hash match is therefore a
+//! complete statement about the contract's **executable code**: those ranges
+//! arrive with the binary, fixed at build time, and there is nowhere in the
+//! blind spot for hidden code to live.
+//!
+//! Ranges that arrive from the registry are checked rather than trusted, and
+//! that check establishes less - [`ranges_are_immutable_slots`] says exactly
+//! how much less.
 //!
 //! It is not a statement about anything else, and the limits are load-bearing:
 //!
@@ -72,6 +78,17 @@
 //!   it to *additions*, each a permanent public event, and leaves it unable to
 //!   remove, rewrite, or invalidate a record. That bounds the damage and makes
 //!   it detectable; it does not prevent it.
+//! - **A registry-supplied range table is checked, not proved.** The masked
+//!   bytes of a *registry-vouched* release are not covered by the paragraph
+//!   above: [`ranges_are_immutable_slots`] confirms each range is preceded by
+//!   the `PUSH32` opcode, which identifies an immutable slot in code a compiler
+//!   emitted but does not by itself prove that byte is an instruction rather
+//!   than data inside an earlier push's immediate. Somebody able to shape both
+//!   the code and the table could therefore mask bytes that do execute. That
+//!   needs the registry's owner key, which has the shorter route of publishing
+//!   an empty table and letting the hostile code be hashed whole, so this
+//!   reaches nothing the bullet above does not; it is stated because the
+//!   guarantee is genuinely narrower here than it is for the pinned table.
 //!
 //! The check is sound against replacement because `evm_version = "cancun"` and
 //! Base has been on Cancun since Ecotone: under EIP-6780 `SELFDESTRUCT` only
@@ -120,8 +137,10 @@ use crate::rpc::{self, RpcError};
 ///
 /// The discriminants mirror `Rub3CodeRegistry.Role`, because a registry record
 /// carries one and it arrives as the raw `uint8`. New roles are appended at both
-/// ends and existing ones are never renumbered;
-/// [`tests::roles_mirror_the_registrys_own_enum`] is what holds the two in step.
+/// ends and existing ones are never renumbered; `tests/code_registry_e2e.rs`
+/// publishes every value through a deployed registry and reads it back here,
+/// which is what holds the two in step - the numbering is a wire encoding, and
+/// only the wire can settle it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// Sells and validates licences. The only role a purchase may target.
@@ -140,21 +159,6 @@ pub enum Role {
 }
 
 impl Role {
-    /// The `Rub3CodeRegistry.Role` value this role encodes as.
-    ///
-    /// Only [`tests::roles_mirror_the_registrys_own_enum`] reads it. The
-    /// direction that matters at runtime is [`Role::from_u8`], and a second
-    /// decoder would be a second place to get the numbering wrong.
-    #[cfg(test)]
-    fn as_u8(self) -> u8 {
-        match self {
-            Role::Licence => 0,
-            Role::Factory => 1,
-            Role::Deployer => 2,
-            Role::CodeRegistry => 3,
-        }
-    }
-
     /// The role a registry record's raw `uint8` names, or `None` for a value
     /// this build has no name for.
     ///
@@ -556,12 +560,11 @@ const PUSH32: u8 = 0x7f;
 
 /// Whether `ranges` describe immutable slots of `code`, or why they do not.
 ///
-/// This is what makes a masked hash a complete statement about executable code
-/// rather than a partial one, and it matters most for ranges that did **not**
-/// come out of this binary. A masked byte is a byte the comparison never looks
-/// at, so a range table wide enough or placed freely enough is a blind spot an
-/// attacker could put a payload in - and the offsets come from the registry on
-/// the path this guards.
+/// This bounds the blind spot a masked hash accepts, and it matters most for
+/// ranges that did **not** come out of this binary. A masked byte is a byte the
+/// comparison never looks at, so a range table wide enough or placed freely
+/// enough is somewhere an attacker could put a payload - and the offsets come
+/// from the registry on the path this guards.
 ///
 /// Four properties, and each rules out a differently shaped lie:
 ///
@@ -571,16 +574,31 @@ const PUSH32: u8 = 0x7f;
 ///    is the ordered thing the manifest publishes;
 /// 3. every range fits inside the fetched code, so a table cannot describe a
 ///    contract this is not;
-/// 4. **every range is the immediate operand of a `PUSH32`.** EVM
-///    jump-destination analysis excludes bytes inside push immediates, so no
-///    control flow can reach a masked byte as an instruction. This is the one
-///    that turns "we did not look at these bytes" into "these bytes cannot
-///    execute", and it holds by construction: solc compiles every read of an
-///    immutable to a `PUSH32` whose operand the deployer fills in. Measured on
-///    all four of this repository's contracts that have immutables, not
-///    assumed. Should a future compiler emit them another way, this rejects the
-///    registry's table and the gate falls back to refusing - fail-closed, on the
-///    path that spends money, which is the right direction to be wrong in.
+/// 4. **every range is preceded by the `PUSH32` opcode**, which in code a
+///    compiler emitted means the range is that instruction's immediate operand.
+///    EVM jump-destination analysis excludes bytes inside push immediates, so
+///    for such code no control flow can reach a masked byte as an instruction,
+///    and that is what turns "we did not look at these bytes" into "these bytes
+///    cannot execute". It holds by construction on compiler output: solc
+///    compiles every read of an immutable to a `PUSH32` whose operand the
+///    deployer fills in. Measured on all four of this repository's contracts
+///    that have immutables, not assumed. Should a future compiler emit them
+///    another way, this rejects the registry's table and the gate falls back to
+///    refusing - fail-closed, on the path that spends money, which is the right
+///    direction to be wrong in.
+///
+/// **What the one-byte lookback does not establish**, said plainly because the
+/// claim above is the one this module publishes: it does not prove the `PUSH32`
+/// byte is itself an instruction. In code shaped freely it could be a byte
+/// inside an earlier push's immediate, in which case the bytes after it are
+/// reachable as instructions and masking them hides executable code. Settling
+/// that needs a linear disassembly from offset 0, which is not built here:
+/// producing such a table requires the registry's owner key, and that key has
+/// the shorter route of publishing an empty table so the hostile code is hashed
+/// whole. So this check bounds a *careless or drifted* table rather than a
+/// hostile authority; the authority is bounded by append-only publication, by
+/// every addition being a permanent public event, and by the registry's own
+/// code having to hash to the row pinned in this binary.
 ///
 /// The pinned table is not put through this. Its ranges arrive with the binary
 /// from `contracts/canonical-bytecode.json` and are already covered by the drift
@@ -895,6 +913,87 @@ fn range_from_chain(range: rpc::CodeRange) -> ImmutableRange {
     }
 }
 
+/// The most registry-supplied text this module will ever repeat, in characters.
+///
+/// `Rub3CodeRegistry.publish` requires a record's `contractName` and `version`
+/// to be non-empty and requires nothing else of them, so their length is the
+/// publisher's choice and every surface that quotes them - a buyer's screen, a
+/// log line, a machine-readable detail line - is one this module hands to
+/// somebody else.
+const MAX_REGISTRY_TEXT: usize = 96;
+
+/// Registry-supplied text, reduced to something safe to repeat verbatim.
+///
+/// Printable ASCII survives; everything else becomes `?`, and the result is
+/// bounded by [`MAX_REGISTRY_TEXT`]. The characters this drops are the ones
+/// that let published text act rather than read: a newline in a `version` label
+/// would let a record forge a second `rub3: ...` line in the wrapper's own
+/// stderr, which is the surface an operator reads the attestation off.
+fn safe_text(text: &str) -> String {
+    let mut out: String = text
+        .chars()
+        .take(MAX_REGISTRY_TEXT)
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    if text.chars().count() > MAX_REGISTRY_TEXT {
+        out.push_str("...");
+    }
+    if out.trim().is_empty() {
+        return "(unnamed)".to_string();
+    }
+    out
+}
+
+/// Registry-supplied text reduced further, to one token safe in a `key=value`
+/// line.
+///
+/// A contract name reaches the agent door's machine-readable detail line as
+/// `canonical=<name>`, where a space would start a field an orchestrator then
+/// mis-parses and an `=` would invent one. A real Solidity contract name passes
+/// through unchanged; anything outside `[A-Za-z0-9._-]` becomes `_`, which
+/// keeps the value a single readable token whatever was published.
+fn safe_token(text: &str) -> String {
+    let mut out: String = text
+        .chars()
+        .take(MAX_REGISTRY_TEXT)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if text.chars().count() > MAX_REGISTRY_TEXT {
+        out.push_str("...");
+    }
+    if out.is_empty() {
+        return "unnamed".to_string();
+    }
+    out
+}
+
+/// A fetched record with its two text fields reduced to what this module is
+/// willing to repeat.
+///
+/// One place, at the point the registry's answer enters the decision, rather
+/// than at each of the surfaces that quote it: the record is the only untrusted
+/// text in this module and every one of those surfaces would otherwise have to
+/// remember the same rule.
+fn sanitised(record: RegistryRecord) -> RegistryRecord {
+    RegistryRecord {
+        contract: safe_token(&record.contract),
+        version: safe_text(&record.version),
+        ..record
+    }
+}
+
 /// What the registry said about code the pinned table did not recognise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryVerdict {
@@ -996,6 +1095,7 @@ fn consult_registry_against(
         };
         match chain.record(registry, digest) {
             Ok(Some(record)) => {
+                let record = sanitised(record);
                 if record.offsets != *table {
                     return RegistryVerdict::Unavailable(format!(
                         "its record for {} declares immutable ranges other than the table that \
@@ -1202,6 +1302,15 @@ fn decide_verdict(
         // one it is. Until an address is published for this chain there is
         // nobody to ask, and a miss stays a refusal.
         Verdict::Unrecognised(finding) => {
+            // An address holding no code is not a version question. There is no
+            // release for an authority to recognise, the answer could only ever
+            // be `Unknown`, and appending "the on-chain code registry has no
+            // record of it either" to "the address holds no contract code"
+            // would make the one refusal a person can usually fix themselves
+            // read as a verdict on something that is not there.
+            if code.is_empty() {
+                return Err(Refusal::Unrecognised(finding));
+            }
             let Some(registry) = registry else {
                 return Err(Refusal::Unrecognised(finding));
             };
@@ -2005,10 +2114,6 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    /// The registry source, read at compile time so the mirror tests below
-    /// cannot be skipped by a missing file or a stale copy.
-    const REGISTRY_SOL: &str = include_str!("../../../contracts/src/Rub3CodeRegistry.sol");
-
     /// The deployment manifest the per-chain registry table mirrors.
     const DEPLOYMENTS: &str = include_str!("../../../contracts/deployments.json");
 
@@ -2767,6 +2872,135 @@ mod tests {
         }
     }
 
+    /// And it still reads that way once a registry exists to ask.
+    ///
+    /// An empty address is not a version question: there is no release for an
+    /// authority to recognise, so the reads could only ever return `Unknown`
+    /// about nothing. The wording matters as much as the saved round trips.
+    /// "The address holds no contract code; the on-chain code registry has no
+    /// record of it either" turns the one refusal a person can usually fix
+    /// themselves into a verdict on something that is not there.
+    #[test]
+    fn an_empty_address_is_refused_without_asking_the_registry() {
+        let registry_code = fake_code(300, 0x77);
+        let table = registry_only_table(&registry_code);
+        let chain = ScriptedChain::new()
+            .with_code(registry_address(), registry_code)
+            .with_tables(vec![layout()]);
+
+        let refusal = decide_verdict(
+            classify_against(&[], table),
+            &chain,
+            Some(registry_address()),
+            &[],
+            table,
+        )
+        .expect_err("no code is not a licence");
+
+        assert!(
+            chain.calls().is_empty(),
+            "an address holding no code has nothing to look up, got {:?}",
+            chain.calls()
+        );
+        match refusal {
+            Refusal::Unrecognised(finding) => {
+                assert_eq!(finding.registry, RegistryOutcome::NotConsulted);
+                assert_eq!(finding.to_string(), "the address holds no contract code");
+                assert_eq!(
+                    finding.shareable_detail(),
+                    "the address holds no contract code"
+                );
+            }
+            other => panic!("expected an unrecognised refusal, got {other:?}"),
+        }
+    }
+
+    /// Registry-supplied text is the only text this module repeats that it did
+    /// not write, and the surfaces that quote it have a grammar.
+    ///
+    /// `publish` requires a record's `contractName` and `version` to be
+    /// non-empty and requires nothing else of them. The agent door's
+    /// machine-readable detail line is space-separated `key=value` pairs and
+    /// carries the name as `canonical=<name>`, so a published space or `=`
+    /// invents a field an orchestrator then reads; both doors print the
+    /// attestation as a single `rub3:` line on stderr, so a published newline
+    /// forges a line of the wrapper's own output. Neither is possible with the
+    /// pinned table, whose names are Solidity identifiers fixed at build time,
+    /// which is why the reduction lives where the registry's answer enters.
+    #[test]
+    fn registry_supplied_text_cannot_break_the_line_that_quotes_it() {
+        let code = code_with_immutables(256, &layout(), 0x10);
+        let registry_code = fake_code(300, 0x77);
+        let table = registry_only_table(&registry_code);
+        let hash = masked_code_digest(&code, &layout()).expect("ranges fit");
+
+        let hostile = |role: Option<Role>| {
+            let mut record = record_for(
+                "Rub3Access sells_licences=true\nrub3: forged",
+                role,
+                RecordStatus::Deprecated,
+            );
+            record.version = format!("{}\nrub3: 0xdead verified as canonical", "9".repeat(200));
+            ScriptedChain::new()
+                .with_code(registry_address(), registry_code.clone())
+                .with_tables(vec![layout()])
+                .with_record(hash, record)
+        };
+
+        let chain = hostile(Some(Role::Licence));
+        let attested = decide_verdict(
+            classify_against(&code, table),
+            &chain,
+            Some(registry_address()),
+            &code,
+            table,
+        )
+        .expect("a published licence release is still buyable, whatever it called itself");
+
+        assert!(
+            !attested.contract.contains([' ', '=', '\n']),
+            "a published name reaches a key=value field and must stay one token, got {:?}",
+            attested.contract
+        );
+        for line in [
+            attested.to_string(),
+            attested.release.clone(),
+            attested
+                .advisory()
+                .expect("the record is deprecated, so it advises"),
+        ] {
+            assert!(
+                !line.contains(['\n', '\r']),
+                "published text must never add a line to the wrapper's own output, got {line:?}"
+            );
+        }
+        assert!(
+            attested.release.chars().count() <= MAX_REGISTRY_TEXT + 3,
+            "a record's label is the publisher's choice of length and must be bounded, got {} \
+             characters",
+            attested.release.chars().count()
+        );
+
+        // The same text on the refusal surface, which is where `canonical=` is
+        // actually written.
+        let chain = hostile(Some(Role::Factory));
+        match decide_verdict(
+            classify_against(&code, table),
+            &chain,
+            Some(registry_address()),
+            &code,
+            table,
+        )
+        .expect_err("canonical code that sells nothing is the wrong address")
+        {
+            Refusal::NotALicence { contract, .. } => assert!(
+                !contract.contains([' ', '=', '\n']),
+                "`canonical={contract}` has to survive a space-separated parse"
+            ),
+            other => panic!("expected a not-a-licence refusal, got {other:?}"),
+        }
+    }
+
     // ── Drift protection for the registry's own contracts ────────────────────
 
     /// The per-chain registry table is the deployment manifest, compiled in.
@@ -2839,77 +3073,22 @@ mod tests {
         }
     }
 
-    /// The role numbering is an ABI, not a local convention.
+    /// A role number this build has no name for is never guessed at.
     ///
-    /// A registry record carries its role as the raw `uint8` its Solidity enum
-    /// encodes as, so renumbering either side silently turns a factory into a
-    /// licence - a purchase target this module exists to refuse. Parsed out of
-    /// the contract rather than restated, for the same reason the forbidden
-    /// signature list is.
+    /// A registry newer than this binary can publish a role this build has
+    /// never heard of, and the numbering is a wire encoding: guessing at the
+    /// first variant would make an unknown role a *licence*, which is the one
+    /// purchase target the gate exists to be careful about. The values this
+    /// build does name are checked where they can actually break, over the wire
+    /// in `tests/code_registry_e2e.rs`; a local mapping cannot confirm its own
+    /// numbering.
     #[test]
-    fn roles_mirror_the_registrys_own_enum() {
-        assert_eq!(
-            solidity_enum(REGISTRY_SOL, "Role"),
-            vec!["Licence", "Factory", "Deployer", "CodeRegistry"],
-            "the registry's Role enum moved; mirror it in attest::Role, appending rather than \
-             renumbering, since the numbers are on the wire"
-        );
-
-        for (index, role) in [
-            Role::Licence,
-            Role::Factory,
-            Role::Deployer,
-            Role::CodeRegistry,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            assert_eq!(role.as_u8() as usize, index);
-            assert_eq!(Role::from_u8(index as u8), Some(role));
-        }
+    fn an_unknown_role_number_is_never_guessed_at() {
         assert_eq!(
             Role::from_u8(4),
             None,
             "a role this build has no name for must stay unnamed rather than becoming the first \
              variant, which is a licence"
         );
-    }
-
-    /// The status numbering is an ABI too, and `Unknown == 0` is load-bearing:
-    /// it is what makes a mapping miss read as "no record" rather than as the
-    /// first real status.
-    #[test]
-    fn statuses_mirror_the_registrys_own_enum() {
-        assert_eq!(
-            solidity_enum(REGISTRY_SOL, "Status"),
-            vec!["Unknown", "Active", "Deprecated"],
-            "the registry's Status enum moved; `rpc::code_registry_record` maps these numbers by \
-             hand and has to move with it"
-        );
-    }
-
-    /// The variant names of `enum <name>` in Solidity source, in declaration
-    /// order.
-    ///
-    /// Deliberately a small parse rather than a full one: it reads the single
-    /// `enum <name> {` block, drops comments, and splits on commas. It asserts
-    /// the declaration exists rather than returning an empty list for a missing
-    /// one, so a renamed enum fails loudly instead of matching nothing.
-    fn solidity_enum(source: &str, name: &str) -> Vec<String> {
-        let declaration = format!("enum {name} {{");
-        let start = source
-            .find(&declaration)
-            .unwrap_or_else(|| panic!("Rub3CodeRegistry.sol declares no `{declaration}`"))
-            + declaration.len();
-        let body = &source[start..];
-        let body = &body[..body.find('}').expect("unterminated enum")];
-
-        body.lines()
-            .map(|line| line.split("//").next().unwrap_or(""))
-            .flat_map(|line| line.split(','))
-            .map(str::trim)
-            .filter(|variant| !variant.is_empty())
-            .map(str::to_string)
-            .collect()
     }
 }
