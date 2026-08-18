@@ -575,8 +575,10 @@ without `sdk`, or its channel failed to start - its stderr says which), and
 actually activated one - `tests/sdk_e2e.rs` covers that case end to end, and
 [testing.md](testing.md) says how it seeds one.
 
-Windows support is written and type-checked but has never been executed - see
-implementation.md §3.5.
+Windows support is written, and half of it is verified: the SDK crate's client
+half type-checks for `x86_64-pc-windows-msvc`, while the wrapper's named-pipe
+server has never been compiled anywhere in this project, and neither half has
+been executed - see implementation.md §3.5 for why and for what would close it.
 
 ## Current status
 

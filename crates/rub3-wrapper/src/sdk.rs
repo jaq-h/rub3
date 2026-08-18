@@ -451,13 +451,17 @@ mod platform {
 
 // ── Windows: a named pipe ─────────────────────────────────────────────────────
 //
-// NOT RUN ON WINDOWS. Written from the documented Win32 contract, and this file
-// type-checks for `x86_64-pc-windows-msvc` - which is what caught the two real
-// mistakes in it, a `windows-sys` feature the `OVERLAPPED` parameter needs and
-// an import path - but no rub3 CI runner is a Windows box
-// (`.github/workflows/ci.yml` is macOS-only) and no test here has executed a
-// single one of these calls. Treat the unix path as the tested one, and this as
-// an honest implementation awaiting a runner.
+// NEITHER COMPILED NOR RUN ON WINDOWS. Written from the documented Win32
+// contract, but nothing in this project has ever compiled it: cross-checking
+// `rub3-wrapper` for `x86_64-pc-windows-msvc` dies in `aws-lc-sys` (`rustls` <-
+// `reqwest` <- `alloy`, an unconditional dependency), which stops on a missing
+// `windows.h` before this crate is reached, and no rub3 CI runner is a Windows
+// box (`.github/workflows/ci.yml` is macOS-only). So the `windows-sys` feature
+// selection, the import paths and the call signatures below are unverified, and
+// no test here has executed a single one of these calls. Treat the unix path as
+// the tested one, and this as an honest implementation awaiting a host that can
+// build it. The SDK crate's client half of the same channel does type-check for
+// that target (`cargo check -p rub3 --target x86_64-pc-windows-msvc`).
 #[cfg(windows)]
 mod platform {
     use super::*;
