@@ -63,6 +63,16 @@ jobs:
           # in it that spends money. This is the only entry that builds it.
           - bundle: tier-3 + webview
             features: tier-3,webview
+          # The SDK channel (implementation.md §3.5). No tier bundle enables
+          # `sdk`, so without these two entries nothing blocking compiles
+          # src/sdk.rs or tests/sdk_e2e.rs. Both are needed: the channel's
+          # session projection is gated on `session`, so only the tier-3 entry
+          # compiles it, while tier-0 is the heartbeat-only build that has no
+          # session model to report and must still answer.
+          - bundle: tier-0 + sdk
+            features: tier-0,sdk
+          - bundle: tier-3 + sdk
+            features: tier-3,sdk
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -86,27 +96,32 @@ jobs:
   # Formatting and lint. BOTH checks are REAL GATES: a rustfmt drift or a clippy
   # warning turns this job red.
   #
-  # Scope. Both commands run over the whole workspace, which now means both
-  # members: `rub3-wrapper` and `rub3-docs-mcp`. implementation.md §3.3 relies
-  # on that scope, since the docs crate has no lint job of its own.
+  # Scope. Both commands run over the whole workspace, which now means three
+  # members: `rub3-wrapper`, `rub3-docs-mcp` and the `rub3` SDK crate.
+  # implementation.md §3.3 relies on that scope, since the docs crate has no
+  # lint job of its own.
   #
   # `-D warnings` is load-bearing: plain `cargo clippy` exits 0 even when it
   # emits warnings, so a permissive clippy job would sit green forever and prove
   # nothing.
   #
   # Clippy here builds the default bundle (tier-2) plus `--all-targets`, and
-  # then tier-3,webview. Whole modules are `#[cfg]`-gated out per tier bundle
-  # (see CLAUDE.md), so a clean run does not prove the other bundles are clean;
-  # the local tier matrix remains the contributor's job. It was verified clean
-  # across all nine: tier-0 through tier-4, tier-3,binary-encryption,
-  # tier-2,webview, tier-3,webview and tier-3,headless.
+  # then tier-3,webview and tier-3,sdk. Whole modules are `#[cfg]`-gated out per
+  # tier bundle (see CLAUDE.md), so a clean run does not prove the other bundles
+  # are clean; the local tier matrix remains the contributor's job. It was
+  # verified clean across all eleven: tier-0 through tier-4,
+  # tier-3,binary-encryption, tier-2,webview, tier-3,webview, tier-3,headless,
+  # tier-0,sdk and tier-3,sdk.
   #
   # tier-3,webview is linted here as well because the default bundle compiles
   # none of the window's purchase screen or the code attestation guarding it -
   # both need onchain-write - so that gate would otherwise be shipped by a job
-  # that never built it. It is one extra invocation on purpose: linting every
-  # bundle here would duplicate the matrix job for a lint that has never
-  # differed outside this one gap.
+  # that never built it. tier-3,sdk is here for the same reason and with a
+  # measured cause: no tier bundle enables `sdk`, so the workspace run compiles
+  # neither src/sdk.rs nor tests/sdk_e2e.rs, and three real findings in them
+  # survived a clean workspace run when §3.5 landed. These are extra
+  # invocations on purpose: linting every bundle here would duplicate the
+  # matrix job for a lint that has never differed outside these gaps.
   #
   # The repo has no `rustfmt.toml`: formatting is stock rustfmt defaults on
   # purpose, so `cargo fmt --all` is always the whole fix for a red fmt step.
@@ -133,6 +148,41 @@ jobs:
       - name: cargo clippy (tier-3,webview)
         if: always()
         run: cargo clippy -p rub3-wrapper --no-default-features --features tier-3,webview --all-targets -- -D warnings
+
+      - name: cargo clippy (tier-3,sdk)
+        if: always()
+        run: cargo clippy -p rub3-wrapper --no-default-features --features tier-3,sdk --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # The `rub3` SDK crate (implementation.md §3.5), the library a wrapped
+  # application links.
+  #
+  # Its own job rather than a matrix entry: it has no tier bundles and no
+  # features, and the wrapper matrix above runs `cargo test -p rub3-wrapper`,
+  # which does not run another package's tests.
+  #
+  # The doctests are the load-bearing part and are why this runs `cargo test`
+  # rather than `cargo build`: one of them is a `compile_fail` case asserting
+  # that keying a HashMap on `Wallet` does NOT compile, which is the
+  # "key persistent data on user_id, never on wallet" rule made executable. If
+  # `Wallet` ever gains `Hash` or `Eq`, that doctest starts compiling and this
+  # job goes red.
+  # ---------------------------------------------------------------------------
+  sdk:
+    name: rust (rub3 SDK crate)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: sdk
+
+      - name: Build
+        run: cargo build -p rub3 --all-targets
+
+      - name: Test (unit + doctests)
+        run: cargo test -p rub3
 
   # ---------------------------------------------------------------------------
   # Solidity. `forge test` MUST run from contracts/ -- remappings.txt uses paths

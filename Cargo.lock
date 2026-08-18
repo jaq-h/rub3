@@ -4809,6 +4809,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rub3"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rub3-docs-mcp"
 version = "0.1.0"
 dependencies = [
@@ -4840,6 +4849,7 @@ dependencies = [
  "libc",
  "nix 0.29.0",
  "rand 0.8.5",
+ "rub3",
  "serde",
  "serde_json",
  "sha2",
@@ -4848,6 +4858,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "windows-sys 0.59.0",
  "wry",
  "zeroize",
 ]

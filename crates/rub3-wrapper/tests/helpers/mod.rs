@@ -76,3 +76,72 @@ pub fn verifying_key_to_address(key: &VerifyingKey) -> String {
     let hash = sha3::Keccak256::digest(&bytes[1..]);
     format!("0x{}", hex::encode(&hash[12..]))
 }
+
+/// Writes a signed session where the launch fast path will look for it, and
+/// returns it.
+///
+/// The signature is produced over `session::session_message`, the same preimage
+/// the wrapper verifies, so the seeded session passes `verify_local` rather than
+/// merely deserializing. `session_dir` is what the wrapper is given as
+/// `RUB3_SESSION_DIR`.
+#[cfg(feature = "session")]
+pub fn create_session_json(
+    session_dir: &Path,
+    app_id: &str,
+    token_id: u64,
+    signing_key: &SigningKey,
+    identity: &str,
+    user_id: &str,
+    expires_at: &str,
+) -> rub3_wrapper::session::Session {
+    use rub3_wrapper::session::{new_nonce, session_message, Session};
+
+    let wallet = verifying_key_to_address(signing_key.verifying_key());
+    let nonce = new_nonce();
+    let message = session_message(
+        app_id,
+        token_id,
+        identity,
+        user_id,
+        &wallet,
+        &nonce,
+        Some(expires_at),
+        None,
+        None,
+        None,
+    );
+
+    let prefixed = personal_sign_hash(&message);
+    let (sig, recovery_id) = signing_key
+        .sign_prehash_recoverable(&prefixed)
+        .expect("signing failed");
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recovery_id.to_byte() + 27;
+
+    let session = Session {
+        app_id: app_id.to_string(),
+        token_id,
+        identity: identity.to_string(),
+        user_id: user_id.to_string(),
+        tba: None,
+        wallet,
+        nonce,
+        issued_at: "2026-01-01T00:00:00Z".to_string(),
+        expires_at: Some(expires_at.to_string()),
+        signature: format!("0x{}", hex::encode(sig_bytes)),
+        chain: "base".to_string(),
+        contract: "0x0000000000000000000000000000000000000000".to_string(),
+        activation_tx: None,
+        activation_block: None,
+        activation_block_hash: None,
+        session_id: None,
+        device_pubkey: None,
+    };
+
+    let dir = session_dir.join(app_id);
+    std::fs::create_dir_all(&dir).expect("failed to create session dir");
+    let json = serde_json::to_string_pretty(&session).expect("failed to serialize session");
+    std::fs::write(dir.join(format!("{token_id}.json")), json).expect("failed to write session");
+    session
+}

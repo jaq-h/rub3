@@ -4,11 +4,12 @@ Wallet-native licensing for locally executed software (CLI tools, MCP servers, d
 
 ## Layout
 
-Three parts, two toolchains:
+Four parts, two toolchains:
 
 | Path | What | Toolchain |
 |---|---|---|
 | `crates/rub3-wrapper/` | wrapper runtime, the crate that ships | `cargo`, from the repo root |
+| `crates/rub3-sdk/` | the `rub3` SDK crate a wrapped application links (§3.5). Directory and package names differ on purpose, so cargo commands are `-p rub3` | `cargo`, from the repo root |
 | `crates/rub3-docs-mcp/` | developer-facing docs MCP server (§3.3); off the wrapper's dependency path | `cargo`, from the repo root |
 | `contracts/` | Foundry project, ERC-721 license contracts | `forge`, **from `contracts/`** |
 
@@ -20,6 +21,7 @@ Three parts, two toolchains:
 cargo build -p rub3-wrapper
 cargo test  -p rub3-wrapper               # default bundle = tier-2
 cargo test  -p rub3-wrapper -- --ignored  # runs ONLY the ignored tests: a live Base mainnet RPC test
+cargo test  -p rub3                       # the SDK crate, including its doctests
 cargo test  -p rub3-docs-mcp              # docs server + the docs legibility gate
 
 cd contracts && forge test                # in-process EVM: no network, no .env
@@ -27,7 +29,7 @@ cd contracts && forge test                # in-process EVM: no network, no .env
 
 `forge` resolves `contracts/foundry.toml`, so it must run from `contracts/`; it fails at the repo root. OpenZeppelin and forge-std are git submodules, and `forge test` clones them at the pinned revisions on first run, so `git submodule update --init --recursive` is optional.
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: the wrapper matrix for `tier-0` through `tier-4` plus the `headless` and `webview` front doors, `forge test` preceded by `scripts/check-deployments.sh` (the schema gate on `contracts/deployments.json`, the per-chain record of the canonical factory and the code registry), the blocking canonical-bytecode-fingerprint job (see `contracts/contracts.md` -> "Reproducible builds and canonical fingerprints"), the anvil-gated e2e, the docs-surface job (`forge build`, then `cargo test -p rub3-docs-mcp` with `RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1`), and a lint job where `cargo clippy -- -D warnings` and `cargo fmt --check` are both blocking gates. Read it for the exact invocations. It is macOS-only, and it does **not** build `tier-3,binary-encryption`, the only bundle that compiles `src/decrypt.rs`, so running the full local matrix below is still the contributor's job.
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: the wrapper matrix for `tier-0` through `tier-4` plus the `headless`, `webview` and `sdk` entries, the SDK crate's own job, `forge test` preceded by `scripts/check-deployments.sh` (the schema gate on `contracts/deployments.json`, the per-chain record of the canonical factory and the code registry), the blocking canonical-bytecode-fingerprint job (see `contracts/contracts.md` -> "Reproducible builds and canonical fingerprints"), the anvil-gated e2e, the docs-surface job (`forge build`, then `cargo test -p rub3-docs-mcp` with `RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1`), and a lint job where `cargo clippy -- -D warnings` and `cargo fmt --check` are both blocking gates. Read it for the exact invocations. It is macOS-only, and it does **not** build `tier-3,binary-encryption`, the only bundle that compiles `src/decrypt.rs`, so running the full local matrix below is still the contributor's job.
 
 **A contract change is also a wrapper change.** `crates/rub3-wrapper/src/attest.rs` pins a copy of the canonical fingerprints and immutable ranges so the wrapper can verify a contract before buying from it (`implementation.md` §2.6), and a copy of `contracts/deployments.json`'s per-chain `code_registry` (§2.9), since a binary cannot read a file at runtime. Unit tests fail when either copy drifts. Touch anything under `contracts/src/` and the sequence is: `scripts/canonical-bytecode-hashes.sh update`, then **add** a row to `attest::CANONICAL` for each moved fingerprint - never overwrite or drop one once the contract it describes is deployed, because a deployed contract goes on validating its own tokens forever. That accumulate-only rule switches on at the first deploy: nothing is deployed to any public network yet, so the table holds exactly one row per contract today (`attest::CANONICAL`'s doc comment and `implementation.md` §2.6 carry the reasoning). A unit test in `attest` fails until you do, in every tier-2-and-up matrix job.
 
@@ -35,7 +37,7 @@ cd contracts && forge test                # in-process EVM: no network, no .env
 
 ## Tier feature bundles (read before touching the wrapper)
 
-`crates/rub3-wrapper/Cargo.toml` defines five tier bundles over composable capability flags, plus two front-door features. A build selects exactly one tier bundle at pack time AND at least one front door: `webview` (native activation window, pulls `wry`/`tao`) or `headless` (signer in, session out, no GUI dependency at all). Tier bundles name no front door, so `--no-default-features --features tier-3` alone builds a binary whose interactive activation always fails with `NoInteractiveFrontDoor`. `binary-encryption` is an orthogonal add-on that composes with tier-3+.
+`crates/rub3-wrapper/Cargo.toml` defines five tier bundles over composable capability flags, plus two front-door features. A build selects exactly one tier bundle at pack time AND at least one front door: `webview` (native activation window, pulls `wry`/`tao`) or `headless` (signer in, session out, no GUI dependency at all). Tier bundles name no front door, so `--no-default-features --features tier-3` alone builds a binary whose interactive activation always fails with `NoInteractiveFrontDoor`. Two orthogonal add-ons compose with any tier and are named by no bundle: `binary-encryption` (tier-3+ only) and `sdk`, which serves the SDK channel to the wrapped application - what an application may ask about itself does not depend on how hard the launch was gated, and tier-0 gets heartbeats with no session to report.
 
 | Bundle | Capability flags |
 |---|---|
@@ -49,17 +51,20 @@ Consequences that catch people out:
 
 - **Whole modules are `#[cfg]`-gated out.** `src/lib.rs` is the authority. Under `tier-0` the `session`, `identity`, and `session_store` modules do not exist at all, so the set of compiled tests changes with the bundle. Code that builds and passes under the default proves nothing about `tier-0` or `tier-3`.
 - **Cargo features are additive, so `--no-default-features` is mandatory.** `--features tier-0` on its own leaves the `tier-2` default enabled and silently tests tier-2 instead. Always pass `--no-default-features --features <bundle>`.
-- **Run the matrix before claiming a wrapper change works.** All nine must pass. `tier-3,binary-encryption` is the only entry that compiles `src/decrypt.rs`, since no tier bundle enables `binary-encryption`; the last three are the only ones that compile a front door. `tier-2,webview` and `tier-3,webview` are not redundant: the window's purchase screen and its pre-purchase attestation are gated on `onchain-write`, so only the tier-3 entry compiles them.
+- **Run the matrix before claiming a wrapper change works.** All eleven must pass. `tier-3,binary-encryption` is the only entry that compiles `src/decrypt.rs` and the two `sdk` entries the only ones that compile `src/sdk.rs`, since no tier bundle enables either; `tier-2,webview`, `tier-3,webview` and `tier-3,headless` are the only ones that compile a front door. None of the pairs is redundant: the window's purchase screen and its pre-purchase attestation are gated on `onchain-write`, so only `tier-3,webview` compiles them, and the SDK channel's session projection is gated on `session`, so only `tier-3,sdk` compiles it while `tier-0,sdk` proves the heartbeat-only build.
 
 ```bash
 fail=0
 for t in tier-0 tier-1 tier-2 tier-3 tier-4 tier-3,binary-encryption \
-         tier-2,webview tier-3,webview tier-3,headless; do
+         tier-2,webview tier-3,webview tier-3,headless tier-0,sdk tier-3,sdk; do
   cargo test -p rub3-wrapper --no-default-features --features "$t" \
     && echo "$t ok" || { echo "$t FAILED"; fail=1; }
 done
+cargo test -p rub3 || fail=1
 [ "$fail" -eq 0 ]
 ```
+
+**Clippy needs the same treatment, and the `sdk` feature is the live example.** `cargo clippy --workspace --all-targets` builds the default bundle, which compiles neither `src/sdk.rs` nor `tests/sdk_e2e.rs`; three real findings in them survived a clean workspace run. CI lints `tier-3,webview` and `tier-3,sdk` on top of the default for that reason, and a bundle a new module only compiles under needs its own invocation added there.
 
 What each tier actually enforces is specified in `architecture.md` → "Security Tiers".
 

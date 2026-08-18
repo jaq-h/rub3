@@ -1,10 +1,80 @@
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-pub fn run(binary: &Path, args: &[String]) -> i32 {
-    let mut child = match spawn(binary, args) {
+/// Name of the variable carrying the SDK channel's address to the wrapped
+/// application (`implementation.md` §3.5).
+///
+/// A second copy of `rub3::wire::ADDRESS_ENV`, and deliberately so: every build
+/// scrubs the variable from the child's environment, including the ones that do
+/// not compile the SDK channel and therefore cannot name that constant. The two
+/// are asserted equal by a unit test in any build that has both.
+pub const SDK_ADDRESS_ENV: &str = "RUB3_SDK_SOCKET";
+
+/// What [`SDK_ADDRESS_ENV`] carries when this launch serves no channel: a build
+/// without the `sdk` feature, or a channel that failed to start.
+///
+/// A wrapper always tells its child that a wrapper launched it, because the
+/// application's own diagnosis turns on the difference. Left unset, "the channel
+/// could not start" reaches the developer as "you did not launch this through a
+/// wrapper", and the advice that follows is what they already did - the wrapper's
+/// stderr warning being the only correction, one line above a child's panic.
+///
+/// A second copy of `rub3::wire::ADDRESS_NO_CHANNEL`, for the same reason as
+/// [`SDK_ADDRESS_ENV`]: the builds that publish it are exactly the ones that
+/// cannot name it. The two are asserted equal by a unit test in any build that
+/// has both.
+pub const SDK_ADDRESS_NO_CHANNEL: &str = "rub3:no-channel";
+
+/// What a launch can tell the wrapped application about itself.
+///
+/// Produced by whichever door authorised the launch - [`crate::activation::ensure`]
+/// or `ensure_headless` - and handed to [`run`], which serves it over the SDK
+/// channel. A build without the `session` capability has nothing to carry, so the
+/// type is empty there rather than absent: the launch path then reads the same in
+/// every tier bundle.
+///
+/// The session is carried only when there is somewhere for it to go. The SDK
+/// channel is the sole reader - [`Launch::offer`] is the only code that ever
+/// looks at it - so without `sdk` the field would be write-only, which is a
+/// `dead_code` error under the workspace's `-D warnings` lint on the default
+/// bundle. Both constructors stay available whenever `session` is on, because
+/// the activation doors call them regardless of whether the channel is compiled.
+#[derive(Default)]
+pub struct Launch {
+    #[cfg(all(feature = "session", feature = "sdk"))]
+    session: Option<crate::session::Session>,
+}
+
+impl Launch {
+    /// A launch with no session to report: a tier-0 build, or one served from
+    /// the legacy `LicenseProof`.
+    pub fn bare() -> Self {
+        Self::default()
+    }
+
+    /// A launch authorised by `session`, which is what the application will be
+    /// told when it asks - in a build that compiled the channel to ask over.
+    #[cfg(feature = "session")]
+    pub fn from_session(session: crate::session::Session) -> Self {
+        #[cfg(not(feature = "sdk"))]
+        drop(session);
+        Self {
+            #[cfg(feature = "sdk")]
+            session: Some(session),
+        }
+    }
+}
+
+pub fn run(binary: &Path, args: &[String], launch: &Launch) -> i32 {
+    // Started before the child, so the address handed to it is already
+    // listening, and held for the child's whole lifetime: dropping the channel
+    // stops it and removes the endpoint.
+    let channel = start_channel(launch);
+
+    let mut child = match spawn(binary, args, channel_address(&channel)) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: failed to launch {}: {}", binary.display(), e);
@@ -52,14 +122,113 @@ pub fn run(binary: &Path, args: &[String]) -> i32 {
 /// that the child is never handed the credential, however this wrapper was
 /// built. It is containment, not a sandbox - the child runs as the same UID
 /// and can still read whatever that user can read.
-fn spawn(binary: &Path, args: &[String]) -> std::io::Result<Child> {
+fn spawn(binary: &Path, args: &[String], sdk_address: &OsStr) -> std::io::Result<Child> {
     let mut cmd = Command::new(binary);
     cmd.args(args);
     for name in crate::agent_env::AGENT_ENV_VARS {
         cmd.env_remove(name);
     }
+
+    // Set on every child in every bundle, to this launch's own address or to
+    // [`SDK_ADDRESS_NO_CHANNEL`], which is also what scrubs it: an address
+    // inherited from this wrapper's own environment - a wrapper launched by a
+    // wrapper, a variable left exported in a shell - would otherwise point the
+    // application at somebody else's channel, and it would answer. Because it is
+    // never left unset, the variable's absence means one thing only, and the
+    // application can say so: nothing wrapped this process.
+    cmd.env(SDK_ADDRESS_ENV, sdk_address);
+
     cmd.spawn()
 }
+
+// ── SDK channel (feature `sdk`) ───────────────────────────────────────────────
+//
+// Two small pairs so that `run` above reads the same in every bundle. The
+// channel is `sdk`-gated because the wire types live in the `rub3` crate, which
+// only that feature pulls in.
+
+#[cfg(feature = "sdk")]
+type ChannelGuard = Option<crate::sdk::Channel>;
+
+/// Nothing to hold open in a build that serves no channel. A distinct type
+/// rather than `()` so that [`run`] reads identically in every bundle without
+/// binding a unit value.
+#[cfg(not(feature = "sdk"))]
+struct NoChannel;
+#[cfg(not(feature = "sdk"))]
+type ChannelGuard = NoChannel;
+
+/// Starts the channel, or reports why it could not start and launches anyway.
+///
+/// Never fatal. Refusing to start a program the user has already paid for
+/// because a socket could not be created would be a de-facto revocation
+/// surface, which `architecture.md` -> "Ownership invariants" rules out. The
+/// application's own `rub3::heartbeat()` then fails, which is the right place
+/// for that decision: the developer chose whether their application requires
+/// the channel - and it fails as `NoChannel`, because the child is still told a
+/// wrapper launched it through [`SDK_ADDRESS_NO_CHANNEL`].
+#[cfg(feature = "sdk")]
+fn start_channel(launch: &Launch) -> ChannelGuard {
+    match crate::sdk::serve(launch.offer()) {
+        Ok(channel) => Some(channel),
+        Err(e) => {
+            eprintln!("rub3: warning: the SDK channel could not start: {e}");
+            eprintln!(
+                "rub3: warning: launching anyway - the wrapped application's \
+                 rub3::heartbeat() will fail"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "sdk"))]
+fn start_channel(_launch: &Launch) -> ChannelGuard {
+    NoChannel
+}
+
+#[cfg(feature = "sdk")]
+fn channel_address(channel: &ChannelGuard) -> &OsStr {
+    match channel {
+        Some(channel) => channel.address(),
+        None => OsStr::new(SDK_ADDRESS_NO_CHANNEL),
+    }
+}
+
+#[cfg(not(feature = "sdk"))]
+fn channel_address(_channel: &ChannelGuard) -> &OsStr {
+    OsStr::new(SDK_ADDRESS_NO_CHANNEL)
+}
+
+#[cfg(feature = "sdk")]
+impl Launch {
+    /// What the channel answers a `session` request with.
+    fn offer(&self) -> crate::sdk::Offer {
+        #[cfg(feature = "session")]
+        if let Some(session) = &self.session {
+            return crate::sdk::offer(session);
+        }
+        crate::sdk::Offer::None(NO_SESSION_REASON.to_string())
+    }
+}
+
+/// Why a launch has no session to report. Three different facts, and an
+/// application developer reading the panic needs to know which one they hit:
+/// a build with no session model, a build that has one but can never mint a
+/// session because sessions are gated on `cooldown`, and a launch that could
+/// have carried one and did not.
+#[cfg(all(feature = "sdk", not(feature = "session")))]
+const NO_SESSION_REASON: &str =
+    "this wrapper was built without the session capability (tier-0), so it has no session";
+#[cfg(all(feature = "sdk", feature = "session", not(feature = "cooldown")))]
+const NO_SESSION_REASON: &str =
+    "this wrapper was built without the cooldown capability (below tier-3), so every launch is \
+     served from the legacy licence proof, which carries no identity model and therefore no \
+     user_id";
+#[cfg(all(feature = "sdk", feature = "session", feature = "cooldown"))]
+const NO_SESSION_REASON: &str =
+    "this launch was served from the legacy licence proof, which carries no identity model \
+     and therefore no user_id";
 
 /// On Unix: forward SIGTERM to the child, then exit.
 /// SIGCHLD is handled implicitly by try_wait().
@@ -126,6 +295,7 @@ mod tests {
                 "-c".to_string(),
                 "printenv > \"$RUB3_TEST_ENV_DUMP\"".to_string(),
             ],
+            OsStr::new(SDK_ADDRESS_NO_CHANNEL),
         )
         .expect("spawn /bin/sh")
         .wait()
@@ -216,5 +386,57 @@ mod tests {
         }
 
         assert_no_agent_vars(&seen, &["0xdeadbeef", "hunter2"]);
+    }
+
+    /// The child's channel address is this launch's own in every bundle,
+    /// including the ones that serve no channel at all - a child that inherited
+    /// somebody else's would talk to it and be answered.
+    ///
+    /// `tests/sdk_e2e.rs` proves the same thing for a build that does serve one,
+    /// but that suite does not compile without the `sdk` feature, and the
+    /// overwrite is deliberately unconditional. This is the half no `sdk`-gated
+    /// test can reach.
+    #[test]
+    fn the_wrapped_binary_does_not_inherit_a_stale_sdk_channel_address() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stale = dir.path().join("somebody-elses.sock");
+
+        std::env::set_var(SDK_ADDRESS_ENV, &stale);
+        let seen = child_environment(dir.path());
+        std::env::remove_var(SDK_ADDRESS_ENV);
+
+        let assigned = format!("{SDK_ADDRESS_ENV}={SDK_ADDRESS_NO_CHANNEL}");
+        assert!(
+            seen.lines().any(|l| l == assigned),
+            "the child should have been told this launch's address: {seen}"
+        );
+        assert!(
+            !seen.contains(stale.to_str().expect("utf-8 path")),
+            "a stale {SDK_ADDRESS_ENV} reached the wrapped binary: {seen}"
+        );
+    }
+
+    #[cfg(not(feature = "sdk"))]
+    fn no_channel() -> ChannelGuard {
+        NoChannel
+    }
+
+    #[cfg(feature = "sdk")]
+    fn no_channel() -> ChannelGuard {
+        None
+    }
+
+    /// A launch that serves no channel - a build without `sdk`, or one whose
+    /// channel failed to start - publishes the sentinel rather than nothing, so
+    /// the application reports a wrapper without a channel rather than no
+    /// wrapper at all. The advice on that second failure is to launch through a
+    /// wrapper, which is exactly what the developer did.
+    #[test]
+    fn a_launch_serving_no_channel_still_tells_the_child_a_wrapper_launched_it() {
+        assert_eq!(
+            channel_address(&no_channel()),
+            OsStr::new(SDK_ADDRESS_NO_CHANNEL)
+        );
     }
 }
