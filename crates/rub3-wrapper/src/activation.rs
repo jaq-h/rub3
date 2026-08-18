@@ -382,13 +382,22 @@ child is the child's status and not an activation failure.
       carries:
         `contract=0x... canonical=NAME sells_licences=false` - the code
           IS canonical rub3 code, at an address that sells no licences
-          (the factory, or a deployer helper). Wrong address: check
-          what this build is pointed at
-        `contract=0x... code_bytes=N exposed=A|B` - the code matched no
-          fingerprint this build pins: a modified copy, or a template
-          release newer than this binary. `exposed` is a
+          (the factory, a deployer helper, or the code registry).
+          Wrong address: check what this build is pointed at
+        `contract=0x... code_bytes=N registry=WHO exposed=A|B` - no
+          authority this build could reach vouched for the code: a
+          modified copy, or a template release newer than every
+          authority it asked. `registry` is what the second authority
+          contributed, and is three-valued because the three mean
+          different things: `not_consulted` (this build knows no code
+          registry on this chain, which is every chain today),
+          `unknown` (asked, and it has no record), `unavailable` (it
+          could not be asked). None is retryable, but only the last
+          means the question went unanswered. `exposed` is a
           pipe-separated list, since a signature may contain commas,
-          and is `none` when the scan named nothing
+          and is `none` when the scan named nothing; it stays last on
+          the line, since its values carry commas and parentheses of
+          their own, so every field added later goes in front of it
       Neither is an accusation: the scan is a diagnostic, and a miss
       says the code is unrecognised here, not that it is malicious
 
