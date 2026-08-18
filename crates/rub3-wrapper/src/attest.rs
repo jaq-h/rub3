@@ -249,10 +249,11 @@ const RELEASE: &str =
 ///
 /// That rule is conditional on a deploy having happened, and nothing is
 /// deployed to any public network yet - the contracts do not reach mainnet or
-/// get declared ready for use until the registry ships, and the factory and the
-/// registry launch together (`implementation.md` §1.5, §2.3). That condition
-/// has a machine-checked form: `contracts/deployments.json`, whose every
-/// `factory` **and** every `code_registry` is still `null`, asserted by
+/// get declared ready for use until the discovery registry ships, and the
+/// factory and that registry launch together (`implementation.md` §1.5, §2.3,
+/// §3.2; it is not the code registry below, which shares only the word). That
+/// condition has a machine-checked form: `contracts/deployments.json`, whose
+/// every `factory` **and** every `code_registry` is still `null`, asserted by
 /// [`tests::nothing_is_deployed_so_the_accumulate_only_rule_is_not_live_yet`].
 /// Those two are separate records with separate lifecycles, checked
 /// independently by `scripts/check-deployments.sh`, so either can be published
@@ -1058,12 +1059,14 @@ fn sanitised(record: RegistryRecord) -> RegistryRecord {
 /// a build with no registry at all does.
 ///
 /// Sixteen is deliberately far above anything legitimate rather than tight. A
-/// table is per *code layout*, not per contract and not per release: today
-/// exactly one exists, and `Rub3Access` and `Rub3Subscription` share it. A
-/// second appears only when a future contract's immutables land at different
-/// offsets, so sixteen leaves room for many such releases live at once. Raise
-/// it when a real deployment needs more tables than this, never to accommodate
-/// a registry publishing tables no contract was deployed under.
+/// table is per *code layout*, not per contract and not per release: the whole
+/// canonical set spans four, one each for `Rub3Access`, `Rub3Subscription` and
+/// `Rub3Factory` plus the empty one the two deployer helpers and the registry
+/// share. A fifth appears only when a future contract's immutables land at
+/// offsets none of those describe, so sixteen leaves room for many such
+/// releases live at once. Raise it when a real deployment needs more tables
+/// than this, never to accommodate a registry publishing tables no contract was
+/// deployed under.
 const MAX_CANDIDATE_OFFSET_TABLES: usize = 16;
 
 /// What the registry said about code the pinned table did not recognise.

@@ -162,8 +162,10 @@ contract Rub3CodeRegistry is Ownable2Step {
     /// @dev The distinct offset tables in use, in first-use order. An agent
     ///      needs a table to compute the hash it is about to look up, so the set
     ///      of candidates has to be fetchable in one call before any lookup -
-    ///      this is the answer to that bootstrap. Today there is exactly one
-    ///      table, shared by {Rub3Access} and {Rub3Subscription}.
+    ///      this is the answer to that bootstrap. Today's canonical set spans
+    ///      four tables: one each for {Rub3Access}, {Rub3Subscription} and
+    ///      {Rub3Factory}, plus the empty one the two deployer helpers and this
+    ///      registry share.
     ByteRange[][] private _offsetTables;
 
     /// @dev `keccak256(abi.encode(table)) => index + 1`, so `0` means absent.

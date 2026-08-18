@@ -323,12 +323,14 @@ pub const EXIT_PRICE_ABOVE_POLICY: i32 = 22;
 /// detail line carries:
 ///
 /// - `contract=0x... canonical=<name> sells_licences=false` - the code *is*
-///   canonical rub3 code, but at an address that sells no licences (the factory
-///   or one of its deployer helpers). The build is pointed at the wrong
-///   address; check what it was packed with.
-/// - `contract=0x... code_bytes=N exposed=<a>|<b>` - the code matched no
-///   fingerprint this build pins. That is a modified copy, or a template
-///   release newer than this binary.
+///   canonical rub3 code, but at an address that sells no licences (the
+///   factory, one of its deployer helpers, or the code registry). The build is
+///   pointed at the wrong address; check what it was packed with.
+/// - `contract=0x... code_bytes=N registry=<who> exposed=<a>|<b>` - no
+///   authority this build could reach vouched for the code. That is a modified
+///   copy, or a release newer than every authority it asked. `registry` says
+///   what the second authority contributed: `not_consulted`, `unknown` or
+///   `unavailable`.
 ///
 /// Neither is an accusation: `exposed` is a diagnostic naming what a blacklist
 /// of names happened to see, and a miss says the code is unrecognised here, not
