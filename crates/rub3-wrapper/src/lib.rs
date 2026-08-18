@@ -28,7 +28,7 @@ pub mod tx;
 
 pub mod activation;
 pub mod rpc;
-pub mod supervisor;
+mod supervisor;
 
 // The wrapper's half of the SDK channel (implementation.md §3.5): the local
 // socket a wrapped application asks "are you there" and "who is running me"
