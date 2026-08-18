@@ -571,9 +571,10 @@ record is a legacy licence proof, which predates the identity model and carries 
 `user_id`. The `error_kind` is the thing to read: `not_wrapped` means nothing
 launched this process, `no_channel` means a wrapper did and serves none (built
 without `sdk`, or its channel failed to start - its stderr says which), and
-`unreachable` means the wrapper that published the address is gone. A session to report needs the `cooldown` capability and a launch that
-actually activated one - `tests/sdk_e2e.rs` covers that case end to end, and
-[testing.md](testing.md) says how it seeds one.
+`unreachable` means the wrapper that published the address is gone. A session to
+report needs the `cooldown` capability and a launch that actually activated one -
+`tests/sdk_e2e.rs` covers that case end to end, and [testing.md](testing.md) says
+how it seeds one.
 
 Windows support is written, and half of it is verified: the SDK crate's client
 half type-checks for `x86_64-pc-windows-msvc`, while the wrapper's named-pipe

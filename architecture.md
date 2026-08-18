@@ -658,7 +658,8 @@ rub3-wrapper
 │   ├── Launch embedded binary as child process
 │   ├── Forward SIGTERM to child on wrapper exit
 │   ├── Exit if child exits
-│   └── Heartbeat IPC - child cannot run if wrapper dies
+│   └── SDK channel (feature `sdk`) - answers the child's heartbeat and
+│       session questions; see "Components -> rub3 SDK" for what that proves
 │
 └── App Host
     ├── Rust binary mode: exec embedded binary
