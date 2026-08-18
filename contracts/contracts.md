@@ -351,7 +351,7 @@ Which path you get is decided by one environment variable, `FACTORY`:
 
 Forgetting `FACTORY` is not an error and does not fail: you get a working, fee-free, unrecorded contract and one line of `console.log` saying so.
 
-**Which factory is canonical is answered by [`contracts/deployments.json`](deployments.json)**, committed beside `canonical-bytecode.json` and keyed by chain id, one entry per chain carrying the factory address, the block it was deployed in, and its generation in the `previousFactory` chain. That file is the only place the answer is published, so a tool that needs it reads it rather than asking a human, keyed by the chain it is asking about:
+**Which factory is canonical is answered by [`contracts/deployments.json`](deployments.json)**, committed beside `canonical-bytecode.json` and keyed by chain id, one entry per chain carrying the factory address, the block it was deployed in, its generation in the `previousFactory` chain, and - since the code registry (below) - that registry's address and deploy block. That file is the only place either answer is published, so a tool that needs one reads it rather than asking a human, keyed by the chain it is asking about:
 
 ```bash
 # from contracts/
@@ -359,7 +359,7 @@ CHAIN_ID=8453 # 84532 for Base Sepolia
 jq -er --arg id "$CHAIN_ID" ".chains[\$id].factory // error(\"no canonical factory is published for chain \(\$id)\")" deployments.json
 ```
 
-Its own `fields` object documents every key, and `scripts/check-deployments.sh` (run by CI) rejects a malformed or half-filled entry.
+Its own `fields` object documents every key, and `scripts/check-deployments.sh` (run by CI) rejects a malformed or half-filled entry. The factory record (`factory`, `deploy_block`, `generation`) and the code registry record (`code_registry`, `code_registry_deploy_block`) are each wholly populated or wholly null, and they are checked independently: they are separate deploys with separate lifecycles, and requiring them to move together would either block one launch on the other or invite a placeholder to unblock it.
 
 **Every entry in it is unpopulated today.** Nothing is deployed to a public network: the contracts are not deployed to mainnet or declared ready for use until the registry is ready, and the factory and the registry launch together. Unpopulated is written as `null` in every field, never as a placeholder address, so there is nothing in the file a script could mistake for a deploy - a `null` factory means "this chain has no canonical factory", and the correct response is to stop, not to substitute another address. That read is the one recipe used everywhere in this repo, and the `// error(...)` half is the point of it: on an unpopulated entry it prints nothing at all and reports the error on stderr, so there is no value to paste and no empty string to hand to forge. The walkthrough below is local, so it takes its factory from step 1 and uses that same read as the live-chain alternative. Either way the deploy refuses unless it has a well-formed address, because `vm.envOr` reads anything it cannot parse exactly as it reads unset, as "no factory": an unpopulated entry, a stray `null`, or an unsubstituted placeholder must never be allowed to degrade into a direct, unrecorded deploy, which is the outcome this file exists to prevent.
 
@@ -708,9 +708,76 @@ Splitting that into a separate commit or pull request defeats the gate, which ex
 
 New contracts under `contracts/src/` are picked up automatically, at any depth and including a second contract declared inside an existing file. Discovery never reads Solidity: it walks the artifacts `forge build --force` just wrote and keeps every one whose `.metadata.settings.compilationTarget` names a file under `contracts/src/`, which is also where the manifest's `source` field comes from. That set is the build's own account of what it compiled, so a declaration written in an unusual style cannot go unfingerprinted, a contract in `test/` or `script/` cannot leak in, and a contract deleted in the same commit cannot linger (the `--force` build clears the artifact directory first). Abstract bases such as `Rub3License` and interfaces such as `IRub3Predecessor` appear there too, but compile to an empty `deployedBytecode` object and are dropped on that basis rather than by looking for the `abstract` keyword.
 
-Libraries are excluded as well, and deliberately so: the manifest covers the deployable contracts an agent verifies - the licence contracts, and since §2.3 `Rub3Factory` and its two deployer helpers - and a library is not one. It also could not be published honestly here. A library compiles to real runtime code whose leading 20 bytes are a zeroed self-address placeholder that the deployer patches with the library's own address, and that placeholder is not an immutable, so it would appear in no `immutable_ranges` list and the three-step comparison above would fail every time with nothing in the manifest to explain it. An empty `deployedBytecode` object does not catch this case, so the gate reads each artifact's AST and drops anything whose `contractKind` is `library`. That is what `ast = true` in [`foundry.toml`](foundry.toml) is for. It selects extra output rather than changing a compilation input: it is absent from solc's `.metadata.settings`, and enabling it moved no fingerprint, measured rather than assumed. If the AST is ever missing the gate stops rather than guessing, since guessing would mean publishing a library.
+Libraries are excluded as well, and deliberately so: the manifest covers the deployable contracts an agent verifies - the licence contracts, since §2.3 `Rub3Factory` and its two deployer helpers, and since §2.9 `Rub3CodeRegistry`, whose row is what lets a wrapper check the registry before believing it - and a library is not one. It also could not be published honestly here. A library compiles to real runtime code whose leading 20 bytes are a zeroed self-address placeholder that the deployer patches with the library's own address, and that placeholder is not an immutable, so it would appear in no `immutable_ranges` list and the three-step comparison above would fail every time with nothing in the manifest to explain it. An empty `deployedBytecode` object does not catch this case, so the gate reads each artifact's AST and drops anything whose `contractKind` is `library`. That is what `ast = true` in [`foundry.toml`](foundry.toml) is for. It selects extra output rather than changing a compilation input: it is absent from solc's `.metadata.settings`, and enabling it moved no fingerprint, measured rather than assumed. If the AST is ever missing the gate stops rather than guessing, since guessing would mean publishing a library.
 
 The manifest keys contracts by name, so a name declared in two different files under `contracts/src/` fails the gate, naming both files, rather than being silently collapsed to whichever one sorted last. Give every contract under `contracts/src/` a unique name; the migration path is a new deploy of a differently named contract behind the successor pointer, not a second `Rub3Access` in a `v2/` directory.
+
+## The code registry
+
+`Rub3CodeRegistry` is the append-only record of which masked code hashes are genuine rub3 releases (`../implementation.md` §2.9). It exists because a fingerprint table compiled into a wrapper binary can only answer "is this the code *that build* was packed against". A contract deployed from a later template release is absent from that table, and so is a modified copy, so a binary alone has to refuse both. The registry is what tells them apart.
+
+**Nothing is deployed.** `code_registry` is `null` for every chain in [`deployments.json`](deployments.json), and every wrapper therefore refuses on a table miss exactly as it did before the registry existed. `null` means "this chain has no code registry, so there is nothing to ask"; it never means "use one you were given".
+
+### What it does and does not say
+
+- **A record says the code is a genuine rub3 release. It says nothing about a deployment.** Which address runs that code, who deployed it, what the immutables behind the mask were set to, and how the owner will behave are all outside it. "Was this deployed through the canonical factory" is `Rub3Factory.isDeployed` on a specific factory address, and the two questions must not be run together.
+- **`Deprecated` means "not recommended for new purchases". It never means "stop honouring".** The record stays whole, offsets included, and a held token is untouched - the registry has no status that could invalidate one, and nothing on any launch path reads it. An agent meeting a deprecated hash warns and buys.
+- **Nothing can be removed, overwritten, or moved backwards.** `publish` reverts on a hash that already has a record, deprecated ones included. There is no proxy, no removal, and no un-deprecate. A compromise of the owner key can therefore only *add*, and every addition is a permanent public `Published` event. `test/Rub3CodeRegistry.t.sol` asserts the removal and rewrite surfaces are absent from the deployed runtime bytecode, the way the licence contracts' forbidden selectors are - with its own 10-name list, because the shared 30-name list is about tokens and says nothing about a registry.
+
+### Publishing a release
+
+One transaction per fingerprint, from the owner key. The numbers come out of `canonical-bytecode.json`, which is the point: the registry republishes what the manifest already fixed rather than deciding anything.
+
+```bash
+# from contracts/
+NAME=Rub3Access
+MCH=$(jq -er ".contracts.$NAME.deployed_bytecode_sha256" canonical-bytecode.json)
+OFFSETS=$(jq -r "[.contracts.$NAME.immutable_ranges[] | \"(\(.start),\(.length))\"] | join(\",\")" canonical-bytecode.json)
+SOLC=$(jq -er '.build.solc_version' canonical-bytecode.json)
+COMMIT=0x$(git rev-parse HEAD | sed 's/$/000000000000000000000000/')   # 20-byte sha1, right-padded to bytes32
+
+# role: 0 licence, 1 factory, 2 deployer helper, 3 code registry
+cast send <CODE_REGISTRY> \
+  "publish(bytes32,uint8,string,string,bytes32,string,(uint32,uint32)[])" \
+  "0x$MCH" 0 "$NAME" "<release label>" "$COMMIT" "$SOLC" "[$OFFSETS]" \
+  --rpc-url $RPC --private-key $OWNER_KEY
+```
+
+Deprecating carries its reason, the way `revokeWrapperHash` does, because a permanent public act should say why:
+
+```bash
+cast send <CODE_REGISTRY> "deprecate(bytes32,string)" \
+  "0x$MCH" "superseded by <the newer release>" --rpc-url $RPC --private-key $OWNER_KEY
+```
+
+### Reading it, and the offsets bootstrap
+
+Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. The registry breaks that circle by publishing the *distinct* tables its releases use - four across today's canonical set, one each for `Rub3Access`, `Rub3Subscription` and `Rub3Factory` plus the empty one the two deployer helpers and the registry share - so a verifier fetches the short candidate list once, hashes under each, and looks each result up.
+
+**On a purchase path, read a bounded window of the newest tables.** How many tables exist is the owner key's to choose, and the append-only bound on that key covers what it can publish, not how long a buyer waits for it. `latestOffsetTables(count)` returns at most `count` tables newest-first, clamped, so a verifier asks for the number of candidates it is willing to try and never pays to transfer or decode more; each surviving candidate then costs its own `record` round trip, so hold the same bound over the loop as well - a node need not honour what it was asked for. The wrapper reads `latestOffsetTables(attest::MAX_CANDIDATE_OFFSET_TABLES)` and caps the lookups at the same number.
+
+**Read the newest end, not the first.** This registry is consulted only when the verifier's own pinned table missed, and a miss is by definition about code newer than that build. A budget spent on the oldest layouts would make every release published under a layout past the budget unreadable to every fielded binary, while the first releases stayed readable forever - blinding fielded binaries to the new releases the registry exists to vouch for. None of this is correctness: a table never read is a release refused as unknown, which is what a verifier with no registry already does, so what is at stake is reachability and latency.
+
+`offsetTableWindow(start, count)` walks the set from an arbitrary point in first-use order, for an indexer backfilling, and `offsetTables()` returns everything for a watcher with no deadline.
+
+```bash
+cast call <CODE_REGISTRY> "latestOffsetTables(uint256)((uint32,uint32)[][])" 16 --rpc-url $RPC
+cast call <CODE_REGISTRY> "offsetTableCount()(uint256)" --rpc-url $RPC
+cast call <CODE_REGISTRY> "offsetTableWindow(uint256,uint256)((uint32,uint32)[][])" 0 16 --rpc-url $RPC
+cast call <CODE_REGISTRY> "offsetTables()((uint32,uint32)[][])" --rpc-url $RPC   # the whole set
+cast call <CODE_REGISTRY> "record(bytes32)((uint8,uint8,string,string,bytes32,string,uint64,(uint32,uint32)[]))" \
+  "0x$MCH" --rpc-url $RPC
+```
+
+A verifier following the registry's tables must check the ranges against the code it fetched before masking with any of them: each range one 32-byte word, sorted, disjoint, inside the code, and **preceded by a `PUSH32` opcode**. A masked byte is a byte the comparison never looks at, and the `PUSH32` check is what bounds that blind spot: in code a compiler emitted, the byte after a `PUSH32` is its immediate operand, and jump-destination analysis excludes bytes inside push immediates, so the masked bytes cannot execute. `publish` enforces the width, the ordering and the EIP-170 bound on chain; only the fetched code can settle the last one, so only the verifier can. The wrapper does exactly this in `crates/rub3-wrapper/src/attest.rs`.
+
+Be precise about what that last check does *not* settle, because the guarantee is weaker here than it is for a fingerprint table shipped inside a binary. A one-byte lookback does not prove the `PUSH32` byte is an instruction rather than data inside an earlier push's immediate, so code and table shaped together could mask bytes that do execute. Producing such a pair needs the registry's owner key, which has the shorter route of publishing an empty offsets table and letting the hostile code be hashed whole, so this check is what keeps a careless or drifted table honest; the owner key itself is bounded by append-only publication, by every addition being a permanent public `Published` event, and by the registry's own code having to match its published fingerprint first.
+
+### Believing it at all
+
+A verifier must fetch the registry's own runtime code and compare it against `Rub3CodeRegistry` in `canonical-bytecode.json` before believing a word it says. Otherwise the trust rests on whoever put an address in front of you, which is what a published fingerprint exists to avoid. The wrapper carries one registry address per chain and the registry's own masked hash, both frozen into the binary at pack time, and refuses to consult an address whose code does not match.
+
+**It rests on an honest RPC, like everything else here.** A single endpoint that lies returns canonical code for a hostile contract, and lies about the registry's own code in the same breath - the second authority neither dilutes that risk nor compounds it, because one dishonest view of chain state defeats both reads at once. The claim supported is "an honest view of chain state implies canonical code", and no stronger one. A read quorum would close it and is not built.
 
 ## Auditing the invariants before buying
 
@@ -738,7 +805,7 @@ EOF
 
 The wrapper does this itself before it spends anything: `crates/rub3-wrapper/src/attest.rs` pins the same fingerprints and ranges in the binary, both purchase paths refuse on a miss before anything is signed (`headless::purchase` with exit code 23, the activation window with a refusal screen in place of the purchase screen), and a unit test fails if the pinned table and this manifest drift apart. See [../implementation.md](../implementation.md) §2.6 and §2.8.
 
-What a match does **not** say is worth as much as what it does. Zeroing the immutable ranges destroys the constructor arguments they held, so a match is silent about `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` and the fee terms; read those from the contract's own getters and check them against your own policy. It says nothing about how a canonical contract's owner will use the powers the invariants deliberately preserve (`setPrice`, `setSuccessor`, `revokeWrapperHash`, `withdraw`). And it rests entirely on the RPC endpoint answering `eth_getCode` honestly: the claim it supports is "an honest view of chain state implies canonical code", and no stronger one. A mismatch is likewise not an accusation - a contract deployed from a later release of these templates than the comparator knows about looks exactly the same way.
+What a match does **not** say is worth as much as what it does. Zeroing the immutable ranges destroys the constructor arguments they held, so a match is silent about `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` and the fee terms; read those from the contract's own getters and check them against your own policy. It says nothing about how a canonical contract's owner will use the powers the invariants deliberately preserve (`setPrice`, `setSuccessor`, `revokeWrapperHash`, `withdraw`). And it rests entirely on the RPC endpoint answering `eth_getCode` honestly: the claim it supports is "an honest view of chain state implies canonical code", and no stronger one. A mismatch is likewise not an accusation - a contract deployed from a later release of these templates than the comparator knows about looks exactly the same way. That is what the code registry above answers: a hash absent from your table but published there is a newer release, and a hash absent from both is the one to refuse. Until a registry is deployed there is nothing to ask, and a miss is simply a miss.
 
 The check cannot be defeated by swapping code at the address after it is read. `evm_version = "cancun"`, and under EIP-6780 `SELFDESTRUCT` only deletes an account created in the same transaction, so there is no window between the read and the purchase and no metamorphic-contract attack. Pre-Cancun this would not have held.
 
@@ -775,11 +842,11 @@ Sanity-check the method itself against a selector that *is* there - `cast sig "a
 
 ## Planned contract evolution
 
-The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot), the §2.2 stablecoin rail, and the §2.3 factory and protocol fee, all of which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
+The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot), the §2.2 stablecoin rail, the §2.3 factory and protocol fee, and the §2.9 code registry, all of which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
 
 - **`contentURI`** (§3.1) - content-addressed binary location on-chain, making the contract a complete distribution record
 - **Concurrent seats** (§3.4) - `maxConcurrentSessions[tokenId] = K` generalizing `activeSessionId` for agent fleets
 - **`Rub3Metered`** (§4.1) - per-launch / per-session micropayment billing
-- **`Rub3Registry`** (§3.2) - discovery and verification, never validity; entries double as ERC-8004-style agent cards
+- **`Rub3Registry`** (§3.2) - discovery and verification, never validity; entries double as ERC-8004-style agent cards. Distinct from the `Rub3CodeRegistry` above, which records which *code* is a genuine rub3 release and lists no products
 
 Invariants for every license contract, present and future: no burn, no admin transfer, no pause on validation reads, no proxies. Evolution changes what is offered going forward, never what was granted.

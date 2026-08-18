@@ -459,15 +459,56 @@ fn describe(sources: &Sources, ctx: &SourceFile, item: &syn::Item) -> Option<Ite
                         // would otherwise be served with its own doc comment
                         // inside the signature.
                         let start = variant.ident.span().byte_range().start;
+                        // A braced variant carries a body, and a documented
+                        // field inside it is a doc comment inside the slice for
+                        // the same reason. It is cut at the brace and its
+                        // fields are served as members, exactly as a struct's
+                        // are. A parenthesised variant has no body to cut: its
+                        // types are the declaration.
+                        let body = match &variant.fields {
+                            syn::Fields::Named(named) => Some(named.brace_token.span.open()),
+                            syn::Fields::Unnamed(_) | syn::Fields::Unit => None,
+                        };
+                        let stop = body
+                            .map(|body| body.byte_range().start)
+                            .unwrap_or_else(|| end(variant.span()));
                         Item {
                             kind: "variant".to_string(),
                             path: ctx.path.clone(),
                             name: variant.ident.to_string(),
-                            signature: slice(source, start, end(variant.span())),
+                            signature: slice(source, start, stop),
                             cfg: cfgs(source, &variant.attrs),
                             doc: outer_doc(&variant.attrs),
                             line: lines.line_of(start),
-                            members: Vec::new(),
+                            members: match &variant.fields {
+                                syn::Fields::Named(named) => named
+                                    .named
+                                    .iter()
+                                    .map(|field| Item {
+                                        kind: "field".to_string(),
+                                        path: ctx.path.clone(),
+                                        name: field
+                                            .ident
+                                            .as_ref()
+                                            .map(ToString::to_string)
+                                            .unwrap_or_default(),
+                                        // A variant's field has no visibility
+                                        // to slice from, so the name is where
+                                        // its declaration starts; the span
+                                        // would carry its doc comment.
+                                        signature: slice(
+                                            source,
+                                            field_start(field),
+                                            end(field.span()),
+                                        ),
+                                        cfg: cfgs(source, &field.attrs),
+                                        doc: outer_doc(&field.attrs),
+                                        line: lines.line_of(field_start(field)),
+                                        members: Vec::new(),
+                                    })
+                                    .collect(),
+                                syn::Fields::Unnamed(_) | syn::Fields::Unit => Vec::new(),
+                            },
                         }
                     })
                     .collect(),
@@ -842,6 +883,20 @@ fn start_of(vis: &syn::Visibility, fallback: proc_macro2::Span) -> usize {
         syn::Visibility::Inherited => fallback.byte_range().start,
         other => other.span().byte_range().start,
     }
+}
+
+/// Where a variant's field declaration starts: at its name.
+///
+/// Variant fields carry no visibility, so `start_of` would fall back to the
+/// whole span, which covers the field's doc comment and would serve it as part
+/// of the field's signature.
+fn field_start(field: &syn::Field) -> usize {
+    use syn::spanned::Spanned;
+    field
+        .ident
+        .as_ref()
+        .map(|ident| ident.span().byte_range().start)
+        .unwrap_or_else(|| field.span().byte_range().start)
 }
 
 fn end(span: proc_macro2::Span) -> usize {

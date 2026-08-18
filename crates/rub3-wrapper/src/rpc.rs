@@ -758,6 +758,176 @@ pub fn encode_purchase_calldata(recipient: Address) -> String {
     format!("0x{}", hex::encode(call.abi_encode()))
 }
 
+// ── The code registry (§2.9) ──────────────────────────────────────────────────
+
+/// One byte range a comparator zeroes before hashing, as the code registry
+/// publishes it.
+///
+/// A plain pair rather than the comparator's own range type: this module reads
+/// the chain and owns none of the attestation policy, and the two must not grow
+/// a dependency on each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodeRange {
+    pub start: u32,
+    pub length: u32,
+}
+
+/// A release record as `Rub3CodeRegistry.record(bytes32)` returns it, reduced to
+/// the fields a wrapper acts on.
+///
+/// `status` and `role` are the raw `uint8`s the enums encode as. They are not
+/// interpreted here: what a status or a role *means* is a policy question, and
+/// this module's job ends at "here is what the chain said". An unrecognised
+/// value therefore reaches the caller intact rather than being flattened into
+/// something plausible on the way.
+///
+/// The record's `sourceCommit` and `solcVersion` are decoded and dropped. They
+/// exist so a human can reproduce the fingerprint from a checkout, which is
+/// work no wrapper does; carrying them further would put two more strings on a
+/// refusal path that has nothing to do with them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeRegistryRecord {
+    /// `0` unknown, `1` active, `2` deprecated.
+    pub status: u8,
+    /// `0` licence, `1` factory, `2` deployer helper, `3` code registry.
+    pub role: u8,
+    /// Solidity contract name.
+    pub contract_name: String,
+    /// Human-readable release label.
+    pub version: String,
+    /// The block the record was published in.
+    pub registered_at_block: u64,
+    /// The ranges this release declares as its immutables.
+    pub offsets: Vec<CodeRange>,
+}
+
+// The slice of `Rub3CodeRegistry` a wrapper reads. Both are `view`, and neither
+// has a write counterpart here: publishing is the registry owner's, and nothing
+// in this crate has any business calling it.
+//
+// The struct mirrors `Rub3CodeRegistry.Release` field for field and in order,
+// because that order is the ABI encoding. Its two enums are declared as the
+// `uint8` they encode as, so this mirror stays honest about what arrives on the
+// wire rather than asserting a meaning at the decoder.
+sol! {
+    #[sol(rpc)]
+    interface IRub3CodeRegistry {
+        struct ByteRange {
+            uint32 start;
+            uint32 length;
+        }
+
+        struct Release {
+            uint8   status;
+            uint8   role;
+            string  contractName;
+            string  version;
+            bytes32 sourceCommit;
+            string  solcVersion;
+            uint64  registeredAtBlock;
+            ByteRange[] offsets;
+        }
+
+        function record(bytes32 maskedCodeHash) external view returns (Release memory);
+        function latestOffsetTables(uint256 count)
+            external
+            view
+            returns (ByteRange[][] memory);
+    }
+}
+
+/// Reads up to `limit` of the distinct immutable-offset tables the code registry
+/// publishes, newest first.
+///
+/// The bootstrap for a masked-hash lookup: computing the hash needs a table, and
+/// finding the record needs the hash, so the candidate tables are fetched first
+/// in one call. The canonical set spans four layouts today: one per licence
+/// template, one for the factory, and the empty one its two deployer helpers
+/// and the registry share.
+///
+/// The registry's own `latestOffsetTables` does the bounding, so the response
+/// this pays to transfer and decode is capped by the caller's `limit` rather
+/// than by how many tables the registry's owner key has published. `limit` is
+/// clamped by the contract, so asking for more than exists returns what exists.
+///
+/// **Newest first, because a registry is only ever consulted about code newer
+/// than this binary.** A lookup happens on a pinned-table miss, so spending a
+/// fixed budget of candidates on the oldest layouts would make every release
+/// published under a layout past that budget unreadable to this build while the
+/// first releases stayed readable forever. This is reachability and latency
+/// only: reading the wrong end, or the whole set, could never produce a wrong
+/// verdict.
+pub fn code_registry_offset_tables(
+    rpc_url: &str,
+    registry: Address,
+    limit: usize,
+) -> Result<Vec<Vec<CodeRange>>, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3CodeRegistry::new(registry, provider);
+        let tables = instance
+            .latestOffsetTables(U256::from(limit))
+            .call()
+            .await
+            .map_err(RpcError::contract)?;
+        Ok(tables
+            .into_iter()
+            .map(|table| {
+                table
+                    .into_iter()
+                    .map(|r| CodeRange {
+                        start: r.start,
+                        length: r.length,
+                    })
+                    .collect()
+            })
+            .collect())
+    })
+}
+
+/// Reads the release the code registry published for `masked_code_hash`, or
+/// `None` when it has none.
+///
+/// A registry that has never seen a hash answers with a zeroed record, whose
+/// `status` is the `Unknown` variant. That is translated to `None` here so a
+/// caller cannot mistake the zero value for a published record - which would
+/// read as role `0`, a licence, and is exactly the confusion worth removing at
+/// the boundary.
+pub fn code_registry_record(
+    rpc_url: &str,
+    registry: Address,
+    masked_code_hash: [u8; 32],
+) -> Result<Option<CodeRegistryRecord>, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3CodeRegistry::new(registry, provider);
+        let release = instance
+            .record(B256::from(masked_code_hash))
+            .call()
+            .await
+            .map_err(RpcError::contract)?;
+
+        if release.status == 0 {
+            return Ok(None);
+        }
+        Ok(Some(CodeRegistryRecord {
+            status: release.status,
+            role: release.role,
+            contract_name: release.contractName,
+            version: release.version,
+            registered_at_block: release.registeredAtBlock,
+            offsets: release
+                .offsets
+                .into_iter()
+                .map(|r| CodeRange {
+                    start: r.start,
+                    length: r.length,
+                })
+                .collect(),
+        }))
+    })
+}
+
 // ── Stablecoin rail (EIP-3009, §2.2) ──────────────────────────────────────────
 
 /// What a contract charges on its stablecoin rail.

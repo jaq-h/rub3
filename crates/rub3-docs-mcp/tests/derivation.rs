@@ -267,6 +267,87 @@ fn a_renamed_function_moves_the_served_signature() {
     );
 }
 
+/// A documented field inside a braced variant is not part of the variant's
+/// signature.
+///
+/// A variant is sliced from its name, which keeps its own doc comment out of
+/// the signature, but a braced variant carries a body and the fields in it
+/// carry doc comments of their own. Cutting at the brace is what keeps the
+/// signature quotable, and the fields are served as members so nothing is lost.
+/// A parenthesised variant has no body to cut and keeps its types.
+#[test]
+fn a_braced_variant_is_cut_at_its_brace_and_serves_its_fields() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "crates/demo/src/lib.rs",
+        "//! Demo crate.\n\npub mod verdict;\n",
+    );
+    fixture.write(
+        "crates/demo/src/verdict.rs",
+        r#"//! Verdicts.
+
+/// What vouched for the code.
+pub enum Authority {
+    /// The table in the binary.
+    Pinned,
+    /// The registry.
+    Registry {
+        /// Whether it is still recommended.
+        status: u8,
+        /// The block it was published in.
+        block: u64,
+    },
+    /// Nothing did.
+    Refused(String),
+}
+"#,
+    );
+    let server = fixture.server();
+    let served = server
+        .rust_api(Parameters(RustApi {
+            crate_name: None,
+            module: None,
+            name: None,
+            limit: None,
+        }))
+        .expect("derives")
+        .0
+        .crates;
+
+    let variants = served
+        .iter()
+        .flat_map(|crate_api| crate_api.modules.iter())
+        .flat_map(|module| module.items.iter())
+        .find(|item| item.name == "Authority")
+        .expect("the enum is served")
+        .members
+        .clone();
+
+    let variant = |name: &str| {
+        variants
+            .iter()
+            .find(|variant| variant.name == name)
+            .unwrap_or_else(|| panic!("{name} is served"))
+    };
+
+    assert_eq!(variant("Registry").signature, "Registry");
+    assert_eq!(variant("Registry").doc, "The registry.");
+    assert_eq!(
+        variant("Registry")
+            .members
+            .iter()
+            .map(|field| (field.signature.as_str(), field.doc.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("status: u8", "Whether it is still recommended."),
+            ("block: u64", "The block it was published in."),
+        ]
+    );
+    assert_eq!(variant("Pinned").signature, "Pinned");
+    assert_eq!(variant("Refused").signature, "Refused(String)");
+    assert!(variant("Refused").members.is_empty());
+}
+
 #[test]
 fn a_feature_gate_added_to_the_crate_root_reaches_the_served_module() {
     let fixture = Fixture::new();

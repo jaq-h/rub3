@@ -147,6 +147,31 @@
     }
     .notice .nb { color: #c8a4a4; font-size: 12px; line-height: 1.55; }
 
+    /* A release the registry stopped recommending, said beside the purchase
+       and never in place of it.
+       Amber rather than the refusal's red, and no border-left accent bar, so it
+       reads as a note on a screen that still works - the purchase is not
+       blocked and the licence is not at risk. Wraps anywhere because the
+       contract name and release label are published on chain and this card is
+       only 420px wide. */
+    .advisory {
+      background: #241f14;
+      border: 1px solid #453a22;
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin-bottom: 14px;
+      overflow-wrap: anywhere;
+    }
+    .advisory .at {
+      color: #e3bd7a;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .advisory .ab { color: #b8a486; font-size: 12px; line-height: 1.55; }
+
     .next-step {
       font-size: 12px;
       color: #999;
@@ -204,6 +229,13 @@
     <p style="font-size:13px;color:#999;margin-bottom:14px">
       This wallet doesn't own a license token yet. Purchase one to continue.
     </p>
+    <!-- Shown only when the on-chain code registry has stopped recommending
+         this release. Advice, not a warning: the purchase below still works,
+         and the record names no replacement, so this must not promise one. -->
+    <div class="advisory hidden" id="p-advisory">
+      <div class="at">No longer recommended for new purchases</div>
+      <p class="ab" id="p-advisory-body"></p>
+    </div>
     <div class="token-box">
       <div class="tl">Price</div>
       <div class="tv" id="p-price">-</div>
@@ -471,6 +503,13 @@
         ? 'Unlimited  (' + data.nextTokenId + ' minted)'
         : data.nextTokenId + ' / ' + data.supplyCap + ' minted';
       document.getElementById('p-supply').textContent = supplyLabel;
+
+      // The code registry marks this release superseded. It is still genuine
+      // rub3 code and the purchase still works, so this appears beside the
+      // price rather than replacing the screen the way a refusal does.
+      const advisory = document.getElementById('p-advisory');
+      document.getElementById('p-advisory-body').textContent = data.advisory || '';
+      advisory.classList.toggle('hidden', !data.advisory);
 
       document.getElementById('p-owner').textContent    = data.ownerAddress;
       document.getElementById('p-to').textContent       = data.contractAddress;
