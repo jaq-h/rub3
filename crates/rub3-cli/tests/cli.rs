@@ -358,6 +358,225 @@ fn a_subscription_needs_its_period() {
 }
 
 #[test]
+fn a_usage_error_does_not_look_like_a_missing_factory() {
+    // Exit 2 is the orchestrator's signal for "nothing is deployed yet", so it
+    // has to be exclusive to that refusal. clap's own default for a missing
+    // flag, an unknown flag or an unknown subcommand is 2 as well, which would
+    // make a forgotten --name indistinguishable from it.
+    let repo = checkout(COMMITTED_MANIFEST);
+
+    let missing_flag = rub3(
+        repo.path(),
+        &[
+            "deploy",
+            "--chain",
+            "base",
+            "--symbol",
+            "MAL",
+            "--price-eth",
+            "0.05",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(
+        missing_flag.status.code(),
+        Some(1),
+        "a missing --name: {}",
+        stderr(&missing_flag)
+    );
+    assert!(
+        stderr(&missing_flag).contains("--name"),
+        "{}",
+        stderr(&missing_flag)
+    );
+
+    let unknown_flag = {
+        let mut args = pack_args();
+        args.push("--no-such-flag");
+        rub3(repo.path(), &args)
+    };
+    assert_eq!(unknown_flag.status.code(), Some(1), "an unknown flag");
+
+    let unknown_subcommand = rub3(repo.path(), &["fetch"]);
+    assert_eq!(
+        unknown_subcommand.status.code(),
+        Some(1),
+        "a subcommand that does not exist"
+    );
+
+    // And the refusal that owns 2 still gets it.
+    let no_factory = rub3(repo.path(), &pack_args());
+    assert_eq!(no_factory.status.code(), Some(2), "{}", stderr(&no_factory));
+}
+
+#[test]
+fn help_and_version_are_not_failures() {
+    let repo = checkout(COMMITTED_MANIFEST);
+    for args in [vec!["--help"], vec!["--version"], vec!["pack", "--help"]] {
+        let output = rub3(repo.path(), &args);
+        assert_eq!(output.status.code(), Some(0), "rub3 {args:?}");
+        assert!(!stdout(&output).is_empty(), "rub3 {args:?} printed nothing");
+    }
+}
+
+#[test]
+fn an_app_id_that_would_escape_the_cache_directory_is_refused() {
+    // --app-id becomes a directory the packed binary extracts into and the file
+    // its licence proof is stored under, so it has to be one path component.
+    let repo = checkout(POPULATED_MANIFEST);
+    for escape in ["../../../tmp/x", "..", "a/b", ""] {
+        let mut args = pack_args();
+        let id = args.iter().position(|a| *a == "com.example.myapp").unwrap();
+        args[id] = escape;
+        let output = rub3(repo.path(), &args);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "--app-id {escape:?} was accepted: {}",
+            stdout(&output)
+        );
+        assert!(
+            stderr(&output).contains("--app-id"),
+            "{escape:?}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn the_deploy_summary_never_echoes_what_follows_the_double_dash() {
+    // The summary is printed on every deploy, not only a --dry-run, and
+    // everything after `--` is where the signer goes.
+    let repo = checkout(POPULATED_MANIFEST);
+    let mut args = deploy_args();
+    args.extend([
+        "--",
+        "--private-key",
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        "--etherscan-api-key",
+        "SECRETAPIKEY",
+    ]);
+    let output = rub3(repo.path(), &args);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let printed = format!("{}{}", stdout(&output), stderr(&output));
+    for secret in [
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        "SECRETAPIKEY",
+        "--private-key",
+    ] {
+        assert!(
+            !printed.contains(secret),
+            "the plan echoed {secret}:\n{printed}"
+        );
+    }
+    // What the CLI itself chose is still worth showing.
+    assert!(
+        printed.contains("forge script script/Deploy.s.sol"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("4 arguments passed straight to forge"),
+        "the operator is told how many, without being shown them:\n{printed}"
+    );
+}
+
+/// A stand-in for cargo that records the environment it was run with and exits
+/// without building anything. `pack` reads `CARGO` before it falls back to the
+/// name, which is what makes the child's environment observable here.
+#[cfg(unix)]
+fn recording_cargo(dir: &Path, record: &Path) -> std::path::PathBuf {
+    let script = dir.join("fake-cargo");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nenv > {}\nexit 0\n", record.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[test]
+#[cfg(unix)]
+fn a_pack_does_not_inherit_a_developer_ens_nobody_typed() {
+    // RUB3_PACK_DEVELOPER_ENS is optional, so the wrapper's build gate lets a
+    // build through without it. A stale one exported from an earlier pack would
+    // be compiled in and shown to every licence holder of this app during
+    // activation as this app's developer.
+    let repo = checkout(POPULATED_MANIFEST);
+    let tmp = tempfile::tempdir().unwrap();
+    let record = tmp.path().join("child-env");
+    let cargo = recording_cargo(tmp.path(), &record);
+
+    let mut args = pack_args();
+    let dry = args.iter().position(|a| *a == "--dry-run").unwrap();
+    args.remove(dry);
+    let output = Command::new(env!("CARGO_BIN_EXE_rub3"))
+        .arg("--repo-root")
+        .arg(repo.path())
+        .args(&args)
+        .env("CARGO", &cargo)
+        .env("RUB3_PACK_DEVELOPER_ENS", "old-app.eth")
+        .env(
+            "RUB3_PACK_CONTRACT",
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        )
+        .output()
+        .expect("the rub3 binary runs");
+
+    // The stand-in builds nothing, so the pack fails after the build - which is
+    // the tool failure, not a usage error.
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+
+    let child_env = std::fs::read_to_string(&record).expect("the build ran");
+    assert!(
+        !child_env.contains("RUB3_PACK_DEVELOPER_ENS"),
+        "an inherited developer ENS reached the build:\n{child_env}"
+    );
+    // The one the plan did set is the one that arrives, not the exported one.
+    assert!(
+        child_env.contains("RUB3_PACK_CONTRACT=0x1234567890abcdef1234567890abcdef12345678"),
+        "{child_env}"
+    );
+    assert!(
+        child_env.contains("RUB3_PACK_APP_ID=com.example.myapp"),
+        "{child_env}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_developer_ens_that_was_asked_for_still_arrives() {
+    // The positive control for the clearing above: without it, a gate that
+    // dropped every optional variable would pass.
+    let repo = checkout(POPULATED_MANIFEST);
+    let tmp = tempfile::tempdir().unwrap();
+    let record = tmp.path().join("child-env");
+    let cargo = recording_cargo(tmp.path(), &record);
+
+    let mut args = pack_args();
+    let dry = args.iter().position(|a| *a == "--dry-run").unwrap();
+    args.remove(dry);
+    args.extend(["--developer-ens", "new-app.eth"]);
+    let output = Command::new(env!("CARGO_BIN_EXE_rub3"))
+        .arg("--repo-root")
+        .arg(repo.path())
+        .args(&args)
+        .env("CARGO", &cargo)
+        .env("RUB3_PACK_DEVELOPER_ENS", "old-app.eth")
+        .output()
+        .expect("the rub3 binary runs");
+
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let child_env = std::fs::read_to_string(&record).expect("the build ran");
+    assert!(
+        child_env.contains("RUB3_PACK_DEVELOPER_ENS=new-app.eth"),
+        "{child_env}"
+    );
+}
+
+#[test]
 fn there_is_no_fetch_and_no_register_subcommand() {
     // implementation.md §2.5 lists four subcommands. `fetch` (§3.1) and
     // `register` (§3.2) have nothing to talk to yet, and a subcommand that

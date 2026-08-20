@@ -26,23 +26,23 @@ capabilities nor the headless front door. Cargo features are additive, so
 `--no-default-features` is mandatory when selecting another bundle:
 
 ```bash
-# tier-3 (adds onchain-write + cooldown): 137 lib tests
+# tier-3 (adds onchain-write + cooldown): 138 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
 
-# tier-3 + the headless (agent) front door: 201 lib tests
+# tier-3 + the headless (agent) front door: 202 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
 
-# tier-3 + the webview (human) front door: 153 lib tests
+# tier-3 + the webview (human) front door: 154 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,webview --lib
 ```
 
-For reference, `--lib` counts per bundle: `tier-0` 57, `tier-1` 87, `tier-2` 127,
-`tier-3`/`tier-4` 137, `tier-2,webview` 128, `tier-3,webview` 153,
-`tier-3,headless` 201, `tier-0,sdk` 69, `tier-3,sdk` 154. Every count on this
+For reference, `--lib` counts per bundle: `tier-0` 58, `tier-1` 88, `tier-2` 128,
+`tier-3`/`tier-4` 138, `tier-2,webview` 129, `tier-3,webview` 154,
+`tier-3,headless` 202, `tier-0,sdk` 70, `tier-3,sdk` 155. Every count on this
 page is the number libtest reports as *running* - passed plus `#[ignore]`d, not
-passed alone - so a plain run of `tier-3,webview` prints 149 passed and 4 ignored
-against the 153 above. The four `packed` tests are in every bundle, which is why
-each count above is four higher than the one `implementation.md` §3.5 recorded
+passed alone - so a plain run of `tier-3,webview` prints 150 passed and 4 ignored
+against the 154 above. The five `packed` tests are in every bundle, which is why
+each count above is five higher than the one `implementation.md` §3.5 recorded
 when it was written. The
 ignored ones are one network test in every bundle, plus the three anvil-gated
 webview session-flow tests under `tier-3,webview`. `tier-1` and `tier-2` diverge because
@@ -76,7 +76,7 @@ scripts/test-e2e.sh
 
 - **`license::tests`** - activation message hashing, personal_sign prefix, proof serialization round-trips
 - **`store::tests`** - proof save/load, directory creation, overwrite, missing file handling
-- **`packed::tests`** - what `rub3 pack` baked in (§2.5), compiled in every bundle. The test build asserts itself *not* to be a packed build, which is what gives the other three a fixed subject: the factory is `None`, since it is the one constant with no placeholder and an unpacked build may not invent one; no application is embedded; the placeholder `CONTRACT` is still the zero address the wrapper reads as "no contract configured", which is why a stock build never touches the chain; the numeric constants parse at compile time; and `provenance()` names the app id, contract, chain and rpc it will act on and says "development build" where a packed binary names its factory
+- **`packed::tests`** - what `rub3 pack` baked in (§2.5), compiled in every bundle. The test build asserts itself *not* to be a packed build, which is what gives the other three a fixed subject: the factory is `None`, since it is the one constant with no placeholder and an unpacked build may not invent one; no application is embedded; the placeholder `CONTRACT` is still the zero address the wrapper reads as "no contract configured", which is why a stock build never touches the chain; the numeric constants parse at compile time; `provenance()` names the app id, contract, chain and rpc it will act on and says "development build" where a packed binary names its factory; and `provenance_never_hands_out_the_endpoint_key` drives the rendering with an endpoint carrying a provider key in its path, in a query parameter and as userinfo - `--version` is reachable by every licence holder, so the endpoint goes through the same `rpc::redact_urls` the error surface uses and is reduced to scheme, host and port, with an authority that will not parse dropped whole rather than passed through
 - **`rpc::tests`** - provider construction, contract call error paths, `encode_activate_calldata` selector + layout, `get_tx_receipt` / `get_block_number` / `get_code` error paths, ENS stub; the endpoint redaction (§2.8), which is a property of the wrapper's whole RPC error surface rather than of any one screen: a key placed in a path segment, in a query parameter and as userinfo must each be absent from the error's `Display` after construction through `RpcError::transport` and `RpcError::contract` while the host, the port and the failure text survive; a bracketed IPv6 authority keeps its host and loses its key, including when trailing punctuation follows it; an address whose authority will not parse at all is dropped whole rather than half-printed, which is the fail-closed property that a bare `[redacted url]` followed by a verbatim path would violate; plus one drive of `tokens_of_owner` against a dead port because alloy classifies an unreachable node during an `eth_call` as a contract error rather than a transport one; and for the EIP-3009 rail (§2.2) the `ReceiveWithAuthorization` typehash against its literal preimage, the signing digest against a vector computed independently with `cast`, every signed field proving it changes that digest, and the `purchaseWithAuthorization` calldata selector
 - **`session::tests`** (requires `session` feature) - message determinism, tier-diffing, expiry edge cases, sign/verify round-trip, wrong-wallet failure; with `cooldown` adds: `verify_onchain` missing-field + bad-URL paths, `should_reverify` distribution sanity
 - **`session_store::tests`** (requires `session` feature) - save/load round-trip, missing-session, `load_latest_session` picking the freshest valid session (`load_latest_session_for_wallet` narrows the same scan to one signer, covered from `activation::tests`)
@@ -431,7 +431,7 @@ refusal that matters.
   conversion on both rails, a price finer than the unit refused rather than
   rounded, and the wrapper-hash shape including the zero hash the contract reads
   as "unknown"; `repo::tests` covers checkout resolution
-- **`tests/cli.rs`** (17) - the binary itself, driven against a temporary
+- **`tests/cli.rs`** (23) - the binary itself, driven against a temporary
   checkout carrying one manifest or the other. Both subcommands exit 2 on a null
   entry with a message naming the chain and containing no address to paste, and
   print no plan while doing it; a published factory is what gets baked in and
@@ -442,12 +442,25 @@ refusal that matters.
   `--price-usdc` without `--price-token` is refused with the reason; the account
   model without a TBA implementation and a subscription without a period are
   refused; and `there_is_no_fetch_and_no_register_subcommand` asserts the two
-  unbuilt subcommands are absent from the binary and from `--help`
-- **`tests/pack_build_gate.rs`** (5, `#[ignore]`d) - the wrapper's own gate,
+  unbuilt subcommands are absent from the binary and from `--help`. Four of them
+  are about what an exit code and a summary may say: a missing flag, an unknown
+  flag and an unknown subcommand all exit 1 while the null-factory refusal still
+  exits 2, so exit 2 means only "nothing is deployed yet" (clap's own default for
+  a usage error is 2, which is what made this worth pinning); `--help` and
+  `--version` exit 0; an `--app-id` carrying a separator or `..` is refused,
+  since it names a directory the packed binary extracts into; and a deploy
+  summary carrying `--private-key` after `--` prints how many arguments were
+  passed through and none of them, because that summary is printed on every
+  deploy and not only a `--dry-run`. Two more drive a real `pack` with `CARGO`
+  pointed at a stand-in that records the environment it was given: an exported
+  `RUB3_PACK_DEVELOPER_ENS` never reaches the build, and one asked for with
+  `--developer-ens` does
+- **`tests/pack_build_gate.rs`** (6, `#[ignore]`d) - the wrapper's own gate,
   `crates/rub3-wrapper/build.rs`, which is not reachable from the CLI. Each test
   runs a **real `cargo check`** against a poisoned environment and reads what
-  cargo says: a zero factory, a zero contract, a half-configured pack, and the
-  placeholders `null`, `TBD` and `0xYourFactory` are each refused. The fifth is
+  cargo says: a zero factory, a zero contract, a half-configured pack, an app id
+  that would escape the cache directory, and the placeholders `null`, `TBD` and
+  `0xYourFactory` are each refused. The last is
   the positive control - a complete environment builds - without which the other
   four would pass on a gate that refused everything. They are ignored because
   each one costs a compile, and they serialise on a mutex since they share a
@@ -539,4 +552,6 @@ cargo run -p rub3-cli -- pack --binary <app> --app-id com.rub3.example \
 `--factory` is required there because nothing is deployed to a public network, so
 `contracts/deployments.json` publishes no canonical factory for any chain and
 `pack` refuses rather than substituting anything. `rub3-wrapper --version` prints
-every value above out of the binary that carries it.
+every value above out of the binary that carries it, with the endpoint reduced to
+scheme, host and port: `--version` is reachable by every licence holder, and a
+provider key lives in the userinfo, the path or the query.

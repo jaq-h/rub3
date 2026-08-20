@@ -186,6 +186,28 @@ fn a_placeholder_that_is_not_an_address_cannot_be_compiled_in() {
 
 #[test]
 #[ignore = "runs a real cargo check"]
+fn an_app_id_that_escapes_the_cache_directory_cannot_be_compiled_in() {
+    // The app id names the directory the payload is extracted into and the file
+    // the licence proof is stored under, so a separator or `..` would put both
+    // outside the rub3 cache directory.
+    let root = repo_root();
+    let app = app_file();
+    for escape in ["../../../tmp/x", "..", "a/b"] {
+        let output = run(&root, with(app.path(), "RUB3_PACK_APP_ID", escape));
+        assert!(
+            !output.status.success(),
+            "the build accepted the app id {escape}"
+        );
+        assert!(
+            stderr(&output).contains("RUB3_PACK_APP_ID"),
+            "{escape}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+#[ignore = "runs a real cargo check"]
 fn a_complete_pack_environment_builds() {
     // The positive control: without it, every assertion above would still pass
     // if the gate refused everything.

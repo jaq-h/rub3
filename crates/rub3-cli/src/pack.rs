@@ -110,6 +110,36 @@ pub struct PackArgs {
     pub dry_run: bool,
 }
 
+/// `--app-id` has to be one plain path component.
+///
+/// It names a directory the packed binary extracts its application into
+/// (`{data_dir}/rub3/apps/{app_id}/{sha256}/{name}`) and the file its licence
+/// proof is stored under, so a separator would put both somewhere else and `..`
+/// would climb out of the cache directory entirely. The wrapper's `build.rs`
+/// applies the same rule to the same value, since it is reachable without this
+/// command.
+fn check_app_id(app_id: &str) -> Result<(), String> {
+    if app_id.trim().is_empty() {
+        return Err(
+            "--app-id is empty. It names the licence proof and the session on disk.".into(),
+        );
+    }
+    let plain = app_id != "."
+        && app_id != ".."
+        && !app_id.contains('/')
+        && !app_id.contains('\\')
+        && !app_id.contains('\0');
+    if !plain {
+        return Err(format!(
+            "--app-id {app_id} is not a plain name. It becomes a directory the packed binary \
+             extracts its application into and the file name its licence proof is stored under, \
+             so a path separator or `..` would put them outside the rub3 cache directory. Use a \
+             reverse-DNS name such as com.example.myapp."
+        ));
+    }
+    Ok(())
+}
+
 /// A resolved pack: everything the build needs, with nothing left to decide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackPlan {
@@ -165,6 +195,26 @@ impl From<ManifestError> for PackError {
     }
 }
 
+/// Every `RUB3_PACK_*` variable the wrapper's `build.rs` reads.
+///
+/// Listed so the ones a plan does not set can be *removed* from the build's
+/// environment rather than inherited. `RUB3_PACK_DEVELOPER_ENS` is the one that
+/// makes this load-bearing: it is optional, so the wrapper's gate lets a build
+/// through without it, and a stale one exported from an earlier pack would be
+/// compiled into this distributable and shown to every licence holder during
+/// activation as this app's developer.
+const PACK_VARS: &[&str] = &[
+    "RUB3_PACK_APP_ID",
+    "RUB3_PACK_CONTRACT",
+    "RUB3_PACK_CHAIN_ID",
+    "RUB3_PACK_RPC_URL",
+    "RUB3_PACK_SESSION_TTL_SECS",
+    "RUB3_PACK_FACTORY",
+    "RUB3_PACK_APP",
+    "RUB3_PACK_APP_NAME",
+    "RUB3_PACK_DEVELOPER_ENS",
+];
+
 /// Public JSON-RPC endpoints, per chain id.
 ///
 /// A convenience default, not a record of anything: an operator packing for
@@ -204,11 +254,7 @@ impl PackPlan {
         validate_address(&args.contract)
             .map_err(|detail| PackError::Config(format!("--contract {detail}")))?;
 
-        if args.app_id.trim().is_empty() {
-            return Err(PackError::Config(
-                "--app-id is empty. It names the licence proof and the session on disk.".into(),
-            ));
-        }
+        check_app_id(&args.app_id).map_err(PackError::Config)?;
 
         if args.session_ttl == 0 {
             return Err(PackError::Config(
@@ -379,6 +425,17 @@ impl PackPlan {
             "build:       cargo {}\n",
             self.cargo_args().join(" ")
         ));
+        let cleared: Vec<&str> = PACK_VARS
+            .iter()
+            .copied()
+            .filter(|var| !self.env.contains_key(*var))
+            .collect();
+        if !cleared.is_empty() {
+            out.push_str(&format!(
+                "             (removed from the build's environment: {})\n",
+                cleared.join(", ")
+            ));
+        }
         out
     }
 }
@@ -444,9 +501,17 @@ fn build(plan: &PackPlan, repo: &Repo) -> Result<PathBuf, PackError> {
     let mut command = Command::new(&cargo);
     command
         .args(plan.cargo_args())
-        .envs(&plan.env)
         .current_dir(repo.root())
         .stdout(Stdio::piped());
+    // Set what the plan decided, and clear the rest. A pack value the operator
+    // happens to have exported is an identity nobody typed, and the optional
+    // ones are the ones that would survive the wrapper's gate.
+    for var in PACK_VARS {
+        match plan.env.get(*var) {
+            Some(value) => command.env(var, value),
+            None => command.env_remove(var),
+        };
+    }
 
     let mut child = command.spawn().map_err(|source| PackError::Io {
         doing: format!("cannot run {cargo}"),

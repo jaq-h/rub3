@@ -96,9 +96,19 @@ fn var(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| fail(&format!("{name} is not valid UTF-8")))
 }
 
+/// The application's cache directory is named after it, and its licence proof
+/// file is too, so it has to be a plain path component for the same reason
+/// [`check_app_name`] does.
 fn check_app_id(app_id: &str) {
     if app_id.trim().is_empty() {
         fail("RUB3_PACK_APP_ID is empty. It names the licence this binary checks and the file the proof is stored under.");
+    }
+    if !is_path_component(app_id) {
+        fail(&format!(
+            "RUB3_PACK_APP_ID={app_id} is not a plain name. It names the directory this binary \
+             extracts its application into and the file its licence proof is stored under, so a \
+             separator or `..` would put them outside the rub3 cache directory."
+        ));
     }
 }
 
@@ -161,17 +171,24 @@ fn check_session_ttl(value: &str) {
 /// A separator here would let the payload land outside the cache directory the
 /// wrapper extracts into, and `..` would let it climb out of it.
 fn check_app_name(value: &str) {
-    let plausible = !value.is_empty()
-        && value != "."
-        && value != ".."
-        && !value.contains('/')
-        && !value.contains('\\')
-        && !value.contains('\0');
-    if !plausible {
+    if !is_path_component(value) {
         fail(&format!(
             "RUB3_PACK_APP_NAME={value} is not a plain file name"
         ));
     }
+}
+
+/// One path component and nothing else: no separator, no `.` or `..`, no NUL.
+///
+/// Every pack value that becomes part of a path on the machine the
+/// distributable runs on goes through this, so the rule has one owner.
+fn is_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains('\0')
 }
 
 fn check_app(value: &str) {

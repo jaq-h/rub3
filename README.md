@@ -220,7 +220,9 @@ to `{data_dir}/rub3/apps/{app_id}/{sha256}/{name}`, after activation succeeds an
 never before it. A packed binary carries its own application and refuses
 `--binary`; `rub3-wrapper --version` answers which licence it gates on, on which
 chain, through which factory, at which tier and through which front doors,
-without a network call.
+without a network call. The endpoint it names is reduced to scheme, host and
+port, the same rule the RPC error surface holds to, since a provider key lives
+in the userinfo, the path or the query.
 
 **`pack` reads the canonical `Rub3Factory` out of
 [contracts/deployments.json](contracts/deployments.json) and bakes it in beside
@@ -242,14 +244,16 @@ cargo run -p rub3-cli -- deploy \
 `deploy` drives `contracts/script/Deploy.s.sol`, so the deploy path is the one
 the contract tests and [contracts/contracts.md](contracts/contracts.md) already
 exercise. It broadcasts only with `--broadcast`, and everything after `--` goes
-straight to `forge script`, which is where the signer goes. `--dry-run` on
-either subcommand prints the resolved plan and runs nothing.
+straight to `forge script`, which is where the signer goes: the summary printed
+before forge runs reports the invocation the CLI chose and how many arguments
+were passed through, never the arguments themselves. `--dry-run` on either
+subcommand prints the resolved plan and runs nothing.
 
 | Exit | Meaning |
 |---|---|
 | 0 | done |
-| 1 | the command line asked for something impossible or contradictory |
-| 2 | no canonical `Rub3Factory` is published for that chain |
+| 1 | the command line asked for something impossible or contradictory, including an unknown flag or subcommand |
+| 2 | no canonical `Rub3Factory` is published for that chain, and nothing else |
 | 3 | the build (cargo) or the deploy (forge) failed |
 
 ## Testing

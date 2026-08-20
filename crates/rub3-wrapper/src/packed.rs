@@ -223,7 +223,20 @@ fn set_executable(_path: &std::path::Path) -> std::io::Result<()> {
 /// they have are which licence it gates on, on which chain, and which factory
 /// it treats as canonical. All three are compiled in, so answering costs no
 /// network call and cannot be answered differently by a different network.
+///
+/// The endpoint is the one field that is reduced rather than reported: it is
+/// shown as scheme, host and port through [`crate::rpc::redact_urls`], which is
+/// the same rule the error surface holds to and for the same reason, since a
+/// provider key lives in the userinfo, the path or the query.
 pub fn provenance() -> String {
+    render_provenance(RPC_URL)
+}
+
+/// [`provenance`] with the endpoint passed in, so the redaction it applies is
+/// reachable from a test holding a URL that carries a key. `RPC_URL` is a
+/// compile-time constant and a packed one is the only one that ever has a key
+/// in it.
+fn render_provenance(rpc_url: &str) -> String {
     // clap prints this after the binary's own name, so it opens with the
     // version and nothing else.
     let mut out = format!("{}\n", env!("CARGO_PKG_VERSION"));
@@ -236,7 +249,10 @@ pub fn provenance() -> String {
     out.push_str(&format!("\napp id:      {APP_ID}\n"));
     out.push_str(&format!("contract:    {CONTRACT}\n"));
     out.push_str(&format!("chain id:    {CHAIN_ID}\n"));
-    out.push_str(&format!("rpc:         {RPC_URL}\n"));
+    out.push_str(&format!(
+        "rpc:         {}\n",
+        crate::rpc::redact_urls(rpc_url)
+    ));
     out.push_str(&format!(
         "factory:     {}\n",
         FACTORY.unwrap_or("none (development build)")
@@ -335,5 +351,32 @@ mod tests {
             text.contains("none (development build)"),
             "an unpacked build must say so rather than name a factory:\n{text}"
         );
+    }
+
+    #[test]
+    fn provenance_never_hands_out_the_endpoint_key() {
+        // `--version` is reachable by every licence holder, so the endpoint is
+        // reported the way a failed request reports it: scheme, host and port,
+        // and none of the three places a provider key is put.
+        for endpoint in [
+            "https://base-mainnet.g.alchemy.com/v2/s3cr3t-key",
+            "https://base-mainnet.example.com/rpc?apiKey=s3cr3t-key",
+            "https://s3cr3t-key@base-mainnet.example.com/rpc",
+        ] {
+            let text = render_provenance(endpoint);
+            assert!(
+                !text.contains("s3cr3t-key"),
+                "provenance printed the key from {endpoint}:\n{text}"
+            );
+            assert!(
+                text.contains("base-mainnet."),
+                "the host is what an operator chasing a dead endpoint needs:\n{text}"
+            );
+        }
+
+        // Fail closed: an authority that will not parse is dropped whole rather
+        // than passed through as prose.
+        let text = render_provenance("https://[not-an-address/v2/s3cr3t-key");
+        assert!(!text.contains("s3cr3t-key"), "{text}");
     }
 }

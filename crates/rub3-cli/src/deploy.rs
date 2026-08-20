@@ -179,8 +179,17 @@ pub struct DeployPlan {
     /// What the script reads. Anything absent here is removed from the child's
     /// environment rather than inherited.
     pub env: BTreeMap<String, String>,
-    /// The arguments after `forge`.
+    /// The arguments after `forge` that this command chose: the script, the
+    /// endpoint, and `--broadcast` when it was asked for.
     pub forge_args: Vec<String>,
+    /// What the operator put after `--`, handed to forge untouched.
+    ///
+    /// Kept apart from [`DeployPlan::forge_args`] so that [`DeployPlan::render`]
+    /// can report the invocation without reporting these: this is where the
+    /// signer goes, and the summary is printed on every deploy, not only a
+    /// `--dry-run`, so echoing it would put an expanded `--private-key` in
+    /// terminal scrollback and in any CI log that captures the step.
+    pub passthrough: Vec<String>,
     /// The chain, for the summary.
     pub chain: Chain,
     /// How the factory was decided.
@@ -428,11 +437,10 @@ impl DeployPlan {
         if args.broadcast {
             forge_args.push("--broadcast".to_string());
         }
-        forge_args.extend(args.forge_args.iter().cloned());
-
         Ok(DeployPlan {
             env,
             forge_args,
+            passthrough: args.forge_args.clone(),
             chain,
             factory,
             broadcast: args.broadcast,
@@ -487,6 +495,14 @@ impl DeployPlan {
             }
         ));
         out.push_str(&format!("run:       forge {}\n", self.forge_args.join(" ")));
+        if !self.passthrough.is_empty() {
+            let n = self.passthrough.len();
+            out.push_str(&format!(
+                "           plus {n} argument{} passed straight to forge, not shown here: that \
+                 is where the signer goes\n",
+                if n == 1 { "" } else { "s" }
+            ));
+        }
         out.push_str("environment:\n");
         for (key, value) in &self.env {
             out.push_str(&format!("  {key}={value}\n"));
@@ -510,7 +526,10 @@ impl DeployPlan {
 pub fn execute(plan: &DeployPlan, repo: &Repo) -> Result<(), DeployError> {
     let contracts: PathBuf = repo.path("contracts");
     let mut command = Command::new("forge");
-    command.args(&plan.forge_args).current_dir(&contracts);
+    command
+        .args(&plan.forge_args)
+        .args(&plan.passthrough)
+        .current_dir(&contracts);
     // Set what the plan decided, and clear the rest. An inherited value is a
     // deploy input nobody typed.
     for var in SCRIPT_VARS {

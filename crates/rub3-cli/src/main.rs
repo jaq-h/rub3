@@ -1,5 +1,6 @@
 //! The `rub3` command.
 
+use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -15,6 +16,12 @@ const EXIT_USAGE: i32 = 1;
 /// code because it is the one failure that is nobody's mistake: it is what
 /// every chain says until launch, and an orchestrator should be able to tell it
 /// from a typo without reading the message.
+///
+/// That contract only holds if nothing else exits 2, and clap's own default is
+/// to exit 2 on every usage error - a missing flag, an unknown flag, an unknown
+/// subcommand. So the command line is parsed with `try_parse` and those are
+/// reported as [`EXIT_USAGE`], which is what the table in `--help` and in
+/// `README.md` promises for them.
 const EXIT_NO_CANONICAL_FACTORY: i32 = 2;
 /// The tool this command drives - cargo, or forge - failed.
 const EXIT_TOOL_FAILED: i32 = 3;
@@ -53,7 +60,18 @@ enum Command {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // clap writes help and version to stdout and everything else to
+            // stderr; only the exit code is this command's to decide.
+            let _ = e.print();
+            match e.kind() {
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => std::process::exit(0),
+                _ => std::process::exit(EXIT_USAGE),
+            }
+        }
+    };
 
     let repo = match Repo::resolve(cli.repo_root) {
         Ok(repo) => repo,
