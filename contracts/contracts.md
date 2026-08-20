@@ -52,6 +52,8 @@ One block is exempt, via the formatter's own `// forgefmt: disable-next-item` ma
 
 Prefer that marker, scoped to one item, over a config change, whenever a single block needs to keep its shape.
 
+One block keeps its shape without a marker and must go on doing so: the `string[30] memory forbidden` list in `test/Rub3Invariants.t.sol`. `prefer_compact = "none"` and `line_length = 100` leave it one signature per line, and that is the layout the wrapper's mirror test parses when it checks `attest::FORBIDDEN_SIGNATURES` against the Solidity list. A `[fmt]` change that repacked the array would turn that Rust test red rather than drift in silence, but the coupling is worth knowing before touching the settings. The sibling `string[10]` in `test/Rub3CodeRegistry.t.sol` has the same shape and no such reader.
+
 ## Local testing with Anvil
 
 No `.env` file needed. Forge tests use Foundry's built-in VM - they run against an in-process EVM with no network.
@@ -700,7 +702,7 @@ Two keys are dropped from that settings object. `compilationTarget` is per-contr
 
 Beyond those recorded inputs nothing else moves the fingerprint: not the `forge` version (it fetches and drives the pinned `solc` rather than compiling anything itself), not the checkout path, not comments in the source.
 
-The `forge` version earns one caveat, because it is the only entry on that list that can still turn the blocking gate red. forge assembles the standard-json input it hands to solc, so a forge release that starts passing an extra setting, or stops passing one, changes the `solc_settings` block the manifest records even though every fingerprint is byte-identical. The gate diffs the whole manifest, so that reads as drift. `.github/workflows/ci.yml` therefore pins `foundry-rs/foundry-toolchain` to a fixed forge version for the `bytecode-fingerprints` job alone, so an unrelated pull request cannot go red because a new forge shipped that morning. Bumping that pin is a deliberate act: raise it and commit the regenerated manifest in the same pull request.
+The `forge` version earns one caveat, because it is the only entry on that list that can still turn the blocking gate red. forge assembles the standard-json input it hands to solc, so a forge release that starts passing an extra setting, or stops passing one, changes the `solc_settings` block the manifest records even though every fingerprint is byte-identical. The gate diffs the whole manifest, so that reads as drift. `.github/workflows/ci.yml` therefore pins `foundry-rs/foundry-toolchain` to a fixed forge version for the `bytecode-fingerprints` job, so an unrelated pull request cannot go red because a new forge shipped that morning. It is one of the two gates in that file that pin; the other is the `forge fmt --check` step of the `lint` job, and the two pin the same version and move together. Bumping the pin is a deliberate act, and `.github/workflows/ci.yml` owns the rule and the procedure for both gates: see its `WHICH FOUNDRY JOBS PIN forge, AND WHY` and `HOW TO BUMP THE PIN` comments.
 
 The checkout path and the comments in the source are the reason `bytecode_hash = "none"` is set. With solc's default (`ipfs`) the compiler appends a CBOR metadata trailer that hashes the metadata JSON, and that JSON covers comment text and source file paths. Measured on these contracts:
 

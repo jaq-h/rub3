@@ -133,8 +133,8 @@ jobs:
   # comment beside it. `forge fmt` (from contracts/) is always the whole fix for
   # a red step. The checkout here takes no submodules on purpose: `forge fmt`
   # parses and reprints, it never resolves an import, so it needs neither
-  # lib/openzeppelin-contracts nor lib/forge-std. It runs after the two cargo
-  # steps because it is the cheap one and the toolchain install is not.
+  # lib/openzeppelin-contracts nor lib/forge-std. It runs after the cargo steps
+  # because it is the cheap one and the toolchain install is not.
   #
   # That same "never resolves an import" property is why forge itself is pinned
   # for this step: the formatter never invokes solc, so foundry.toml's
