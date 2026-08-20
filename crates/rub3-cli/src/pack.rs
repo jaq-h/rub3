@@ -203,6 +203,12 @@ impl From<ManifestError> for PackError {
 /// through without it, and a stale one exported from an earlier pack would be
 /// compiled into this distributable and shown to every licence holder during
 /// activation as this app's developer.
+///
+/// `crates/rub3-wrapper/build.rs` holds the same list, where it decides which
+/// variables are read and validated. The duplication is forced: this crate
+/// stays off the wrapper's dependency path, so there is no crate the two could
+/// share it from. A `RUB3_PACK_*` added there and not here would be inherited
+/// from the operator's shell rather than cleared.
 const PACK_VARS: &[&str] = &[
     "RUB3_PACK_APP_ID",
     "RUB3_PACK_CONTRACT",

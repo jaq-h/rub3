@@ -219,7 +219,7 @@ jobs:
       - name: Pack build gate (real cargo check runs)
         env:
           # Update when a test is added to or removed from this suite.
-          EXPECTED_TESTS: 5
+          EXPECTED_TESTS: 6
         run: |
           set -o pipefail
           log="${RUNNER_TEMP:-/tmp}/pack_build_gate.log"
