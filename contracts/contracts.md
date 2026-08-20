@@ -510,9 +510,9 @@ Stated plainly, because it is a decided trade-off rather than a gap:
 
 **The factory path stamps 200-300 bps and grants an `isDeployed` row.** That is the entire difference.
 
-**What the row buys today:** a durable, immutable, on-chain record that this contract was deployed through a specific factory - a canonical referent that anyone can check, and the eligibility criterion for the registry and marketplace when they exist.
+**What the row buys today:** a durable, immutable, on-chain record that this contract was deployed through a specific factory - a canonical referent that anyone can check, and the eligibility criterion for the registry and marketplace once they are live.
 
-**What is planned, not shipped:** the registry (§3.2) and the marketplace (§4.3). Until they land, the row buys the record and the future eligibility, and no distribution, no verification service, and no liquidity. Do not read the fee's rationale as a description of features that exist.
+**What is built, and what is not:** the registry (§3.2) is built and tested and deployed nowhere; the marketplace (§4.3) is not built. Until both are live, the row buys the record and the future eligibility, and no distribution, no verification service, and no liquidity. Do not read the fee's rationale as a description of features that exist.
 
 **The fee does not go live ahead of the registry.** The contracts are not deployed to mainnet, and are not declared ready for use, until the registry is ready: the factory and the registry launch together. So there is no window in which a developer pays a live fee for a carrot that does not exist yet.
 
