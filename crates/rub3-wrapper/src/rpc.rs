@@ -864,18 +864,23 @@ impl Cancel {
     }
 }
 
-/// When a watch must stop: a wall-clock budget, and the flag that can end it
-/// sooner.
+/// When a watch may run: a wall-clock budget, the flag that can end it sooner,
+/// and the moment before which there is nothing worth asking about.
 ///
-/// The two travel together deliberately. They are the same question - "should
-/// this still be running?" - asked of a clock and of a person, and a watch that
-/// consulted only one of them would either outlive its screen or ignore its
-/// budget. Bundling them also means a call site cannot pass a budget and forget
-/// the cancellation.
+/// The budget and the flag travel together deliberately. They are the same
+/// question - "should this still be running?" - asked of a clock and of a
+/// person, and a watch that consulted only one of them would either outlive its
+/// screen or ignore its budget. Bundling them also means a call site cannot pass
+/// a budget and forget the cancellation.
+///
+/// The hold answers the other half of the same question, "should this be running
+/// *yet*", which the cooldown screen is the reason for: see
+/// [`Deadline::starting_in`].
 #[cfg(feature = "onchain-write")]
 #[derive(Clone)]
 pub struct Deadline {
     at: std::time::Instant,
+    not_before: Option<std::time::Instant>,
     cancel: Cancel,
 }
 
@@ -885,6 +890,7 @@ impl Deadline {
     pub fn after(budget: std::time::Duration) -> Deadline {
         Deadline {
             at: std::time::Instant::now() + budget,
+            not_before: None,
             cancel: Cancel::new(),
         }
     }
@@ -892,6 +898,45 @@ impl Deadline {
     /// The same budget, endable early through `cancel`.
     pub fn cancelled_by(self, cancel: Cancel) -> Deadline {
         Deadline { cancel, ..self }
+    }
+
+    /// The same budget, but not spent until `delay` has passed.
+    ///
+    /// The budget is the answer to "how long will we look", so a wait the chain
+    /// imposes before there is anything to look at has to be added to it rather
+    /// than taken out of it - which is why `at` moves too. The cooldown screen
+    /// is the case: the contract reverts an `activate()` until the cooldown runs
+    /// out, so a watch armed the moment that screen renders would spend its
+    /// whole budget polling for a transaction the chain is guaranteed not to
+    /// have, and hand back to the manual paste before the user could legally
+    /// send one. On this project's default cooldown of 1800 blocks that is an
+    /// hour early.
+    ///
+    /// Holding loses nothing, because a watch reads state rather than events: a
+    /// transaction broadcast during the hold is still there to be found on the
+    /// first poll after it. Cancellation is honoured throughout the hold, so a
+    /// held watch is no more able to outlive its screen than a polling one.
+    pub fn starting_in(self, delay: std::time::Duration) -> Deadline {
+        if delay.is_zero() {
+            return self;
+        }
+        let now = std::time::Instant::now();
+        Deadline {
+            at: self.at + delay,
+            not_before: Some(now + delay),
+            ..self
+        }
+    }
+
+    /// Sleeps out the hold, or says why the watch must stop instead of polling.
+    fn hold(&self) -> Option<WatchEnd> {
+        let left = self
+            .not_before?
+            .saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        self.sleep(left)
     }
 
     /// Why the watch must stop right now, or `None` while it may continue.
@@ -948,6 +993,12 @@ fn watch<F>(
 where
     F: FnMut() -> Result<Option<String>, RpcError>,
 {
+    // Nothing is asked of the endpoint until the deadline says there is
+    // something to ask about; see `Deadline::starting_in`.
+    if let Some(end) = deadline.hold() {
+        return Err(RpcError::WatchEnded(end));
+    }
+
     let mut consecutive_errors = 0u32;
     loop {
         if let Some(end) = deadline.reached() {
@@ -2692,6 +2743,82 @@ mod watch_loop_tests {
         .expect_err("a cancelled watch must not return a hash");
         assert_eq!(end_of(&err), WatchEnd::Cancelled);
         assert_eq!(polls.load(Ordering::Relaxed), 0);
+    }
+
+    /// A held watch asks nothing until the hold is over, and then gets its whole
+    /// budget.
+    ///
+    /// Both halves matter and only together. Without the first, the cooldown
+    /// screen polls an endpoint for an hour for a transaction the contract
+    /// refuses to accept. Without the second, the hold would be spent out of the
+    /// budget and the watch would give up at the very moment it became able to
+    /// see anything.
+    #[test]
+    fn a_held_watch_polls_nothing_until_the_hold_is_over() {
+        const HOLD: Duration = Duration::from_millis(300);
+
+        let deadline = Deadline::after(Duration::from_millis(200)).starting_in(HOLD);
+        let polls = AtomicU32::new(0);
+        let started = Instant::now();
+        let hash = watch(
+            || {
+                polls.fetch_add(1, Ordering::Relaxed);
+                Ok(Some(HASH.to_string()))
+            },
+            &deadline,
+            TICK,
+        )
+        .expect("the budget must start when the hold ends, not before it");
+
+        assert_eq!(hash, HASH);
+        assert_eq!(polls.load(Ordering::Relaxed), 1);
+        assert!(
+            started.elapsed() >= HOLD,
+            "the watch polled inside its hold ({:?})",
+            started.elapsed(),
+        );
+    }
+
+    /// Cancellation reaches a watch that is holding, as promptly as it reaches
+    /// one that is polling.
+    ///
+    /// A hold is the longest a watch is ever asleep, so it is also the longest a
+    /// leaked thread would go unnoticed. A screen the user has left must stop it
+    /// there too.
+    #[test]
+    fn a_cancelled_watch_stops_inside_its_hold() {
+        let cancel = Cancel::new();
+        let deadline = Deadline::after(Duration::from_secs(30))
+            .starting_in(Duration::from_secs(30))
+            .cancelled_by(cancel.clone());
+
+        let polls = AtomicU32::new(0);
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel.cancel();
+        });
+        let err = watch(
+            || {
+                polls.fetch_add(1, Ordering::Relaxed);
+                Ok(None)
+            },
+            &deadline,
+            TICK,
+        )
+        .expect_err("a cancelled watch must not return a hash");
+
+        assert_eq!(end_of(&err), WatchEnd::Cancelled);
+        assert_eq!(
+            polls.load(Ordering::Relaxed),
+            0,
+            "a watch cancelled while holding never had anything to ask",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cancellation waited out the hold ({:?})",
+            started.elapsed(),
+        );
     }
 }
 

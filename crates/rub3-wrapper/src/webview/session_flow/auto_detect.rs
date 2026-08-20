@@ -328,7 +328,80 @@ fn the_two_ways_of_giving_up_say_different_things() {
     );
 }
 
+/// An activation watch waits out the cooldown before it polls for anything, and
+/// then polls.
+///
+/// The contract reverts an `activate()` until the cooldown runs out, so a watch
+/// armed the moment the cooldown screen renders is looking for a transaction the
+/// chain is guaranteed not to have. On this project's default cooldown of 1800
+/// blocks that is roughly an hour of polling the user's endpoint, ending in a
+/// fallback to the manual tab fifty-eight minutes before the transaction it is
+/// asking for could legally be sent - auto-detect could never succeed there.
+///
+/// Both halves are asserted because either alone would pass on a broken watch:
+/// one that never polls is quiet too, and one that ignores the cooldown reaches
+/// the endpoint eventually as well.
+#[test]
+#[cfg(feature = "cooldown")]
+fn an_activation_watch_waits_out_the_cooldown_before_polling() {
+    let node = cooling_node();
+    let window = window_on(&node.url);
+
+    window.post(serde_json::json!({
+        "type":          "auto_watch_start",
+        "kind":          "activate",
+        "owner_address": WALLET,
+        "token_id":      TOKEN_ID,
+    }));
+    // The head read and the cooldown read the watch opens with, and then the
+    // hold: nothing more for longer than a poll interval.
+    settle(&node);
+    assert_quiet(&node, "while the cooldown it is waiting out has not ended");
+
+    let before = node.request_count();
+    let deadline = Instant::now() + cooldown_hold() * 4;
+    while node.request_count() == before {
+        assert!(
+            Instant::now() < deadline,
+            "the watch never resumed once its cooldown had passed",
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    window.post(serde_json::json!({ "type": "auto_watch_cancel" }));
+}
+
 // ── Watching the watcher ──────────────────────────────────────────────────────
+
+/// A cooldown short enough to sit through in a test, and long enough that a
+/// watch ignoring it would be caught polling inside it - [`assert_quiet`] waits
+/// out a poll interval plus a margin, and this has to outlast that.
+#[cfg(feature = "cooldown")]
+const COOLDOWN_BLOCKS_REMAINING: u64 = 3;
+
+/// How long that cooldown is expected to take, from the wrapper's own estimate
+/// rather than a second copy of it here.
+#[cfg(feature = "cooldown")]
+fn cooldown_hold() -> Duration {
+    crate::webview::cooldown_wait(COOLDOWN_BLOCKS_REMAINING)
+}
+
+/// A node whose token is mid-cooldown: `cooldownReady` says not yet, with
+/// [`COOLDOWN_BLOCKS_REMAINING`] to go.
+///
+/// Nothing else needs an answer, because a watch that respects the cooldown asks
+/// nothing else until it has passed - which is what the test is about.
+#[cfg(feature = "cooldown")]
+fn cooling_node() -> StubNode {
+    StubNode::routed(|method, _params| match method {
+        "eth_blockNumber" => serde_json::json!(format!("0x{HEAD:x}")),
+        "eth_call" => {
+            serde_json::json!(format!("0x{:064x}{COOLDOWN_BLOCKS_REMAINING:064x}", 0))
+        }
+        "eth_getLogs" => serde_json::json!([]),
+        _ => serde_json::json!(null),
+    })
+}
 
 /// A node that answers every poll with "nothing yet", so a watch against it
 /// runs until its budget or its cancellation - whichever the test is about.

@@ -534,20 +534,36 @@ impl IpcState {
 
         let calldata = crate::rpc::encode_activate_calldata(token_id);
 
+        // The cooldown in seconds as well as in blocks: the screen speaks in
+        // both, and the number is estimated here rather than in the page so the
+        // copy, the drain bar and the watch's own hold share one estimate.
+        let cooldown_secs = if ready {
+            0
+        } else {
+            cooldown_wait(blocks_remaining).as_secs()
+        };
+
         #[cfg_attr(not(feature = "onchain-write"), allow(unused_mut))]
         let mut payload = serde_json::json!({
-            "tokenId":         token_id,
-            "ownerAddress":    address,
-            "contractAddress": self.contract,
-            "chainId":         self.chain_id,
-            "ready":           ready,
-            "blocksRemaining": blocks_remaining,
-            "calldata":        calldata,
+            "tokenId":               token_id,
+            "ownerAddress":          address,
+            "contractAddress":       self.contract,
+            "chainId":               self.chain_id,
+            "ready":                 ready,
+            "blocksRemaining":       blocks_remaining,
+            "cooldownSecsRemaining": cooldown_secs,
+            "calldata":              calldata,
         });
         // Present only where a watch can actually run, because its presence is
         // what puts the Auto-detect tab on the screen (§5.1). Same mechanism
         // §5.1b's `wc_project_id` will use, so the page keeps one rule for
         // which tabs exist rather than one per mode.
+        //
+        // The budget is the watching and not the waiting: inside a cooldown the
+        // watch holds until the contract will accept an `activate()` and only
+        // then spends it. The page draws its bar the same way, from this budget
+        // and the cooldown above, so the bar running out and the watch giving up
+        // stay one moment.
         #[cfg(feature = "onchain-write")]
         {
             payload["autoWatchSecs"] = crate::rpc::WATCH_BUDGET.as_secs().into();
@@ -705,8 +721,36 @@ impl IpcState {
                 }
             };
 
-            let deadline =
-                crate::rpc::Deadline::after(crate::rpc::WATCH_BUDGET).cancelled_by(cancel.clone());
+            // How long before there is anything for this watch to find. A mint
+            // can land in the next block, so a purchase watch starts now. An
+            // activation cannot: the contract reverts one until the cooldown the
+            // screen is showing runs out, and on the default 1800 blocks a watch
+            // armed now would give up an hour before the user could legally
+            // send. Read fresh rather than echoed by the page, which learned it
+            // when the screen opened and may have been sitting on the manual tab
+            // since.
+            let hold = match kind {
+                AutoWatchKind::Mint => std::time::Duration::ZERO,
+                #[cfg(feature = "cooldown")]
+                AutoWatchKind::Activate => match token_id {
+                    Some(id) => {
+                        match crate::rpc::cooldown_ready(&state.rpc_url, contract_addr, id) {
+                            Ok((_, blocks_remaining)) => cooldown_wait(blocks_remaining),
+                            Err(e) => {
+                                state.auto_watch_ended(kind, &cancel, &e);
+                                return;
+                            }
+                        }
+                    }
+                    None => std::time::Duration::ZERO,
+                },
+                #[cfg(not(feature = "cooldown"))]
+                AutoWatchKind::Activate => std::time::Duration::ZERO,
+            };
+
+            let deadline = crate::rpc::Deadline::after(crate::rpc::WATCH_BUDGET)
+                .starting_in(hold)
+                .cancelled_by(cancel.clone());
 
             match kind {
                 AutoWatchKind::Mint => {
@@ -1002,6 +1046,26 @@ impl IpcState {
     fn eval_err(&self, msg: &str) {
         self.eval(format!("window.rub3.onError({})", serde_json::json!(msg)));
     }
+}
+
+// ── How long a cooldown has left, in seconds ─────────────────────────────────
+
+/// Seconds per block, as an estimate.
+///
+/// A cooldown is denominated in blocks, but everything that consumes one is
+/// denominated in time: the sentence the screen shows, the bar that drains
+/// beside it, and the hold an auto-detect watch takes before there is anything
+/// to watch for. Base's target is 2 s, and this is the project's only copy of
+/// that number so those three cannot disagree with each other - the screen is
+/// explicit that it is an estimate, and the watch treats it as one, holding
+/// only to avoid a poll that cannot succeed rather than to time anything.
+#[cfg(feature = "cooldown")]
+const ESTIMATED_BLOCK_SECS: u64 = 2;
+
+/// How long `blocks_remaining` of cooldown is expected to take.
+#[cfg(feature = "cooldown")]
+fn cooldown_wait(blocks_remaining: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(blocks_remaining.saturating_mul(ESTIMATED_BLOCK_SECS))
 }
 
 // ── When auto-detect gives up, in a person's words ───────────────────────────

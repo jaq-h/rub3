@@ -479,7 +479,7 @@
 
       <div class="watch" data-tab-body="auto">
         <div class="spinner"></div>
-        <p class="watch-head">Waiting for your wallet to broadcast the tx…</p>
+        <p class="watch-head" id="cd-watch-head">Waiting for your wallet to broadcast the tx…</p>
         <p class="watch-sub" id="cd-watch-sub">Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.</p>
         <div class="watch-bar"><i></i></div>
         <button type="button" class="linkish" data-switch-tab="manual">Switch to manual</button>
@@ -608,6 +608,19 @@
     return whole.toString() + '.' + fracStr;
   }
 
+  // A wait in the unit someone would actually use for it. "~3600 seconds" is
+  // the same fact as "~1 hour" and nobody reads it as one, and the cooldown this
+  // formats defaults to 1800 blocks.
+  function approxDuration(secs) {
+    if (secs < 90) return '~' + secs + ' seconds';
+    const mins = Math.round(secs / 60);
+    if (mins < 60) return '~' + mins + ' minutes';
+    const hours = Math.floor(mins / 60);
+    const rest  = mins % 60;
+    const hoursPart = '~' + hours + ' hour' + (hours === 1 ? '' : 's');
+    return rest ? hoursPart + ' ' + rest + ' min' : hoursPart;
+  }
+
   // ── Confirmation modes (§5.1) ─────────────────────────────────────────────
   //
   // The purchase and cooldown screens both end in the same question: how does
@@ -636,9 +649,9 @@
   const activeTab     = { purchase: null, cooldown: null };
 
   // When the cooldown on screen is expected to end, as a wall-clock stamp, or 0
-  // when it already has. The watch outlives short cooldowns and expires inside
-  // long ones, so what the fallback should say depends on which of the two this
-  // turned out to be. Same estimate the screen itself shows: ~2 s per block.
+  // when it already has. The wrapper estimates it and sends it; the page never
+  // does its own arithmetic on blocks, so the sentence, the bar and the watch's
+  // own hold cannot disagree about when the wait ends.
   let cooldownEndsAt = 0;
 
   function screenEl(screen) {
@@ -697,28 +710,50 @@
     const ctx = screen === 'purchase' ? pendingPurchaseCtx : pendingSessionCtx;
     if (!ctx) return;
 
+    // The hint on the manual panel describes a watch that has ended. This one
+    // has not, so whatever it said is now about a watch that was superseded.
+    setTabHint(screen, '');
     restartDrain(screen);
     post(screen === 'purchase'
       ? { type: 'auto_watch_start', kind: 'mint',     owner_address: ctx.ownerAddress, token_id: null }
       : { type: 'auto_watch_start', kind: 'activate', owner_address: ctx.ownerAddress, token_id: ctx.tokenId });
   }
 
+  // How long this watch will sit before it has anything to look for, in seconds.
+  //
+  // The same hold the wrapper's watcher takes: inside a cooldown the contract
+  // reverts an `activate()`, so neither of them starts spending the budget until
+  // the chain could accept one. Read from the clock on every arming rather than
+  // stored, so a tab flipped away from and back to ten minutes later waits out
+  // what is left rather than the whole cooldown again.
+  function autoWatchHoldSecs(screen) {
+    if (screen !== 'cooldown' || !cooldownEndsAt) return 0;
+    return Math.max(0, Math.ceil((cooldownEndsAt - Date.now()) / 1000));
+  }
+
   // Runs the progress bar down over the wrapper's own budget, so the bar
-  // emptying and the watch giving up are one moment rather than two.
+  // emptying and the watch giving up are one moment rather than two. Through a
+  // hold the bar stays full: nothing is being spent yet, and a bar that drained
+  // during it would promise an answer at the wrong moment.
   function restartDrain(screen) {
     const bar  = screenEl(screen).querySelector('.watch-bar > i');
     const secs = autoWatchSecs[screen];
     if (!bar || !secs) return;
     bar.style.animation = 'none';
     void bar.offsetWidth;                       // reflow, so the restart takes
-    bar.style.animation = 'drain ' + secs + 's linear forwards';
+    bar.style.animation =
+      'drain ' + secs + 's linear ' + autoWatchHoldSecs(screen) + 's forwards';
   }
 
   // What the manual tab says once a watch has given up. Usually the wrapper's
   // own sentence, which knows how long it watched and what for. The one thing it
-  // cannot know is the cooldown: it has no view of how many blocks are left, and
-  // its "send it now" would be asking for a transaction the contract still
-  // reverts, which costs the person gas and gets them nothing.
+  // cannot know is the cooldown: its "send it now" would be asking for a
+  // transaction the contract still reverts, which costs the person gas and gets
+  // them nothing.
+  //
+  // A watch holds until the cooldown ends before spending its budget, so this
+  // covers what is left over: an endpoint that failed during the hold, and a
+  // chain producing blocks slower than the estimate the wait was drawn from.
   function autoWatchHint(screen, data) {
     if (screen !== 'cooldown' || Date.now() >= cooldownEndsAt) return data.detail;
     return data.reason === 'timeout'
@@ -897,7 +932,7 @@
 
     // Tier 3 - ownership confirmed, show cooldown + calldata.
     // data: { tokenId, ownerAddress, contractAddress, chainId, ready,
-    //         blocksRemaining, calldata }
+    //         blocksRemaining, cooldownSecsRemaining, calldata }
     onShowCooldown(data) {
       pendingSessionCtx = {
         tokenId:         data.tokenId,
@@ -914,22 +949,28 @@
       const waitBox       = document.getElementById('cd-wait');
       const blocksDisplay = document.getElementById('cd-blocks-remaining');
       const cooling       = !data.ready && data.blocksRemaining > 0;
-      cooldownEndsAt      = cooling ? Date.now() + data.blocksRemaining * 2000 : 0;
+      const waitSecs      = data.cooldownSecsRemaining || 0;
+      cooldownEndsAt      = cooling ? Date.now() + waitSecs * 1000 : 0;
       if (cooling) {
         waitBox.classList.remove('hidden');
         blocksDisplay.textContent =
           data.blocksRemaining + ' block' + (data.blocksRemaining === 1 ? '' : 's')
-          + ' (~' + (data.blocksRemaining * 2) + ' seconds on Base)';
+          + ' (' + approxDuration(waitSecs) + ' on Base)';
       } else {
         waitBox.classList.add('hidden');
       }
 
-      // Inside the cooldown the contract will refuse the tx, so "send it and
-      // we'll spot it" would be telling someone to do something that cannot
-      // work yet. The watch still runs - it costs nothing and the window is
-      // usually shorter than the budget - but the copy says what to wait for.
+      // Inside the cooldown the contract refuses the tx, so "send it and we'll
+      // spot it" would be telling someone to do something that cannot work yet -
+      // and a watch armed now would be looking for a transaction the chain is
+      // guaranteed not to have. Both wait: the wrapper holds its watch until the
+      // cooldown ends, and the copy says so rather than promising to be looking
+      // already.
+      document.getElementById('cd-watch-head').textContent = cooling
+        ? 'Waiting for the cooldown to end…'
+        : 'Waiting for your wallet to broadcast the tx…';
       document.getElementById('cd-watch-sub').textContent = cooling
-        ? 'The contract will accept the transaction once the cooldown above ends. Send it then; we are watching the chain and will pick it up on our own.'
+        ? 'The contract will accept the transaction once the cooldown above ends. Send it then: we start watching the chain as the cooldown runs out, and will pick it up on our own.'
         : 'Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.';
 
       show('cooldown', data.autoWatchSecs);
