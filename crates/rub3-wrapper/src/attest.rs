@@ -614,9 +614,10 @@ const PUSH32: u8 = 0x7f;
 ///    and that is what turns "we did not look at these bytes" into "these bytes
 ///    cannot execute". It holds by construction on compiler output: solc
 ///    compiles every read of an immutable to a `PUSH32` whose operand the
-///    deployer fills in. Measured on all three of this repository's contracts
-///    that have immutables - `Rub3Access`, `Rub3Subscription` and `Rub3Factory`;
-///    the two deployer helpers and the registry have none - not assumed. Should
+///    deployer fills in. Measured on all four of this repository's contracts
+///    that have immutables - `Rub3Access`, `Rub3Subscription`, `Rub3Factory` and
+///    `Rub3Registry`; the two deployer helpers and `Rub3CodeRegistry` have none
+///    - not assumed. Should
 ///    a future compiler emit them another way, this rejects the registry's table
 ///    and the gate falls back to refusing - fail-closed, on the path that spends
 ///    money, which is the right direction to be wrong in.
