@@ -3429,21 +3429,18 @@ mod watch_rpc_tests {
     #[test]
     fn a_request_that_is_never_answered_is_abandoned() {
         const LIMIT: Duration = Duration::from_millis(300);
-        // Far longer than the limit, so passing by outlasting the stub is not
-        // available to a build that dropped the bound.
-        const NEVER: Duration = Duration::from_secs(20);
+        // Comfortably above the limit and far below anything an unbounded wait
+        // would reach, so neither a slow machine nor a lost bound is ambiguous.
+        const TOO_LONG: Duration = Duration::from_secs(3);
 
-        let node = StubNode::routed(|_method, _params| {
-            std::thread::sleep(NEVER);
-            serde_json::Value::Null
-        });
+        let node = StubNode::hanging();
 
         let started = std::time::Instant::now();
         let err = get_block_number_within(&node.url, LIMIT)
             .expect_err("a request that is never answered must not return a block");
 
         assert!(
-            started.elapsed() < NEVER,
+            started.elapsed() < TOO_LONG,
             "the request was not abandoned: it waited {:?}",
             started.elapsed(),
         );

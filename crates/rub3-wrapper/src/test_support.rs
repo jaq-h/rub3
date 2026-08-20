@@ -42,7 +42,19 @@ enum Reply {
     /// Unused below tier 3, where nothing makes more than one kind of call.
     #[cfg_attr(not(feature = "onchain-write"), allow(dead_code))]
     Routed(Box<Responder>),
+    /// Read the request and never answer it. See [`StubNode::hanging`].
+    #[cfg_attr(not(feature = "onchain-write"), allow(dead_code))]
+    Never,
 }
+
+/// How long [`Reply::Never`] holds a connection before closing it unanswered.
+///
+/// "Never" is really "until this node is dropped", which is immediate: the
+/// accept thread wakes on the shutdown flag within one slice. The cap exists
+/// only for the caller that never gets that far, because the code under test
+/// waited forever on the answer - it turns that into a slow failing test rather
+/// than a suite that hangs.
+const HANG_LIMIT: Duration = Duration::from_secs(10);
 
 impl StubNode {
     pub fn serving(body: &'static str) -> Self {
@@ -62,6 +74,21 @@ impl StubNode {
         F: Fn(&str, &serde_json::Value) -> serde_json::Value + Send + Sync + 'static,
     {
         Self::with_reply(Reply::Routed(Box::new(responder)))
+    }
+
+    /// A node that takes the request and then answers nothing - an endpoint
+    /// that has accepted the connection and gone quiet, which is an ordinary
+    /// overload mode for a public RPC rather than a contrived one.
+    ///
+    /// Waiting rather than sleeping is what makes it cheap. The responder runs
+    /// inline on the accept thread and [`StubNode::drop`] joins that thread, so
+    /// a stub that stalled for a fixed duration would charge every run of the
+    /// test that duration at teardown, whether or not anything was still
+    /// waiting on it. This one is released by the same shutdown flag the accept
+    /// loop polls, so a test that has finished with it pays a slice.
+    #[cfg_attr(not(feature = "onchain-write"), allow(dead_code))]
+    pub fn hanging() -> Self {
+        Self::with_reply(Reply::Never)
     }
 
     /// How many complete requests this node has answered.
@@ -96,7 +123,7 @@ impl StubNode {
             while !flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        if answer(stream, &reply) {
+                        if answer(stream, &reply, &flag) {
                             counter.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -141,9 +168,10 @@ impl Drop for StubNode {
 ///    socket with bytes still queued unread sends a reset instead of a
 ///    clean shutdown, and the client sees the reset in place of the reply.
 ///
-/// Reports whether a whole request was read and answered, which is what the
-/// request counter counts: a half-open connection is not a question asked.
-fn answer(mut stream: TcpStream, reply: &Reply) -> bool {
+/// Reports whether a whole request was read, which is what the request counter
+/// counts: a half-open connection is not a question asked, while one that was
+/// asked and deliberately left unanswered is.
+fn answer(mut stream: TcpStream, reply: &Reply, shutdown: &AtomicBool) -> bool {
     if stream.set_nonblocking(false).is_err() {
         return false;
     }
@@ -154,6 +182,16 @@ fn answer(mut stream: TcpStream, reply: &Reply) -> bool {
     };
 
     let body = match reply {
+        // Held open rather than closed, because a closed socket is an answer:
+        // the client reports it at once and never reaches the wait that the
+        // code under test is supposed to bound.
+        Reply::Never => {
+            let until = std::time::Instant::now() + HANG_LIMIT;
+            while !shutdown.load(Ordering::Relaxed) && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            return true;
+        }
         Reply::Fixed(body) => (*body).to_string(),
         Reply::Routed(responder) => {
             let call: serde_json::Value = serde_json::from_slice(&request).unwrap_or_default();
