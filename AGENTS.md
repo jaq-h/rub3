@@ -4,11 +4,12 @@ Wallet-native licensing for locally executed software (CLI tools, MCP servers, d
 
 ## Layout
 
-Four parts, two toolchains:
+Five parts, two toolchains:
 
 | Path | What | Toolchain |
 |---|---|---|
 | `crates/rub3-wrapper/` | wrapper runtime, the crate that ships | `cargo`, from the repo root |
+| `crates/rub3-cli/` | the `rub3` command (§2.5): `pack` and `deploy`. Package `rub3-cli`, binary `rub3`; off the wrapper's dependency path | `cargo`, from the repo root |
 | `crates/rub3-sdk/` | the `rub3` SDK crate a wrapped application links (§3.5). Directory and package names differ on purpose, so cargo commands are `-p rub3` | `cargo`, from the repo root |
 | `crates/rub3-docs-mcp/` | developer-facing docs MCP server (§3.3); off the wrapper's dependency path | `cargo`, from the repo root |
 | `contracts/` | Foundry project, ERC-721 license contracts | `forge`, **from `contracts/`** |
@@ -23,6 +24,7 @@ cargo test  -p rub3-wrapper               # default bundle = tier-2
 cargo test  -p rub3-wrapper -- --ignored  # runs ONLY the ignored tests: a live Base mainnet RPC test
 cargo test  -p rub3                       # the SDK crate, including its doctests
 cargo test  -p rub3-docs-mcp              # docs server + the docs legibility gate
+cargo test  -p rub3-cli                   # the CLI; add `--test pack_build_gate -- --ignored` for the build gate
 
 cd contracts && forge test                # in-process EVM: no network, no .env
 cd contracts && forge fmt --check         # blocking style gate; `forge fmt` is the fix
@@ -30,7 +32,7 @@ cd contracts && forge fmt --check         # blocking style gate; `forge fmt` is 
 
 `forge` resolves `contracts/foundry.toml`, so it must run from `contracts/`; it fails at the repo root. That file also carries a tuned `[fmt]` section whose non-default settings are justified in comments beside them, so **do not reformat Solidity under stock defaults**: see `contracts/contracts.md` -> "Formatting" for the settings, the single `forgefmt: disable-next-item` in the tree and why it is there, and the fact that `forge fmt` needs two passes to converge on a tree it has not formatted before. OpenZeppelin and forge-std are git submodules, and `forge test` clones them at the pinned revisions on first run, so `git submodule update --init --recursive` is optional.
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: the wrapper matrix for `tier-0` through `tier-4` plus the `headless`, `webview` and `sdk` entries, the SDK crate's own job, `forge test` preceded by `scripts/check-deployments.sh` (the schema gate on `contracts/deployments.json`, the per-chain record of the canonical factory and the code registry), the blocking canonical-bytecode-fingerprint job (see `contracts/contracts.md` -> "Reproducible builds and canonical fingerprints"), the anvil-gated e2e, the docs-surface job (`forge build`, then `cargo test -p rub3-docs-mcp` with `RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1`), and a lint job where `cargo clippy -- -D warnings`, `cargo fmt --check` and `forge fmt --check` are all blocking gates. Read it for the exact invocations. It is macOS-only, and it does **not** build `tier-3,binary-encryption`, the only bundle that compiles `src/decrypt.rs`, so running the full local matrix below is still the contributor's job.
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: the wrapper matrix for `tier-0` through `tier-4` plus the `headless`, `webview` and `sdk` entries, the SDK crate's own job, the CLI's own job (its suites, the `#[ignore]`d build-gate tests, and the `cargo tree` check that keeps it off the wrapper's dependency path), `forge test` preceded by `scripts/check-deployments.sh` (the schema gate on `contracts/deployments.json`, the per-chain record of the canonical factory and the code registry), the blocking canonical-bytecode-fingerprint job (see `contracts/contracts.md` -> "Reproducible builds and canonical fingerprints"), the anvil-gated e2e, the docs-surface job (`forge build`, then `cargo test -p rub3-docs-mcp` with `RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1`), and a lint job where `cargo clippy -- -D warnings`, `cargo fmt --check` and `forge fmt --check` are all blocking gates. Read it for the exact invocations. It is macOS-only, and it does **not** build `tier-3,binary-encryption`, the only bundle that compiles `src/decrypt.rs`, so running the full local matrix below is still the contributor's job.
 
 **A contract change is also a wrapper change.** `crates/rub3-wrapper/src/attest.rs` pins a copy of the canonical fingerprints and immutable ranges so the wrapper can verify a contract before buying from it (`implementation.md` §2.6), and a copy of `contracts/deployments.json`'s per-chain `code_registry` (§2.9), since a binary cannot read a file at runtime. Unit tests fail when either copy drifts. Touch anything under `contracts/src/` and the sequence is: `scripts/canonical-bytecode-hashes.sh update`, then **add** a row to `attest::CANONICAL` for each moved fingerprint - never overwrite or drop one once the contract it describes is deployed, because a deployed contract goes on validating its own tokens forever. That accumulate-only rule switches on at the first deploy: nothing is deployed to any public network yet, so the table holds exactly one row per contract today (`attest::CANONICAL`'s doc comment and `implementation.md` §2.6 carry the reasoning). A unit test in `attest` fails until you do, in every tier-2-and-up matrix job.
 
@@ -119,7 +121,7 @@ These are the spec; this file is only the map. Read the relevant one before chan
 | `contracts/contracts.md` | local Anvil and Base Sepolia setup, deploy env-var reference, the EIP-3009 purchase recipe, the pre-purchase audit |
 | `testing.md` | per-suite test inventory, manual testing, seeding a license proof |
 
-The wrapper's app identity (`APP_ID`, `CONTRACT`, `CHAIN_ID`, `RPC_URL`) is hardcoded as placeholder constants in `src/main.rs`, pending `rub3 pack`. `CONTRACT` defaults to the zero address, which the wrapper reads as "no contract configured" and skips on-chain ownership checks, so a stock build never touches the chain. See `testing.md` → "App constants".
+The wrapper's app identity (`APP_ID`, `CONTRACT`, `CHAIN_ID`, `RPC_URL`, `FACTORY`) lives in `src/packed.rs`: a placeholder an ordinary `cargo build` compiles, or the value `rub3 pack` injects through a `RUB3_PACK_*` variable and `build.rs` validates. `CONTRACT` defaults to the zero address, which the wrapper reads as "no contract configured" and skips on-chain ownership checks, so a stock build never touches the chain. `FACTORY` is the one constant with no placeholder: it comes out of `contracts/deployments.json` at pack time, and a `null` entry there is a hard error rather than a fallback, at the CLI *and* again in `build.rs`. Never add a fallback; see `implementation.md` §2.5. `rub3-wrapper --version` prints the whole packed identity. See `testing.md` → "App constants".
 
 ## The docs surface serves derived facts only
 

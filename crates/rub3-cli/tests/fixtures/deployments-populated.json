@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "note": "A TEST FIXTURE, not a deployment record. The factory address below is fabricated so the populated path through `rub3 pack` and `rub3 deploy` can be exercised while contracts/deployments.json is still all null; nothing is deployed at it on any chain, and it must never be copied into contracts/deployments.json. base_sepolia is left null on purpose: the two chains have independent lifecycles, and a fixture where every entry is populated would not exercise the refusal that matters.",
+  "chains": {
+    "8453": {
+      "name": "base",
+      "factory": "0xf4c70a7000000000000000000000000000000001",
+      "deploy_block": 1,
+      "generation": 1,
+      "code_registry": "0xf4c70a7000000000000000000000000000000002",
+      "code_registry_deploy_block": 2
+    },
+    "84532": {
+      "name": "base_sepolia",
+      "factory": null,
+      "deploy_block": null,
+      "generation": null,
+      "code_registry": null,
+      "code_registry_deploy_block": null
+    }
+  }
+}

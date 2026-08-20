@@ -1,0 +1,29 @@
+# The developer- and agent-facing CLI of implementation.md §2.5. The package is
+# `rub3-cli` while the binary is `rub3`: the command a developer types is
+# `rub3 pack`, and the package name keeps it distinct from `crates/rub3-sdk`,
+# whose package is `rub3`.
+#
+# It is a build tool, not something that ships to a licence holder, so it is off
+# the wrapper's dependency path in the same way `rub3-docs-mcp` is - and for the
+# same reason: nothing here has any business adding weight to a distributable.
+# `cargo tree -p rub3-wrapper` is the check, and CI runs it.
+[package]
+name = "rub3-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Pack a rub3-wrapped distributable and deploy its licence contract"
+publish = false
+
+[[bin]]
+name = "rub3"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

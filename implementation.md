@@ -592,29 +592,73 @@ Threaded through `script/Deploy.s.sol`, all four Foundry fixtures, and both wrap
 
 **Docs** - `architecture.md` North Star mutability table corrected (`supplyCap` is immutable, so supply cannot change at all; added the other immutables) and its Ownership-invariants section rewritten with the successor pattern and a **bytecode vs convention** breakdown naming what an agent can verify before buying and what remains a promise (registry and factory properties, both unbuilt; a revoked binary already running; the developer continuing to publish). `contracts/contracts.md` gains hash-set management, the migration runbook, and the copy-pasteable pre-purchase audit. Both docs also state the duplicate-seat consequence of snapshot-claim plainly, and the audit snippet's conclusion claims only what a selector-name scan can prove: full assurance needs a name-independent comparison of the deployed runtime bytecode against the canonical template. **Built in §2.6** - the wrapper performs exactly that comparison before it buys, and the snippet is now labelled a diagnostic in every doc that carries it. `README.md` moves §2.4 out of "not yet implemented" and matches the corrected mutability table. `AGENTS.md` now points at `.github/workflows/ci.yml` instead of claiming the repo has no CI.
 
-### 2.5 - rub3 CLI `[not started]`
+### 2.5 - rub3 CLI `[partial]`
 
-Pulled forward from the old Phase 2 - a CLI is the natural agent interface, and every step is already scriptable.
+Pulled forward from the old Phase 2 - a CLI is the natural agent interface, and every step is already scriptable. New workspace member `crates/rub3-cli/`, package `rub3-cli` and binary `rub3`, off the wrapper's dependency path exactly as §3.3's docs server is.
 
 ```bash
 rub3 pack --binary ./target/release/myapp --app-id com.example.myapp \
   --contract 0x1234...abcd --chain base --tier cooldown --headless \
   --session-ttl 7 --output ./dist/myapp
 
-rub3 deploy --type access --identity account --tba-implementation 0x... \
-  --price-usdc 20 --chain base            # via Rub3Factory by default
-
-rub3 fetch 0x1234...abcd                  # download from contentURI, verify hash on-chain (§3.1)
-
-rub3 register --name myapp --contract 0x1234...abcd
+rub3 deploy --type access --name "My App License" --symbol MAL \
+  --identity account --tba-implementation 0x... \
+  --price-usdc 20 --price-token 0x... --chain base \
+  --broadcast -- --private-key $DEPLOYER_KEY   # via Rub3Factory by default
 ```
 
-- `pack`: single distributable binary (wrapper + embedded app + config); `--headless` selects the no-webview build; cross-platform targets.
-- `deploy`: factory-mediated; `--identity` sets `identityModel`; `--price-usdc` configures the EIP-3009 path.
-- `fetch`: the agent-side half of distribution (§3.1).
-- `register`: registry entry (§3.2).
+- `pack` `[complete]`: single distributable binary (wrapper + embedded app + config); `--headless` selects the no-webview build; cross-platform targets via `--target`.
+- `deploy` `[complete]`: factory-mediated; `--identity` sets `identityModel`; `--price-usdc` configures the EIP-3009 path.
+- `fetch` `[not started]`: the agent-side half of distribution (§3.1).
+- `register` `[not started]`: registry entry (§3.2).
+
+**`fetch` and `register` are deliberately absent rather than stubbed.** Both are the agent-side halves of sections that do not exist: there is no content-addressed distribution to fetch from (§3.1) and no registry to register with (§3.2), so neither subcommand has anything to talk to. A subcommand that cannot work is worse than an absent one - it is a promise in `--help` that fails at the moment somebody depends on it - so `rub3 fetch` and `rub3 register` are not present in any form, and a test asserts they are not. They land with the sections that give them something to do.
 
 **`pack` compiles `contracts/deployments.json` into the wrapper.** `--chain base` resolves to a chain id, and the canonical `Rub3Factory` for that chain is read out of that file and baked into the packed binary's constants alongside `CONTRACT` and `CHAIN_ID`, so a wrapper can tell a canonical deploy from any other without a network round trip or a hardcoded address in Rust. A `null` entry - which is every entry until launch - is a hard error from `pack`, never a fallback to the zero address: a distributable that claims a canonical factory it cannot name is worse than one that refuses to build. Same rule for `deploy`, which resolves `FACTORY` the same way.
+
+**The refusal is the feature, and it has its own exit code.** `pack` and `deploy` both exit 2 on a `null` entry, so an orchestrator tells "nothing is deployed yet" from a typo (1) or a failed toolchain (3) without parsing English. That only holds while nothing else exits 2, and clap's own default is to exit 2 on every usage error, so the command line is parsed with `try_parse` and a missing flag, an unknown flag or an unknown subcommand is reported as 1 like every other impossible command line. The message names the chain and its id, quotes the manifest's own rule, and offers only choices that are choices: `--factory <address>` names one you deployed yourself, and `deploy --direct` deploys through none at all. Neither is reachable by forgetting a flag, and no code path anywhere substitutes the zero address. The manifest's `note` already said a consumer must stop rather than guess; this is the first consumer that had to.
+
+**Three gates, not one, because the value crosses three boundaries** - `crates/rub3-cli/src/deployments.rs`, `crates/rub3-wrapper/build.rs`, `crates/rub3-wrapper/src/packed.rs`
+- The CLI refuses a `null` entry, a placeholder, a zero address and an unknown chain *name*, and it validates a published address rather than trusting the file it came from
+- The wrapper's new `build.rs` refuses the same values again, because it is the last thing between a pack input and a binary somebody else runs, and it is reachable without the CLI. It also refuses a *half* configured pack: any `RUB3_PACK_*` variable requires the whole set, so a forgotten one cannot leave a placeholder from `packed.rs` in a shipped binary
+- `packed.rs` parses the numeric constants in a `const fn`, so a malformed chain id is a compile error rather than a runtime surprise
+- Both the CLI and `build.rs` require `--app-id` to be one plain path component. It names the directory the packed binary extracts its application into and the file its licence proof is stored under, so a separator or `..` would put both outside the rub3 cache directory; `build.rs` holds the same rule for `RUB3_PACK_APP_NAME` and now shares one predicate with it
+- The zero address is refused at every one of them, on `CONTRACT` as well as on `FACTORY`. It is a legitimate development value - the wrapper reads a zero `CONTRACT` as "no contract configured" and skips the ownership check - which is exactly why a distributable must never carry it: it would gate on nothing while looking configured
+
+**A chain name is resolved, never guessed** - a name means nothing outside `contracts/deployments.json`, so a name it does not publish is refused with the list of the ones it does. A bare chain id is taken at face value, because it is already unambiguous: a local anvil is addressable, it simply has no canonical factory, and that refusal comes from the factory lookup rather than from being unable to name the chain. That is what keeps a local end-to-end run possible while nothing is deployed.
+
+**What `pack` actually produces** - `crates/rub3-wrapper/src/packed.rs` (new), `build.rs` (new), `main.rs`
+- One `cargo build` of `rub3-wrapper` with `--no-default-features --features <tier>,<front door>` and the identity in the environment. `--locked` is passed too: a packed binary's sha-256 becomes a wrapper hash on-chain, so a dependency that resolved differently between two packs would move it
+- The application is embedded with `include_bytes!` and extracted on launch to `{data_dir}/rub3/apps/{app_id}/{sha256}/{name}`, staged and renamed into place so a half-written executable is never reachable, and keyed by content so a new version lands beside the old one rather than over a copy another process is running
+- **Extraction happens after activation and never before it.** A failed launch leaves nothing on disk to run directly, which is the whole point of embedding rather than shipping two files
+- A packed build refuses `--binary`. The point of packing is one file, and a wrapper that would launch a different application on request is a licence gate wrapped around whatever the caller felt like running
+- The artifact path comes from cargo's own JSON output rather than from guessing at `target/release/`, so `CARGO_TARGET_DIR` and `--target` do not silently produce a distributable with somebody else's configuration in it
+- Every `RUB3_PACK_*` variable the plan did not set is **removed** from the build's environment rather than inherited, for the same reason `deploy` clears the script's. `RUB3_PACK_DEVELOPER_ENS` is the one that makes it load-bearing: it is optional, so the wrapper's gate lets a build through without it, and a stale one exported from an earlier pack would be compiled in and shown to every licence holder during activation as this app's developer
+- `pack` prints the sha-256 of what it wrote, which is the wrapper hash that seeds the licence contract's append-only set - `rub3 deploy --wrapper-hash` takes it directly
+- `rub3-wrapper --version` now answers which licence the binary gates on, on which chain, through which factory, at which tier and through which front doors. A distributable is run by somebody who did not build it, and all of that is compiled in, so it costs no network call. The endpoint is the one field reduced rather than reported: it goes through `rpc::redact_urls`, the same helper and the same rule the error surface holds to, so `--version` prints scheme, host and port and not the provider key that lives in the userinfo, the path or the query
+
+**`deploy` drives `contracts/script/Deploy.s.sol` rather than building the transaction** - that script is the deploy path the contract tests, `contracts/contracts.md` and CI all exercise, and a second implementation in Rust would be a second thing to keep correct about constructor argument order, the identity model's conditions and which rail a price belongs to. What the CLI adds is the part a `forge script` invocation cannot do for itself
+- It resolves the canonical factory, and refuses when there is none
+- It **clears** every variable the script reads that this invocation did not set. `vm.envOr` reads a value it cannot parse exactly as it reads an unset one, so an inherited `FACTORY` from an earlier `source .env` would not fail the deploy - it would produce a direct, unrecorded contract - and an inherited `PRICE` would be a listing nobody typed
+- It refuses to broadcast unless asked. Without `--broadcast` forge simulates, and `--dry-run` prints the resolved plan without running forge at all
+- `--price-usdc 20` sets the amount in USDC's six decimals and **requires** `--price-token`. rub3 publishes no per-chain stablecoin address anywhere, and a payment token is exactly the kind of address that must never be guessed; a price finer than the token's smallest unit is refused rather than rounded
+- The signer is not a flag. Everything after `--` goes straight to `forge script`, and the passthrough begins at that separator and nowhere else (clap's `last`, not `trailing_var_arg`): a rub3 flag written after the deploy's other flags is still a rub3 flag, and an unrecognised one is a usage error naming it rather than an argument quietly handed to forge. `--private-key`, `--account`, `--ledger` and `--verify` work as `contracts/contracts.md` documents them, and no key material passes through an argument this CLI parses. The separator is load-bearing rather than cosmetic: a `--dry-run` collected into the passthrough would reach forge as an argument and leave the CLI thinking it was never asked to simulate, which broadcasts. The plan the command prints before it runs forge reports the invocation the CLI chose - the script, the endpoint, `--broadcast` - and says only *how many* arguments were passed through: that summary is printed on every deploy and not only a `--dry-run`, so echoing the tail would put an expanded `--private-key` in terminal scrollback and in any CI log that captures the step
+
+**`--headless` below tier 3 is refused.** The headless front door enables `session`, `onchain-read`, `onchain-write` and `cooldown` on top of whatever bundle is named, and cargo features are additive, so `--tier offline --headless` would silently produce a tier-3 binary. Refusing beats shipping a binary whose tier is not the one asked for.
+
+**Files** - `crates/rub3-cli/` (`main.rs`, `lib.rs`, `deployments.rs`, `repo.rs`, `tier.rs`, `pack.rs`, `deploy.rs`, `tests/cli.rs`, `tests/pack_build_gate.rs`, `tests/fixtures/deployments-populated.json`), `crates/rub3-wrapper/build.rs` (new), `crates/rub3-wrapper/src/packed.rs` (new), `crates/rub3-wrapper/src/main.rs` (constants moved to `packed`, `--binary` optional, `--version` provenance), `crates/rub3-wrapper/src/lib.rs` (`pub mod packed`), root `Cargo.toml` (the new member), `.github/workflows/ci.yml` (the `cli` job)
+
+**Tests** - 17 unit and 26 end-to-end in the CLI, 5 more in `packed`, plus 6 `#[ignore]`d build-gate tests
+- The canonical path cannot be exercised against a real address today, so it is exercised against a **fixture checkout** whose manifest publishes one, alongside the committed manifest that publishes none. A unit test asserts the committed one is still all null, so the day that changes, the tests that assume a refusal are read again rather than quietly passing
+- The fixture publishes a factory on one chain and leaves the other null on purpose: the two records have independent lifecycles, and a fixture where everything is populated would not exercise the refusal that matters
+- `tests/pack_build_gate.rs` runs a **real `cargo check`** against a poisoned environment, because the wrapper's build script is not reachable from the CLI and asserting on it any other way would be asserting on a copy. A zero factory, a zero contract, a half-configured pack, an app id that would escape the cache directory, and the placeholders `null`, `TBD` and `0xYourFactory` are each refused, and a complete environment builds - the positive control, without which every other assertion would pass on a gate that refused everything. `#[ignore]`d because each one costs a compile; CI runs them as their own step
+- Verified end to end by hand on a local anvil: `rub3 deploy --direct` deployed a `Rub3Access` through the real forge script, a token was purchased on it, `rub3 pack --tier verified` produced a 7.4 MB distributable, and running that single file verified ownership on-chain, extracted the application and ran it with its arguments. The same run confirmed the extraction ordering: with activation failing, nothing was written to the cache directory at all
+
+**Deliberately not built here**
+- **No `rub3 fetch` and no `rub3 register`**, for the reason above
+- **No pack-time signing or notarization.** Producing a distributable is one thing; making the operating system accept it from a stranger is a distribution concern that belongs with §3.1, not a flag on `pack`
+- **No `--encrypt-binary`.** `binary-encryption` composes with tier-3 and up, but `src/decrypt.rs` is a deferred scaffold, so a flag for it would be a flag that does not work
+- **No factory deploy.** `rub3 deploy` deploys licence contracts. `contracts/script/DeployFactory.s.sol` deploys factories, it is run once per chain per generation by whoever operates rub3, and its most consequential argument is the immutable treasury - see `contracts/contracts.md` -> "Treasury custody, and the pre-mainnet proof"
 
 ### 2.6 - Pre-purchase contract attestation `[complete]`
 
@@ -1122,7 +1166,7 @@ Cut from the active roadmap with rationale; scaffolds are retained.
 | Distribution | Content-addressed storage (IPFS/Arweave), hash + URI on-chain |
 | Agent surface | `llms.txt`, Markdown docs, docs MCP server |
 | CLI | `clap` crate |
-| Packaging | `include_bytes!` embedding or custom bundler |
+| Packaging | `include_bytes!` embedding, driven by `rub3 pack` (§2.5) |
 
 ---
 
@@ -1137,6 +1181,7 @@ rub3/
 ├── crates/
 │   ├── rub3-wrapper/                 # Wrapper runtime (src/, assets/activation.html, tests/)
 │   ├── rub3-sdk/                     # §3.5 - the `rub3` crate a wrapped app links (heartbeat, session)
+│   ├── rub3-cli/                     # §2.5 - the `rub3` command: pack, deploy
 │   └── rub3-docs-mcp/                # §3.3 - docs MCP server, off the wrapper's dependency path
 ├── contracts/                        # Foundry project (§1.5, §1.6)
 │   ├── src/
@@ -1161,7 +1206,6 @@ Planned (not yet created):
 
 ```text
 ├── crates/
-│   ├── rub3-cli/                # §2.5 - pack, deploy, fetch, register
 │   └── tauri-plugin-rub3/       # §5.3
 ├── contracts/src/
 │   ├── Rub3Metered.sol          # §4.1 - per-launch billing
