@@ -415,6 +415,90 @@ fn an_activation_watch_waits_out_the_cooldown_before_polling() {
     window.post(serde_json::json!({ "type": "auto_watch_cancel" }));
 }
 
+/// Returning to the Auto-detect tab resumes the window the screen opened, and
+/// still finds a transaction that landed while the user was on the Manual tab.
+///
+/// The sequence a person actually performs: the screen arms a watch at the head
+/// it opened at, they switch to Manual to read the calldata, they send from
+/// their wallet, and they switch back expecting the wrapper to notice. Re-reading
+/// the head on that second arm walks the search window past the transaction that
+/// just landed, and it can then never be found - the watch runs its whole budget
+/// and reports that it saw nothing, which is false and leaves the user staring at
+/// a paste box for a transaction the chain already has.
+///
+/// The stub honours `fromBlock` for exactly this reason: a node that returned the
+/// log whatever range was asked for could not tell the two behaviours apart.
+#[test]
+#[cfg(feature = "cooldown")]
+fn returning_to_auto_detect_resumes_the_window_the_screen_opened() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    /// The head once the wallet's purchase has landed, past [`MINT_BLOCK`].
+    const HEAD_AFTER_MINT: u64 = MINT_BLOCK + 2;
+    /// Stands in for "no mint on chain yet": below every range a watch can ask
+    /// for, so no query matches until the test says one landed.
+    const NO_MINT_YET: u64 = 0;
+
+    let head = Arc::new(AtomicU64::new(HEAD));
+    let mint_at = Arc::new(AtomicU64::new(NO_MINT_YET));
+    let (reported_head, reported_mint) = (Arc::clone(&head), Arc::clone(&mint_at));
+
+    let node = StubNode::routed(move |method, params| match method {
+        "eth_blockNumber" => {
+            serde_json::json!(format!("0x{:x}", reported_head.load(Ordering::Relaxed)))
+        }
+        // A real node answers only within the range it was asked for, and that
+        // is the whole question here.
+        "eth_getLogs" => {
+            let from = params
+                .get(0)
+                .and_then(|p| p.get("fromBlock"))
+                .and_then(|b| b.as_str())
+                .and_then(|b| u64::from_str_radix(b.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0);
+            if from <= reported_mint.load(Ordering::Relaxed) {
+                serde_json::json!([mint_log()])
+            } else {
+                serde_json::json!([])
+            }
+        }
+        other => purchased_reply(other, params),
+    });
+
+    let window = window_on(&node.url);
+
+    // The screen opens and arms its watch. Nothing has been sent yet, so it
+    // finds nothing.
+    window.post(serde_json::json!({
+        "type":          "auto_watch_start",
+        "kind":          "mint",
+        "owner_address": WALLET,
+        "token_id":      serde_json::Value::Null,
+    }));
+    settle(&node);
+
+    // The user reads the calldata on the Manual tab, and the purchase lands
+    // while they are there.
+    window.post(serde_json::json!({ "type": "auto_watch_cancel" }));
+    mint_at.store(MINT_BLOCK, Ordering::Relaxed);
+    head.store(HEAD_AFTER_MINT, Ordering::Relaxed);
+
+    // And they come back to Auto-detect.
+    window.post(serde_json::json!({
+        "type":          "auto_watch_start",
+        "kind":          "mint",
+        "owner_address": WALLET,
+        "token_id":      serde_json::Value::Null,
+    }));
+
+    let cooldown = window.wait_for("onShowCooldown");
+    assert_eq!(
+        cooldown["tokenId"], TOKEN_ID,
+        "the re-armed watch must still cover the block the screen opened at",
+    );
+}
+
 // ── Watching the watcher ──────────────────────────────────────────────────────
 
 /// A cooldown short enough to sit through in a test, and long enough that a

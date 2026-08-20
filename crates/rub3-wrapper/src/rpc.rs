@@ -441,16 +441,36 @@ pub fn cooldown_ready(
     contract: Address,
     token_id: u64,
 ) -> Result<(bool, u64), RpcError> {
-    block_on(async move {
-        let provider = build_provider(rpc_url)?;
-        let instance = IRub3License::new(contract, provider);
-        let r = instance
-            .cooldownReady(U256::from(token_id))
-            .call()
-            .await
-            .map_err(|e| classify_call_error(&e))?;
-        Ok((r.ready, r.blocksRemaining.to::<u64>()))
-    })
+    block_on(read_cooldown_ready(rpc_url, contract, token_id))
+}
+
+/// The same read, abandoned if the endpoint has not answered within `limit`.
+///
+/// For the watch path, which cannot afford an unbounded request; see
+/// [`WATCH_REQUEST_TIMEOUT`].
+#[cfg(feature = "onchain-write")]
+pub fn cooldown_ready_within(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+    limit: std::time::Duration,
+) -> Result<(bool, u64), RpcError> {
+    block_on_within(read_cooldown_ready(rpc_url, contract, token_id), limit)
+}
+
+async fn read_cooldown_ready(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+) -> Result<(bool, u64), RpcError> {
+    let provider = build_provider(rpc_url)?;
+    let instance = IRub3License::new(contract, provider);
+    let r = instance
+        .cooldownReady(U256::from(token_id))
+        .call()
+        .await
+        .map_err(|e| classify_call_error(&e))?;
+    Ok((r.ready, r.blocksRemaining.to::<u64>()))
 }
 
 /// Calls `lastActivationBlock(tokenId)` view.
@@ -753,13 +773,24 @@ pub fn get_code(rpc_url: &str, contract: Address) -> Result<Vec<u8>, RpcError> {
 
 /// Returns the current block number on the target chain.
 pub fn get_block_number(rpc_url: &str) -> Result<u64, RpcError> {
-    block_on(async move {
-        let provider = build_provider(rpc_url)?;
-        provider
-            .get_block_number()
-            .await
-            .map_err(RpcError::transport)
-    })
+    block_on(head_block(rpc_url))
+}
+
+/// The same read, abandoned if the endpoint has not answered within `limit`.
+///
+/// For the watch path, which cannot afford an unbounded request; see
+/// [`WATCH_REQUEST_TIMEOUT`].
+#[cfg(feature = "onchain-write")]
+pub fn get_block_number_within(rpc_url: &str, limit: std::time::Duration) -> Result<u64, RpcError> {
+    block_on_within(head_block(rpc_url), limit)
+}
+
+async fn head_block(rpc_url: &str) -> Result<u64, RpcError> {
+    let provider = build_provider(rpc_url)?;
+    provider
+        .get_block_number()
+        .await
+        .map_err(RpcError::transport)
 }
 
 // ── Purchase / supply (tier 3) ────────────────────────────────────────────────
@@ -830,6 +861,28 @@ pub const WATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_s
 /// caller that knows better may say so; this is what the window uses.
 #[cfg(feature = "onchain-write")]
 pub const WATCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long one request a watch makes may take before it is abandoned.
+///
+/// A watch consults its deadline *between* polls, so a request that never
+/// returns is a request the deadline never gets to end: the thread parks inside
+/// it, the fallback to the manual tab never fires, and the cancel flag the
+/// screen raised on its way out is never read again. An endpoint that accepts
+/// the connection and then answers nothing is an ordinary overload mode for
+/// public RPC, so the bound belongs on every request a watch makes rather than
+/// on the watch as a whole.
+///
+/// Two poll intervals. One would cut off an endpoint that is slow but working,
+/// turning a delay into a failure; two still puts twenty deadline checks inside
+/// the default budget, which is all the deadline needs to be reachable. An
+/// expired request is [`RpcError::Transport`], so it is absorbed and retried
+/// like any other bad answer and only a sustained run of them ends the watch.
+///
+/// Scoped to the watch deliberately: the pre-existing pollers share
+/// `build_provider` and are not part of this change.
+#[cfg(feature = "onchain-write")]
+pub const WATCH_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(WATCH_POLL_INTERVAL.as_secs() * 2);
 
 /// How many polls in a row may fail before a watch gives up.
 ///
@@ -1085,47 +1138,50 @@ fn poll_for_mint(
 ) -> Result<Option<String>, RpcError> {
     use alloy::rpc::types::Filter;
 
-    block_on(async move {
-        let provider = build_provider(rpc_url)?;
-        // The emitter, the mint and the recipient are all pinned, so the node
-        // does the matching.
-        let filter = Filter::new()
-            .address(contract)
-            .from_block(from_block)
-            .event_signature(ERC721_TRANSFER_SIG)
-            .topic1(B256::ZERO)
-            .topic2(recipient.into_word());
+    block_on_within(
+        async move {
+            let provider = build_provider(rpc_url)?;
+            // The emitter, the mint and the recipient are all pinned, so the node
+            // does the matching.
+            let filter = Filter::new()
+                .address(contract)
+                .from_block(from_block)
+                .event_signature(ERC721_TRANSFER_SIG)
+                .topic1(B256::ZERO)
+                .topic2(recipient.into_word());
 
-        let logs = provider
-            .get_logs(&filter)
-            .await
-            .map_err(RpcError::transport)?;
+            let logs = provider
+                .get_logs(&filter)
+                .await
+                .map_err(RpcError::transport)?;
 
-        let recipient_topic = recipient.into_word();
+            let recipient_topic = recipient.into_word();
 
-        // And every term of it is checked again on what comes back, because the
-        // hash this returns is the one a licence is claimed against. An endpoint
-        // that honours `address` and degrades on `topics`, which is a real
-        // shape under rate limiting, would otherwise answer with any transfer
-        // this contract emitted: a resale, or a stranger's mint. The arity is
-        // part of that check rather than beside it, since ERC-20 shares this
-        // topic0 and differs only in how many topics it carries.
-        for log in logs {
-            let topics = log.topics();
-            if log.address() != contract
-                || topics.len() != 4
-                || topics[0] != ERC721_TRANSFER_SIG
-                || topics[1] != B256::ZERO
-                || topics[2] != recipient_topic
-            {
-                continue;
+            // And every term of it is checked again on what comes back, because the
+            // hash this returns is the one a licence is claimed against. An endpoint
+            // that honours `address` and degrades on `topics`, which is a real
+            // shape under rate limiting, would otherwise answer with any transfer
+            // this contract emitted: a resale, or a stranger's mint. The arity is
+            // part of that check rather than beside it, since ERC-20 shares this
+            // topic0 and differs only in how many topics it carries.
+            for log in logs {
+                let topics = log.topics();
+                if log.address() != contract
+                    || topics.len() != 4
+                    || topics[0] != ERC721_TRANSFER_SIG
+                    || topics[1] != B256::ZERO
+                    || topics[2] != recipient_topic
+                {
+                    continue;
+                }
+                if let Some(hash) = log.transaction_hash {
+                    return Ok(Some(format!("0x{}", hex::encode(hash.as_slice()))));
+                }
             }
-            if let Some(hash) = log.transaction_hash {
-                return Ok(Some(format!("0x{}", hex::encode(hash.as_slice()))));
-            }
-        }
-        Ok(None)
-    })
+            Ok(None)
+        },
+        WATCH_REQUEST_TIMEOUT,
+    )
 }
 
 /// Watches for the `activate(tokenId)` the user sent from their wallet, and
@@ -1196,66 +1252,69 @@ fn poll_for_activate(
     use alloy::rpc::types::Filter;
     use alloy::sol_types::SolEvent;
 
-    block_on(async move {
-        let provider = build_provider(rpc_url)?;
-        let instance = IRub3License::new(contract, &provider);
+    block_on_within(
+        async move {
+            let provider = build_provider(rpc_url)?;
+            let instance = IRub3License::new(contract, &provider);
 
-        // Classified rather than blanket-labelled a contract error, unlike
-        // `last_activation_block` beside it. Inside a watch the distinction is
-        // load-bearing: a rate limit or a 502 has to be absorbed and retried,
-        // and reading one as a revert would end the watch on the first hiccup
-        // and send the user to the manual tab for nothing.
-        let last = instance
-            .lastActivationBlock(U256::from(token_id))
-            .call()
-            .await
-            .map_err(|e| classify_call_error(&e))?
-            .to::<u64>();
-        if last <= from_block {
-            return Ok(None);
-        }
-
-        let token_topic: B256 = U256::from(token_id).into();
-
-        // Pinned to the one block `lastActivationBlock` named, so the query
-        // stays a single bounded request whatever the node's range limits are.
-        let filter = Filter::new()
-            .address(contract)
-            .from_block(last)
-            .to_block(last)
-            .event_signature(IRub3License::Activated::SIGNATURE_HASH)
-            .topic1(token_topic);
-
-        let logs = provider
-            .get_logs(&filter)
-            .await
-            .map_err(RpcError::transport)?;
-
-        let mut found = None;
-
-        // Checked again on the way back, term for term, for the same reason
-        // `poll_for_mint` rechecks its own filter: what comes back decides
-        // which transaction a session is issued against, and a filter honoured
-        // loosely would hand this screen somebody else's activation.
-        for log in logs {
-            let topics = log.topics();
-            if log.address() != contract
-                || topics.len() != 3
-                || topics[0] != IRub3License::Activated::SIGNATURE_HASH
-                || topics[1] != token_topic
-            {
-                continue;
+            // Classified rather than blanket-labelled a contract error, unlike
+            // `last_activation_block` beside it. Inside a watch the distinction is
+            // load-bearing: a rate limit or a 502 has to be absorbed and retried,
+            // and reading one as a revert would end the watch on the first hiccup
+            // and send the user to the manual tab for nothing.
+            let last = instance
+                .lastActivationBlock(U256::from(token_id))
+                .call()
+                .await
+                .map_err(|e| classify_call_error(&e))?
+                .to::<u64>();
+            if last <= from_block {
+                return Ok(None);
             }
-            // Last one wins: if a block somehow holds two activations of this
-            // token, the one that left `lastActivationBlock` where it is now is
-            // the later of them.
-            if let Some(hash) = log.transaction_hash {
-                found = Some(format!("0x{}", hex::encode(hash.as_slice())));
-            }
-        }
 
-        Ok(found)
-    })
+            let token_topic: B256 = U256::from(token_id).into();
+
+            // Pinned to the one block `lastActivationBlock` named, so the query
+            // stays a single bounded request whatever the node's range limits are.
+            let filter = Filter::new()
+                .address(contract)
+                .from_block(last)
+                .to_block(last)
+                .event_signature(IRub3License::Activated::SIGNATURE_HASH)
+                .topic1(token_topic);
+
+            let logs = provider
+                .get_logs(&filter)
+                .await
+                .map_err(RpcError::transport)?;
+
+            let mut found = None;
+
+            // Checked again on the way back, term for term, for the same reason
+            // `poll_for_mint` rechecks its own filter: what comes back decides
+            // which transaction a session is issued against, and a filter honoured
+            // loosely would hand this screen somebody else's activation.
+            for log in logs {
+                let topics = log.topics();
+                if log.address() != contract
+                    || topics.len() != 3
+                    || topics[0] != IRub3License::Activated::SIGNATURE_HASH
+                    || topics[1] != token_topic
+                {
+                    continue;
+                }
+                // Last one wins: if a block somehow holds two activations of this
+                // token, the one that left `lastActivationBlock` where it is now is
+                // the later of them.
+                if let Some(hash) = log.transaction_hash {
+                    found = Some(format!("0x{}", hex::encode(hash.as_slice())));
+                }
+            }
+
+            Ok(found)
+        },
+        WATCH_REQUEST_TIMEOUT,
+    )
 }
 
 // ── The code registry (§2.9) ──────────────────────────────────────────────────
@@ -1733,6 +1792,32 @@ pub fn mint_token_id(
 fn build_provider(rpc_url: &str) -> Result<impl alloy::providers::Provider, RpcError> {
     let url: url::Url = rpc_url.parse().map_err(RpcError::transport)?;
     Ok(ProviderBuilder::new().connect_http(url))
+}
+
+/// Runs a request to completion, or gives up on it after `limit`.
+///
+/// The bound is on the whole future rather than on a client's read timeout, so
+/// it covers name resolution and the connect as well as the answer: all three
+/// are places a black-holing endpoint parks a caller, and only the last of them
+/// a read timeout would reach.
+///
+/// Reported as a transport failure, which is what it is, and which the watch
+/// loop already knows to absorb a few of and then give up on. The message
+/// carries no URL, so nothing has to be redacted out of it.
+#[cfg(feature = "onchain-write")]
+fn block_on_within<T>(
+    f: impl std::future::Future<Output = Result<T, RpcError>>,
+    limit: std::time::Duration,
+) -> Result<T, RpcError> {
+    block_on(async move {
+        match tokio::time::timeout(limit, f).await {
+            Ok(answered) => answered,
+            Err(_) => Err(RpcError::Transport(format!(
+                "the endpoint did not answer within {}s",
+                limit.as_secs()
+            ))),
+        }
+    })
 }
 
 /// Runs a future to completion on a single-threaded tokio runtime.
@@ -3326,5 +3411,45 @@ mod watch_rpc_tests {
         let err = poll_for_activate(&node.url, contract(), TOKEN_ID, 40)
             .expect_err("a refused request is not a quiet chain");
         assert!(err.is_retryable(), "a rate limit is worth retrying: {err}");
+    }
+
+    /// An endpoint that takes the request and answers nothing is given up on,
+    /// rather than parking the thread that asked.
+    ///
+    /// This is what makes the deadline reachable at all. A watch consults it
+    /// between polls, so an unbounded request is one the budget never gets to
+    /// end: the spinner turns for the full two minutes, the fallback to the
+    /// manual tab never fires, and the cancel flag the screen raised on its way
+    /// out is never read again - which is also the one way a watcher thread can
+    /// outlive its window. Accepting a connection and then answering nothing is
+    /// an ordinary overload mode for a public endpoint, not a contrived one.
+    ///
+    /// The failure is reported as retryable, so a watch absorbs a few and gives
+    /// up on a run of them, exactly as it does for a 502.
+    #[test]
+    fn a_request_that_is_never_answered_is_abandoned() {
+        const LIMIT: Duration = Duration::from_millis(300);
+        // Far longer than the limit, so passing by outlasting the stub is not
+        // available to a build that dropped the bound.
+        const NEVER: Duration = Duration::from_secs(20);
+
+        let node = StubNode::routed(|_method, _params| {
+            std::thread::sleep(NEVER);
+            serde_json::Value::Null
+        });
+
+        let started = std::time::Instant::now();
+        let err = get_block_number_within(&node.url, LIMIT)
+            .expect_err("a request that is never answered must not return a block");
+
+        assert!(
+            started.elapsed() < NEVER,
+            "the request was not abandoned: it waited {:?}",
+            started.elapsed(),
+        );
+        assert!(
+            err.is_retryable(),
+            "an endpoint that went quiet is worth asking again: {err}",
+        );
     }
 }

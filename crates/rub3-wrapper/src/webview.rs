@@ -148,8 +148,8 @@ impl AutoWatchKind {
     }
 }
 
-/// The one auto-detect watch a window may have running, and the handle that
-/// stops it.
+/// The one auto-detect watch a window may have running, the handle that stops
+/// it, and the block the screen it belongs to was opened at.
 ///
 /// Shared rather than owned because every party that can end a watch holds a
 /// different clone of [`IpcState`]: the thread running the watch, the IPC
@@ -157,9 +157,25 @@ impl AutoWatchKind {
 /// closes the window. A watch that only its own thread could end would go on
 /// polling an endpoint for the rest of its budget after the screen that wanted
 /// the answer is gone.
+///
+/// The starting block lives here rather than in the watch because it belongs to
+/// the *screen*, and a screen outlives the watches armed on it: the page arms
+/// one every time the user returns to the Auto-detect tab. Reading the head on
+/// each arm instead would walk the window forward past a transaction that landed
+/// while the user was on the Manual tab, and the watch would then report,
+/// truthfully from its own point of view and falsely from the user's, that it
+/// watched for two minutes and saw nothing.
 #[cfg(feature = "onchain-write")]
 #[derive(Clone, Default)]
-struct AutoWatch(std::sync::Arc<std::sync::Mutex<Option<crate::rpc::Cancel>>>);
+struct AutoWatch(std::sync::Arc<std::sync::Mutex<AutoWatchSlot>>);
+
+#[cfg(feature = "onchain-write")]
+#[derive(Default)]
+struct AutoWatchSlot {
+    running: Option<crate::rpc::Cancel>,
+    /// The screen currently offering auto-detect, and the head when it opened.
+    opened_at: Option<(AutoWatchKind, u64)>,
+}
 
 #[cfg(feature = "onchain-write")]
 impl AutoWatch {
@@ -167,17 +183,52 @@ impl AutoWatch {
     fn restart(&self) -> crate::rpc::Cancel {
         let next = crate::rpc::Cancel::new();
         let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(previous) = slot.replace(next.clone()) {
+        if let Some(previous) = slot.running.replace(next.clone()) {
             previous.cancel();
         }
         next
     }
 
     /// Stops whatever is running. Idempotent, and a no-op when nothing is.
+    ///
+    /// Leaves the starting block alone: cancelling is what the page does when
+    /// the user picks the Manual tab, and coming back to Auto-detect must
+    /// resume the same window rather than open a later one.
     fn stop(&self) {
         let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(running) = slot.take() {
+        if let Some(running) = slot.running.take() {
             running.cancel();
+        }
+    }
+
+    /// A tabbed screen is being displayed, so the next watch armed on it starts
+    /// a fresh window.
+    fn screen_opened(&self) {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        slot.opened_at = None;
+    }
+
+    /// The block a watch of `kind` starts from, or `None` before this screen has
+    /// captured one.
+    fn opened_at(&self, kind: AutoWatchKind) -> Option<u64> {
+        let slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        slot.opened_at
+            .and_then(|(at, block)| (at == kind).then_some(block))
+    }
+
+    /// Records `head` as this screen's starting block, and answers with the
+    /// block now in effect.
+    ///
+    /// The recorded one wins if there already is one, so two arms racing to
+    /// capture settle on the earlier of the two reads rather than the later.
+    fn opened_at_or(&self, kind: AutoWatchKind, head: u64) -> u64 {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match slot.opened_at {
+            Some((at, block)) if at == kind => block,
+            _ => {
+                slot.opened_at = Some((kind, head));
+                head
+            }
         }
     }
 }
@@ -515,6 +566,9 @@ impl IpcState {
 
     #[cfg(feature = "cooldown")]
     fn show_cooldown(&self, address: &str, token_id: u64) {
+        #[cfg(feature = "onchain-write")]
+        self.auto_watch.screen_opened();
+
         let contract_addr: alloy::primitives::Address = match self.contract.parse() {
             Ok(a) => a,
             Err(_) => {
@@ -598,6 +652,8 @@ impl IpcState {
         recipient: alloy::primitives::Address,
         contract_addr: alloy::primitives::Address,
     ) {
+        self.auto_watch.screen_opened();
+
         let advisory = match crate::attest::verify_before_purchase(
             &self.rpc_url,
             self.chain_id,
@@ -720,15 +776,29 @@ impl IpcState {
             // The block the screen was opened at. Read here rather than sent by
             // the page, which cannot see the chain: a watch starting from a
             // number the page guessed would either miss the transaction or
-            // match one sent before the screen existed.
-            let from_block = match crate::rpc::retry_read(
-                || crate::rpc::get_block_number(&state.rpc_url),
-                &deadline,
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    state.auto_watch_ended(kind, &cancel, &e);
-                    return;
+            // match one sent before the screen existed. Read once per screen
+            // rather than once per watch, so returning to the Auto-detect tab
+            // resumes the window the screen opened instead of starting a later
+            // one past a transaction that has already landed.
+            let from_block = match state.auto_watch.opened_at(kind) {
+                Some(block) => block,
+                None => {
+                    let head = crate::rpc::retry_read(
+                        || {
+                            crate::rpc::get_block_number_within(
+                                &state.rpc_url,
+                                crate::rpc::WATCH_REQUEST_TIMEOUT,
+                            )
+                        },
+                        &deadline,
+                    );
+                    match head {
+                        Ok(block) => state.auto_watch.opened_at_or(kind, block),
+                        Err(e) => {
+                            state.auto_watch_ended(kind, &cancel, &e);
+                            return;
+                        }
+                    }
                 }
             };
 
@@ -746,7 +816,14 @@ impl IpcState {
                 AutoWatchKind::Activate => match token_id {
                     Some(id) => {
                         let read = crate::rpc::retry_read(
-                            || crate::rpc::cooldown_ready(&state.rpc_url, contract_addr, id),
+                            || {
+                                crate::rpc::cooldown_ready_within(
+                                    &state.rpc_url,
+                                    contract_addr,
+                                    id,
+                                    crate::rpc::WATCH_REQUEST_TIMEOUT,
+                                )
+                            },
                             &deadline,
                         );
                         match read {
