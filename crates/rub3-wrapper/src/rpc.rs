@@ -431,6 +431,11 @@ pub fn resolve_ens(_rpc_url: &str, _name: &str) -> Result<Address, RpcError> {
 // ── Tier-3: activation / cooldown ─────────────────────────────────────────────
 
 /// Calls `cooldownReady(tokenId)` view; returns `(ready, blocks_remaining)`.
+///
+/// Classified rather than blanket-labelled a contract error, for the reason
+/// `poll_for_activate` gives: an auto-detect watch reads this before it starts
+/// and retries it on `retry_read`, so a rate limit reported as a revert would be
+/// a settled answer that ends the watch on the first hiccup.
 pub fn cooldown_ready(
     rpc_url: &str,
     contract: Address,
@@ -443,7 +448,7 @@ pub fn cooldown_ready(
             .cooldownReady(U256::from(token_id))
             .call()
             .await
-            .map_err(RpcError::contract)?;
+            .map_err(|e| classify_call_error(&e))?;
         Ok((r.ready, r.blocksRemaining.to::<u64>()))
     })
 }
@@ -985,13 +990,13 @@ impl Deadline {
 /// row is not noise, and is reported as the failure it is rather than as a
 /// timeout, so the screen can say which of the two happened.
 #[cfg(feature = "onchain-write")]
-fn watch<F>(
+fn watch<T, F>(
     mut poll: F,
     deadline: &Deadline,
     interval: std::time::Duration,
-) -> Result<String, RpcError>
+) -> Result<T, RpcError>
 where
-    F: FnMut() -> Result<Option<String>, RpcError>,
+    F: FnMut() -> Result<Option<T>, RpcError>,
 {
     // Nothing is asked of the endpoint until the deadline says there is
     // something to ask about; see `Deadline::starting_in`.
@@ -1006,7 +1011,7 @@ where
         }
 
         match poll() {
-            Ok(Some(hash)) => return Ok(hash),
+            Ok(Some(found)) => return Ok(found),
             // The node answered, so whatever failed before it was transient.
             Ok(None) => consecutive_errors = 0,
             Err(e) if !e.is_retryable() => return Err(e),
@@ -1022,6 +1027,26 @@ where
             return Err(RpcError::WatchEnded(end));
         }
     }
+}
+
+/// Makes one read on the same terms [`watch`] polls on: the same cadence, the
+/// same tolerance for a run of retryable failures, the same deadline and the
+/// same cancellation.
+///
+/// For the reads a watch has to make *before* it can start - the head block it
+/// counts from, and the cooldown it may have to wait out. Those are ordinary
+/// calls against the same endpoint the poll loop is about to be forgiving with,
+/// and without this they are the only requests in the flow with no tolerance at
+/// all: one 429 from a public endpoint on the first of them ends auto-detect a
+/// second after the screen rendered, switches the tab and takes the focus, while
+/// the identical 429 one poll later is absorbed in silence. The asymmetry is the
+/// bug; the retry policy lives in one place so it cannot come back.
+#[cfg(feature = "onchain-write")]
+pub fn retry_read<T, F>(mut read: F, deadline: &Deadline) -> Result<T, RpcError>
+where
+    F: FnMut() -> Result<T, RpcError>,
+{
+    watch(|| read().map(Some), deadline, WATCH_POLL_INTERVAL)
 }
 
 /// Watches for the ERC-721 mint that a `purchase()` sent from the user's wallet
@@ -1111,26 +1136,37 @@ fn poll_for_mint(
 /// happened; the moment it passes, the activation is in that block and that one
 /// block is searched for the transaction that did it.
 ///
-/// **Which transaction, and why not the sender.** §5.1a describes picking the
-/// receipt whose `to` is the contract and whose `from` is the wallet, but the
-/// signature it specifies carries no wallet, and the token id it does carry is
-/// the sharper discriminator anyway: `Activated` indexes it, so the log names
-/// the token this screen is waiting on rather than merely the account that paid
-/// for the gas. That also survives an activation relayed by someone else, which
-/// a `from` comparison would read as a stranger's transaction and miss.
+/// **Why not the receipt scan §5.1a specifies.** The section asks for
+/// `eth_getBlockByNumber` plus a scan of the block's receipts, picking the one
+/// whose `to` is the contract and whose `from` is the wallet. That was abandoned
+/// during the build, for one blocking reason and one cost:
 ///
-/// **And why one `eth_getLogs` rather than a receipt scan.** §5.1a sketches
-/// fetching the block's receipts and picking from them, which costs one
-/// `eth_getTransactionReceipt` per transaction in the block: a Base block holds
-/// hundreds, so the poll that finally sees the activation would fire hundreds
-/// of sequential requests at the user's endpoint, and a single failure among
-/// them would end the poll and start the whole scan over. Asking for the block
-/// with its transactions inlined instead would let `to` be read without a
-/// receipt, but a Base block also carries the OP-stack deposit transaction,
-/// whose `0x7e` type this provider's Ethereum types refuse to decode. The
-/// indexed log the event already emits answers the question in one request on
-/// any chain, and it is the same shape [`watch_for_mint`] uses. A reverted
-/// activation emits nothing, so the revert check comes for free.
+///   * **Blocking.** Reading `to` without a receipt means asking for the block
+///     with its transactions inlined, and a Base block carries the OP-stack
+///     deposit transaction, whose `0x7e` type this provider's Ethereum
+///     transaction types refuse to decode. The workspace has no `op-alloy`
+///     dependency, so the block cannot be deserialized at all and the scan never
+///     gets as far as reading a `to`.
+///   * **Cost.** Falling back to one `eth_getTransactionReceipt` per
+///     transaction, a Base block holds hundreds, so the poll that finally sees
+///     the activation would fire hundreds of sequential requests at the user's
+///     endpoint, and a single failure among them would end the poll and start
+///     the whole scan over.
+///
+/// What is used instead is the `Activated(uint256 indexed tokenId, ...)` log the
+/// contract already emits, fetched with one `eth_getLogs` pinned to the single
+/// block `lastActivationBlock` named - the same shape [`watch_for_mint`] uses,
+/// and one request on any chain.
+///
+/// **What that log carries in place of the two receipt fields.** The specified
+/// `from == wallet` half has no counterpart in the signature §5.1a gives this
+/// function, which carries no wallet; the indexed token id it does carry is the
+/// sharper discriminator, naming the token this screen is waiting on rather than
+/// the account that paid for the gas. The `to == contract` half is not dropped
+/// but moved: the filter pins `address == contract`, so a match is an event this
+/// contract emitted, which is a stronger statement than a transaction merely
+/// addressed to it. A reverted activation emits no log, so the revert check
+/// comes for free.
 #[cfg(feature = "onchain-write")]
 pub fn watch_for_activate(
     rpc_url: &str,
@@ -2526,6 +2562,18 @@ mod watch_loop_tests {
     const TICK: Duration = Duration::from_millis(20);
     const HASH: &str = "0xfeed";
 
+    /// The loop under test, pinned to the `String` a real watch returns.
+    ///
+    /// `watch` is generic over what a poll finds, because `retry_read` reuses it
+    /// for the tuple `cooldownReady` answers with. A test whose poll never
+    /// matches never names that type, so it is named once here.
+    fn watch_hashes<F>(poll: F, deadline: &Deadline, interval: Duration) -> Result<String, RpcError>
+    where
+        F: FnMut() -> Result<Option<String>, RpcError>,
+    {
+        watch(poll, deadline, interval)
+    }
+
     /// A budget long enough that only the assertion under test can end a watch.
     fn generous() -> Deadline {
         Deadline::after(Duration::from_secs(30))
@@ -2550,7 +2598,7 @@ mod watch_loop_tests {
     #[test]
     fn a_match_after_several_empty_polls_is_still_returned() {
         let polls = AtomicU32::new(0);
-        let hash = watch(
+        let hash = watch_hashes(
             || {
                 if polls.fetch_add(1, Ordering::Relaxed) < 3 {
                     Ok(None)
@@ -2573,7 +2621,7 @@ mod watch_loop_tests {
     #[test]
     fn an_exhausted_budget_ends_the_watch_as_a_timeout() {
         let deadline = Deadline::after(Duration::from_millis(120));
-        let err = watch(|| Ok(None), &deadline, TICK).expect_err("the budget must run out");
+        let err = watch_hashes(|| Ok(None), &deadline, TICK).expect_err("the budget must run out");
         assert_eq!(end_of(&err), WatchEnd::Timeout);
         assert!(
             err.is_retryable(),
@@ -2595,7 +2643,7 @@ mod watch_loop_tests {
         let polls = AtomicU32::new(0);
         let started = Instant::now();
         let interval = Duration::from_secs(5);
-        let err = watch(
+        let err = watch_hashes(
             || {
                 // Cancelled from inside the first sleep, which is where a real
                 // one arrives: the IPC handler raises the flag while the watch
@@ -2636,7 +2684,7 @@ mod watch_loop_tests {
     #[test]
     fn a_transient_failure_is_absorbed_and_the_watch_goes_on() {
         let polls = AtomicU32::new(0);
-        let hash = watch(
+        let hash = watch_hashes(
             || match polls.fetch_add(1, Ordering::Relaxed) {
                 0 | 2 => Err(RpcError::Transport("502 bad gateway".into())),
                 1 => Ok(None),
@@ -2659,7 +2707,7 @@ mod watch_loop_tests {
         // test ends on the budget rather than on the error count, it hangs
         // rather than passing by accident.
         let deadline = Deadline::after(Duration::from_secs(30));
-        let err = watch(
+        let err = watch_hashes(
             || {
                 polls.fetch_add(1, Ordering::Relaxed);
                 Err(RpcError::Transport("connection refused".into()))
@@ -2687,7 +2735,7 @@ mod watch_loop_tests {
     fn a_single_good_answer_resets_the_failure_run() {
         let polls = AtomicU32::new(0);
         let total = WATCH_MAX_CONSECUTIVE_ERRORS * 2;
-        let hash = watch(
+        let hash = watch_hashes(
             || {
                 let n = polls.fetch_add(1, Ordering::Relaxed);
                 if n >= total {
@@ -2710,7 +2758,7 @@ mod watch_loop_tests {
     #[test]
     fn an_unretryable_failure_ends_the_watch_immediately() {
         let polls = AtomicU32::new(0);
-        let err = watch(
+        let err = watch_hashes(
             || {
                 polls.fetch_add(1, Ordering::Relaxed);
                 Err(RpcError::InvalidInput("not an address".into()))
@@ -2732,7 +2780,7 @@ mod watch_loop_tests {
         let deadline = Deadline::after(Duration::from_secs(30)).cancelled_by(cancel);
 
         let polls = AtomicU32::new(0);
-        let err = watch(
+        let err = watch_hashes(
             || {
                 polls.fetch_add(1, Ordering::Relaxed);
                 Ok(None)
@@ -2760,7 +2808,7 @@ mod watch_loop_tests {
         let deadline = Deadline::after(Duration::from_millis(200)).starting_in(HOLD);
         let polls = AtomicU32::new(0);
         let started = Instant::now();
-        let hash = watch(
+        let hash = watch_hashes(
             || {
                 polls.fetch_add(1, Ordering::Relaxed);
                 Ok(Some(HASH.to_string()))
@@ -2798,7 +2846,7 @@ mod watch_loop_tests {
             std::thread::sleep(Duration::from_millis(50));
             cancel.cancel();
         });
-        let err = watch(
+        let err = watch_hashes(
             || {
                 polls.fetch_add(1, Ordering::Relaxed);
                 Ok(None)

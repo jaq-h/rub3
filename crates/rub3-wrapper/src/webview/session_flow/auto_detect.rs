@@ -81,7 +81,13 @@ fn mint_log() -> serde_json::Value {
 /// screen is built from. Both front doors drive the same node, which is what
 /// makes the comparison between them a comparison of the doors alone.
 fn purchased_node() -> StubNode {
-    StubNode::routed(|method, _params| match method {
+    StubNode::routed(purchased_reply)
+}
+
+/// That node's answers, callable on their own so a test can intercept one of
+/// them and leave the rest of the flow intact.
+fn purchased_reply(method: &str, _params: &serde_json::Value) -> serde_json::Value {
+    match method {
         "eth_blockNumber" => serde_json::json!(format!("0x{HEAD:x}")),
         "eth_getLogs" => serde_json::json!([mint_log()]),
         "eth_getTransactionReceipt" => serde_json::json!({
@@ -104,7 +110,7 @@ fn purchased_node() -> StubNode {
         // answering "ready, nothing remaining".
         "eth_call" => serde_json::json!(format!("0x{:064x}{:064x}", 1, 0)),
         _ => serde_json::json!(null),
-    })
+    }
 }
 
 fn window_on(rpc_url: &str) -> Window {
@@ -218,6 +224,44 @@ fn starting_a_watch_stops_the_one_before_it() {
     assert!(
         over_one_interval <= 1,
         "two watches are running: {over_one_interval} requests in one poll interval",
+    );
+}
+
+/// A single bad answer to the read a watch opens with does not end the watch.
+///
+/// The head block and the cooldown are read before the poll loop exists, so
+/// without the shared retry policy they were the only requests in the flow with
+/// no tolerance at all: one 429 from a public endpoint on the first of them
+/// ended auto-detect about a second after the screen rendered, switched the tab
+/// and took the focus, while the identical 429 one poll later was absorbed in
+/// silence. Asserted as the flow reaching the cooldown screen, because "did not
+/// give up" is only worth anything if the watch went on to do its job.
+#[test]
+#[cfg(feature = "cooldown")]
+fn one_bad_answer_to_the_first_read_does_not_end_the_watch() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let first_head_read = AtomicBool::new(true);
+    let node = StubNode::routed(move |method, params| match method {
+        // Not a block number, so the read fails the way a rate limit does - once.
+        "eth_blockNumber" if first_head_read.swap(false, Ordering::Relaxed) => {
+            serde_json::Value::Null
+        }
+        other => purchased_reply(other, params),
+    });
+
+    let window = window_on(&node.url);
+    window.post(serde_json::json!({
+        "type":          "auto_watch_start",
+        "kind":          "mint",
+        "owner_address": WALLET,
+        "token_id":      serde_json::Value::Null,
+    }));
+
+    let cooldown = window.wait_for("onShowCooldown");
+    assert_eq!(
+        cooldown["tokenId"], TOKEN_ID,
+        "the watch must have retried the head read and gone on to find the mint",
     );
 }
 

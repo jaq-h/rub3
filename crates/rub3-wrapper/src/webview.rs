@@ -709,11 +709,22 @@ impl IpcState {
                 }
             };
 
+            // The budget covers the whole watch, the two reads that set it up
+            // included, and the cancel flag reaches them too. Those reads go
+            // through `retry_read` so a 429 on the first request of the flow is
+            // absorbed exactly as one mid-poll would be, rather than ending
+            // auto-detect a second after the screen rendered.
+            let deadline =
+                crate::rpc::Deadline::after(crate::rpc::WATCH_BUDGET).cancelled_by(cancel.clone());
+
             // The block the screen was opened at. Read here rather than sent by
             // the page, which cannot see the chain: a watch starting from a
             // number the page guessed would either miss the transaction or
             // match one sent before the screen existed.
-            let from_block = match crate::rpc::get_block_number(&state.rpc_url) {
+            let from_block = match crate::rpc::retry_read(
+                || crate::rpc::get_block_number(&state.rpc_url),
+                &deadline,
+            ) {
                 Ok(b) => b,
                 Err(e) => {
                     state.auto_watch_ended(kind, &cancel, &e);
@@ -734,7 +745,11 @@ impl IpcState {
                 #[cfg(feature = "cooldown")]
                 AutoWatchKind::Activate => match token_id {
                     Some(id) => {
-                        match crate::rpc::cooldown_ready(&state.rpc_url, contract_addr, id) {
+                        let read = crate::rpc::retry_read(
+                            || crate::rpc::cooldown_ready(&state.rpc_url, contract_addr, id),
+                            &deadline,
+                        );
+                        match read {
                             Ok((_, blocks_remaining)) => cooldown_wait(blocks_remaining),
                             Err(e) => {
                                 state.auto_watch_ended(kind, &cancel, &e);
@@ -748,9 +763,7 @@ impl IpcState {
                 AutoWatchKind::Activate => std::time::Duration::ZERO,
             };
 
-            let deadline = crate::rpc::Deadline::after(crate::rpc::WATCH_BUDGET)
-                .starting_in(hold)
-                .cancelled_by(cancel.clone());
+            let deadline = deadline.starting_in(hold);
 
             match kind {
                 AutoWatchKind::Mint => {
