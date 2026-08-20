@@ -555,13 +555,13 @@ The distinction matters because an agent can verify the first list before buying
 | Deploy-time parameters frozen | `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` are `immutable` - no `setPredecessor(address)` selector. On `Rub3Factory`, `previousFactory` is `immutable` in the same way, with no `setPreviousFactory(address)`: it decides which predecessors a canonical deploy may name, so repointing it would grant a laundered contract standing after the fact |
 | The protocol fee is frozen per contract | `feeBps` and `treasury` are `immutable` on the licence contract and on the `Rub3Factory` that stamped them; `setFeeBps(uint16)` and `setTreasury(address)` are absent from the runtime bytecode. Read `feeBps()` / `treasury()` before buying and they are what that contract will charge for as long as it exists |
 | Migration cannot be forced | `claimFromPredecessor` is the only mint path outside `purchase` / `purchaseWithAuthorization`, and it checks `ownerOf(...) == msg.sender` on the predecessor |
+| Registry delisting never invalidates a token | `Rub3Registry` (§3.2) reaches a licence contract only through `STATICCALL`, and the EVM refuses any state change under one. Walk the registry's runtime opcodes, skipping each `PUSH1..PUSH32` immediate, and no `CALL`, `CALLCODE`, `DELEGATECALL`, `CREATE`, `CREATE2` or `SELFDESTRUCT` appears at all - so there is no opcode left in it that could write to a licence contract, hold ETH, deploy anything, or destroy itself. `test_audit_registryHoldsNoStateChangingExternalCall` in `contracts/test/Rub3Registry.t.sol` runs exactly that walk, with a positive control on a licence contract, which does contain a `CALL`. What stays convention is how a *consumer* reads a delisting, and the wrapper's reading is that discovery has no bearing on a held token |
 | The deployed code is this repository's template, not a modified copy | Zero the immutable byte ranges published in `contracts/canonical-bytecode.json`, `sha256` the result, and compare against that contract's `deployed_bytecode_sha256`. This is the check every row above depends on: they describe the template, and only a fingerprint match says the deployed contract *is* the template. It is name-independent, so a modified copy exposing seizure under an unguessed name fails it while passing the selector scan. `crates/rub3-wrapper/src/attest.rs` pins the same fingerprints and refuses to purchase without a match. `Rub3Factory.isDeployed(addr)` narrows the same question from the other side - a factory deploy is provably an unmodified template on that factory's terms - but the factory's own code has to be fingerprinted first, and its runtime code does not contain the licence implementations, so verifying one means also comparing `accessDeployer()` / `subscriptionDeployer()` against the manifest, which pins all six. A published fingerprint only covers the releases the comparator already has, so a contract built from a **later** release fails this row indistinguishably from a modified copy. `Rub3CodeRegistry` is the append-only on-chain record that tells the two apart (implementation.md §2.9); it is consulted only on a miss, its own code is fingerprinted by this same row before its answer is believed, and none is deployed yet |
 
 **Convention** - real commitments, but not provable from the bytecode:
 
 | Property | Why it isn't bytecode |
 |---|---|
-| Registry delisting never invalidates a token | `Rub3Registry` is not built yet (§3.2). Today it is a design commitment; once built, the property holds because the registry has no call into the license contract at all |
 | Code-registry deprecation never invalidates a token | `Rub3CodeRegistry` (§2.9) has no status that could - `Deprecated` is "not recommended for new purchases", and the record stays whole. Bytecode proves the absence of removal and rewrite, which is asserted in `test/Rub3CodeRegistry.t.sol`; what stays convention is how a *consumer* reads the status. The wrapper's reading is to warn and buy, and nothing on its launch path consults the registry at all |
 | The code registry's owner key is not misused | Append-only bounds a compromise of it to *additions*, each a permanent public `Published` event, and leaves it unable to remove, rewrite, or invalidate. That is a bound and a detection surface, not a prevention: alarming on those events is monitoring, and no watcher is built |
 | An honest answer from the RPC endpoint | The fingerprint row above reduces to `eth_getCode`, and its code-registry fallback to `eth_call`, being answered truthfully by whatever endpoint the wrapper was packed with. An endpoint that lies returns canonical code for a hostile contract, and lies about the registry's own code in the same breath, so the second authority neither dilutes this nor compounds it - one dishonest view of chain state defeats both reads at once, and nothing on the machine can tell. **This is the largest residual risk in the whole scheme and it is unclosed.** The honest form of the claim is "an honest view of chain state implies canonical code"; a quorum across independent endpoints, or a light-client-verified read, is what would close it, and neither is built |
@@ -598,21 +598,44 @@ An agent checks a registry-supplied offset table against the code it fetched bef
 
 Nothing is deployed: `code_registry` is `null` for every chain in `contracts/deployments.json`, so every wrapper refuses on a table miss exactly as it did before this contract existed.
 
-#### Rub3Registry *(planned - implementation.md §3.2)*
+#### Rub3Registry *(implementation.md §3.2)*
 
-Discovery and verification, **never validity** - delisting removes the badge and the listing; it cannot invalidate a token or a session.
+Discovery and verification, **never validity** - delisting removes the badge and the listing; it cannot invalidate a token or a session. **This is not `Rub3CodeRegistry`**: that one answers "is this bytecode a genuine rub3 release", keyed by masked code hash, and is read on the purchase path; this one answers "which apps exist and which are listable", keyed by licence contract address, and is read by a shopper before it has an address to verify. Neither is evidence for the other's question.
 
 ```solidity
-contract Rub3Registry {
-    function register(string calldata appName, address licenseContract) external {
-        require(factory.isDeployed(licenseContract), "not canonical");
-        require(IOwnable(licenseContract).owner() == msg.sender, "not contract owner");
-        // sets appName.rub3.eth → licenseContract + agent card
-    }
+contract Rub3Registry is Ownable2Step {   // no proxy, no call that is not a STATICCALL
+    address public immutable factory;     // from contracts/deployments.json, per chain id
+
+    // Listable iff a canonical factory deployed it and the caller owns it, both read live.
+    function register(address license, string calldata appName, string calldata contentURI) external;
+    function isCanonicalDeploy(address license) external view returns (bool);   // walks previousFactory
+
+    // Discovery only, all four. Nothing here reaches a token, a session, or a price.
+    function delist(address license) external;                  // the licence contract's owner
+    function relist(address license) external;                  // the licence contract's owner
+    function suspend(address license, string calldata reason) external onlyOwner;
+    function reinstate(address license) external onlyOwner;
+
+    // The judgement the licence contracts deliberately do not hold.
+    function setTokenRecognised(address token, bool recognised) external onlyOwner;
+    function isRecognisedToken(address token) external view returns (bool);   // address(0) always true
+
+    // Ranked recognised-rail-first, each group in registration order, priceToken read live.
+    function rankedListings() external view returns (address[] memory);
+    function card(address license) external view returns (AgentCard memory);
+    function cards(uint256 start, uint256 count) external view returns (AgentCard[] memory);
 }
 ```
 
-Only factory deploys are listable. Each entry doubles as an ERC-8004-style agent card - contract address, price(s), payment methods, content URI, hash set, identity model - so agent purchasing policies can allowlist "verified rub3 contracts" and machine-audit the invariants above before buying.
+**Only factory deploys are listable, and only by the contract's own owner.** `isCanonicalDeploy` walks `previousFactory` for up to eight further generations, so an older generation's deploys stay listable when rub3 ships a new factory; a directly deployed licence is good software that is simply not listable, which is the trade the fee-free path makes. Ownership is read live, so transferring the licence contract transfers control of its listing with nothing to update in the registry.
+
+Each entry doubles as an ERC-8004-style agent card - contract address, both price rails, payment methods, content URI, wrapper hash set with each hash's status, identity model, and the frozen fee terms - so agent purchasing policies can allowlist "verified rub3 contracts" and machine-audit the invariants above before buying. Everything on a card except `appName` and `contentURI` is read off the licence contract at call time, so a card cannot describe terms the contract no longer offers.
+
+**Ranking, and why the quote is read live.** The protocol fee accrues in whatever asset a contract lists as its `priceToken`, and the licence contracts hold no policy about which assets count - see [Why the fee split is shaped this way](#why-the-fee-split-is-shaped-this-way). The registry is where that judgement lives: entries quoting a recognised token rank above entries that do not, in a stable partition. The native rail is always recognised and cannot be un-recognised, because an ETH-only contract quotes no token at all and its fee accrues in ETH; the only entries that rank below are those quoting a token rail in an unrecognised asset. The list is registry-maintained rather than baked into a licence contract so it can move as tokens do without touching anything deployed.
+
+`setTokenPrice(address,uint256)` stays owner-callable on a licence contract for its whole life, so **the rank reads `priceToken` live on every call rather than trusting a snapshot taken at registration**. A frozen snapshot would keep advertising a contract on a quote it no longer honours, with no event from the registry to say so. An off-chain indexer has the equivalent: re-validate on the licence contract's `TokenPriceUpdated`. Demotion is discovery like everything else here - an entry that drops to the bottom has lost placement and nothing else.
+
+**What the registry owner can and cannot do.** It can maintain the recognised-token list, and it can withhold the badge from a listing with a logged reason and give it back. That bounds a compromise of the owner key to "the discovery surface is wrong until it is fixed": there is no state in this contract whose worst case reaches a token, a session, a renewal, or a price. The bytecode row above is what proves it rather than this paragraph.
 
 ---
 

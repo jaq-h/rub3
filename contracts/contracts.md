@@ -736,7 +736,7 @@ OFFSETS=$(jq -r "[.contracts.$NAME.immutable_ranges[] | \"(\(.start),\(.length))
 SOLC=$(jq -er '.build.solc_version' canonical-bytecode.json)
 COMMIT=0x$(git rev-parse HEAD | sed 's/$/000000000000000000000000/')   # 20-byte sha1, right-padded to bytes32
 
-# role: 0 licence, 1 factory, 2 deployer helper, 3 code registry
+# role: 0 licence, 1 factory, 2 deployer helper, 3 code registry, 4 discovery registry
 cast send <CODE_REGISTRY> \
   "publish(bytes32,uint8,string,string,bytes32,string,(uint32,uint32)[])" \
   "0x$MCH" 0 "$NAME" "<release label>" "$COMMIT" "$SOLC" "[$OFFSETS]" \
@@ -752,7 +752,7 @@ cast send <CODE_REGISTRY> "deprecate(bytes32,string)" \
 
 ### Reading it, and the offsets bootstrap
 
-Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. The registry breaks that circle by publishing the *distinct* tables its releases use - four across today's canonical set, one each for `Rub3Access`, `Rub3Subscription` and `Rub3Factory` plus the empty one the two deployer helpers and the registry share - so a verifier fetches the short candidate list once, hashes under each, and looks each result up.
+Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. The registry breaks that circle by publishing the *distinct* tables its releases use - five across today's canonical set, one each for `Rub3Access`, `Rub3Subscription`, `Rub3Factory` and `Rub3Registry` plus the empty one the two deployer helpers and the code registry share - so a verifier fetches the short candidate list once, hashes under each, and looks each result up.
 
 **On a purchase path, read a bounded window of the newest tables.** How many tables exist is the owner key's to choose, and the append-only bound on that key covers what it can publish, not how long a buyer waits for it. `latestOffsetTables(count)` returns at most `count` tables newest-first, clamped, so a verifier asks for the number of candidates it is willing to try and never pays to transfer or decode more; each surviving candidate then costs its own `record` round trip, so hold the same bound over the loop as well - a node need not honour what it was asked for. The wrapper reads `latestOffsetTables(attest::MAX_CANDIDATE_OFFSET_TABLES)` and caps the lookups at the same number.
 
@@ -778,6 +778,107 @@ Be precise about what that last check does *not* settle, because the guarantee i
 A verifier must fetch the registry's own runtime code and compare it against `Rub3CodeRegistry` in `canonical-bytecode.json` before believing a word it says. Otherwise the trust rests on whoever put an address in front of you, which is what a published fingerprint exists to avoid. The wrapper carries one registry address per chain and the registry's own masked hash, both frozen into the binary at pack time, and refuses to consult an address whose code does not match.
 
 **It rests on an honest RPC, like everything else here.** A single endpoint that lies returns canonical code for a hostile contract, and lies about the registry's own code in the same breath - the second authority neither dilutes that risk nor compounds it, because one dishonest view of chain state defeats both reads at once. The claim supported is "an honest view of chain state implies canonical code", and no stronger one. A read quorum would close it and is not built.
+
+## The discovery registry
+
+`Rub3Registry` is the discovery surface of `../implementation.md` §3.2: which applications exist, which of them are listable, and in what order a buyer should be shown them.
+
+**It is not `Rub3CodeRegistry`**, and the two are never interchangeable. They share four letters and nothing else:
+
+| Contract | Question it answers | Keyed by | Read by |
+|---|---|---|---|
+| `Rub3CodeRegistry` | is this bytecode a genuine rub3 release? | masked code hash | a wrapper on the purchase path, when its pinned table missed |
+| `Rub3Registry` | which apps exist, and which are listable? | licence contract address | an agent shopping, before it has an address to verify |
+
+Neither is evidence for the other's question. Canonical *code* says nothing about which address runs it, and a listing says nothing about whether the code at that address is genuine. An agent that wants both asks both, in that order: find a candidate here, then verify it against the code registry and the canonical fingerprint before spending.
+
+**Nothing is deployed.** The registry and the factory launch together (`../implementation.md` §2.3), and every entry in [`deployments.json`](deployments.json) is `null`, so there is no discovery registry to read on any public chain yet.
+
+### Discovery, never validity
+
+This is the invariant the contract is built around, and it is the one to check first when reading it. **Delisting removes the badge and the listing. It cannot invalidate a token, end a session, block a renewal, or change what a licence contract charges.**
+
+The proof is an absence rather than a promise. No licence contract in this project reads the registry, holds its address, or has any function that could be made to; `ownerOf`, `isValid` and `activate` run on state that lives in the licence contract, and every external call the registry makes is a `view`. `test/Rub3Registry.t.sol` asserts it behaviourally rather than leaving it as a claim: `test_delisting_cannotTouchAHeldTokenOrALiveSession` pulls every discovery lever at once - the owner delists, the registry suspends, and the payment token stops being recognised - and then measures the held token, its validation, its live session, a fresh activation, a fresh purchase and a renewal, all of which survive. `test_registryWrites_leaveTheLicenseContractUntouched` makes the same claim from the other side, snapshotting nine pieces of licence state across every registry write.
+
+That is what bounds a compromise of the registry's owner key: it can hide listings, restore them, and reorder them. It cannot take away anything anyone paid for. There is no state here whose worst case is worse than "the discovery surface is wrong until it is fixed".
+
+`Rub3Registry` is deliberately **not** one of the targets in the forbidden-selector audit under [Auditing the invariants before buying](#auditing-the-invariants-before-buying). That list is about tokens - burns, seizures, pauses, renewal-term setters - and asserting it against a contract that holds no tokens would be a weak claim dressed as a strong one. The registry's invariant is a different one and is tested where it means something.
+
+### What may be listed
+
+`register(address,string,string)` gates on two things, both read live:
+
+1. **A canonical factory deployed the contract.** `isCanonicalDeploy(address)` checks `factory.isDeployed`, then walks `previousFactory` for up to `MAX_FACTORY_GENERATION_HOPS` (8) further generations, so an older generation's deploys stay listable when rub3 ships a new factory. A directly deployed licence is perfectly good software and is simply not listable; that is the trade the fee-free path makes, see [The accepted position on fee-free deployment](#the-accepted-position-on-fee-free-deployment).
+2. **The caller owns that licence contract**, by `Rub3License.owner()` at the moment of the call. Authority over a listing therefore follows the licence contract's ownership with nothing to update here: transfer the contract and the new owner controls the listing.
+
+Which factory a registry trusts is fixed at its deploy, from [`deployments.json`](deployments.json) keyed by chain id - the same committed answer everything else on this page reads, carrying the deploy block an indexer starts at and the generation in the `previousFactory` chain. It is immutable, because a registry that could be repointed at another factory could list contracts no rub3 factory ever deployed, which is the only thing a listing here asserts.
+
+The walk is deliberately a second implementation rather than a call to `Rub3Factory.isCanonicalPredecessor`, which performs the same steps for a different question. Binding discovery to the deploy path's rule would mean a future factory tightening its predecessor rule silently delisted applications, which is a validity decision reaching into discovery by the back door.
+
+### The entry is an agent card
+
+`card(address)` returns one machine-readable record: the contract address and its current owner, both price rails, the identity model and its ERC-6551 implementation, the full wrapper hash set with each hash's status, the content URI, and the frozen `feeBps` / `treasury`. `cards(start,count)` returns a ranked page of them, which is the one call an agent's spend policy makes.
+
+**Everything on a card except the two presentation fields is read off the licence contract at call time.** Only `appName` and `contentURI` are stored here, because they are the two facts the chain does not carry yet - §3.1 puts `contentURI` on the licence contract, and this field is what a listing quotes until it does. A card can therefore never describe terms the contract no longer offers.
+
+`appName` is required, because a listing nobody can name is not a listing. `contentURI` is not: an empty string means "nothing published yet", which is the honest state while §3.1 is unbuilt, and a mandatory field a developer has no value for is filled with a placeholder that reads like a URI. That is the position [`deployments.json`](deployments.json) already takes on unpublished addresses.
+
+```bash
+cast call <REGISTRY> "isCanonicalDeploy(address)(bool)" <LICENCE> --rpc-url $RPC
+cast call <REGISTRY> "rankedListings()(address[])" --rpc-url $RPC
+cast call <REGISTRY> "rankedListingWindow(uint256,uint256)(address[])" 0 25 --rpc-url $RPC
+cast call <REGISTRY> "isRecognisedRail(address)(bool)" <LICENCE> --rpc-url $RPC
+
+# One listing, whole.
+cast call <REGISTRY> \
+  "card(address)((address,address,string,string,uint8,bool,bool,uint256,address,uint256,bool,uint8,address,uint16,address,(bytes32,uint8)[],uint64))" \
+  <LICENCE> --rpc-url $RPC
+```
+
+Listing an application is one transaction from the licence contract's owner:
+
+```bash
+cast send <REGISTRY> "register(address,string,string)" \
+  <LICENCE> "My App" "ipfs://<cid>" --rpc-url $RPC --private-key $DEVELOPER_KEY
+
+# Presentation fields only; everything else is changed on the licence contract.
+cast send <REGISTRY> "updateListing(address,string,string)" \
+  <LICENCE> "My App" "ipfs://<newer cid>" --rpc-url $RPC --private-key $DEVELOPER_KEY
+
+# Withdraw and restore your own listing. Discovery only, both ways.
+cast send <REGISTRY> "delist(address)" <LICENCE> --rpc-url $RPC --private-key $DEVELOPER_KEY
+cast send <REGISTRY> "relist(address)" <LICENCE> --rpc-url $RPC --private-key $DEVELOPER_KEY
+```
+
+### The recognised-token list, and why the rank is read live
+
+The protocol fee accrues in whatever asset a contract lists as its `priceToken`, and the licence contracts deliberately hold no policy about which assets count (see [../architecture.md](../architecture.md#why-the-fee-split-is-shaped-this-way)). That judgement lives in the registry instead: entries quoting a recognised token rank above entries that do not, in a stable partition that keeps registration order inside each group.
+
+**The native rail is always recognised and cannot be un-recognised.** An ETH-only contract quotes no token at all (`priceToken == address(0)`) and its fee accrues in ETH, so the only entries that rank below are those quoting a token rail in an asset the registry does not recognise. `setTokenRecognised` rejects `address(0)` in both directions: allowing it would put the entire ETH-only population one owner transaction away from the bottom of the list.
+
+The list is registry-maintained rather than baked into a licence contract precisely so it can move as tokens do - deprecated, migrated, or newly worth accruing a fee in - without touching anything already deployed.
+
+**The rank reads `priceToken` live, on every call, and this is the part that would be wrong if it were done the obvious way.** `setTokenPrice(address,uint256)` stays owner-callable on a licence contract for its whole life, so a contract registered while priced in a recognised token can switch the block afterwards. A rank frozen at registration would go on advertising that contract on a quote it no longer honours, and no event the registry emits would say so. `test_rank_followsAPostRegistrationTokenPriceChange` is the test for exactly that sequence: two entries swap quotes after registration and the order swaps with them, so a snapshot implementation passes every other test in the file and fails that one.
+
+An off-chain indexer that would rather not re-read everything has the equivalent: re-validate an entry whenever the licence contract emits `TokenPriceUpdated`. What it must not do is read the quote once at registration and keep it.
+
+Demotion is discovery, bound by the same invariant as delisting: an entry that drops to the bottom has lost placement and nothing else.
+
+```bash
+# Curation, from the registry owner's key.
+cast send <REGISTRY> "setTokenRecognised(address,bool)" <TOKEN> true \
+  --rpc-url $RPC --private-key $OWNER_KEY
+cast call <REGISTRY> "recognisedTokens()(address[])" --rpc-url $RPC
+cast call <REGISTRY> "isRecognisedToken(address)(bool)" <TOKEN> --rpc-url $RPC
+
+# Withholding and restoring the badge. A suspension carries its reason, the way
+# revokeWrapperHash and deprecate do, and the listing's own owner cannot undo it.
+cast send <REGISTRY> "suspend(address,string)" <LICENCE> "<why>" \
+  --rpc-url $RPC --private-key $OWNER_KEY
+cast send <REGISTRY> "reinstate(address)" <LICENCE> --rpc-url $RPC --private-key $OWNER_KEY
+```
+
+Ownership is `Ownable2Step` and cannot be renounced: abandoning it would freeze the recognised-token list at whatever it happened to say, permanently and with no recovery, on a chain where the assets it names can be deprecated or migrated.
 
 ## Auditing the invariants before buying
 

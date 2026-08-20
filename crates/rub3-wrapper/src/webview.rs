@@ -980,6 +980,9 @@ fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNo
                         Some(Role::CodeRegistry) =>
                             "the registry that records which rub3 code is genuine, which is how \
                              this app checked the address in the first place",
+                        Some(Role::DiscoveryRegistry) =>
+                            "the registry that lists which rub3 apps exist, which is where an \
+                             address like this one is found rather than bought from",
                         // Not a state the gate produces - it accepts every
                         // licence-role match - but kept total rather than
                         // unreachable so a role added to the table later

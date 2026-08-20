@@ -106,7 +106,7 @@
     },
     "Rub3CodeRegistry": {
       "source": "src/Rub3CodeRegistry.sol",
-      "deployed_bytecode_sha256": "71c031334bbe5918f71922e0e6b7577ae0ee8c4d2626fe714aa536aa18b06e5c",
+      "deployed_bytecode_sha256": "121c884e3098c8170a79d0cae6fa7221986c11fabefe8371dd78ad450459bd9e",
       "immutable_ranges": []
     },
     "Rub3Factory": {
@@ -159,6 +159,24 @@
         },
         {
           "start": 2049,
+          "length": 32
+        }
+      ]
+    },
+    "Rub3Registry": {
+      "source": "src/Rub3Registry.sol",
+      "deployed_bytecode_sha256": "60bae1d9b9263cae3fb4fc664edce6b44c5616818c7593bcf29b0d26ed129783",
+      "immutable_ranges": [
+        {
+          "start": 902,
+          "length": 32
+        },
+        {
+          "start": 1764,
+          "length": 32
+        },
+        {
+          "start": 1885,
           "length": 32
         }
       ]

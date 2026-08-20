@@ -389,12 +389,14 @@ fn code_registry_answers_the_wrapper_over_a_real_chain_e2e() {
     //
     // Read through `ChainReader::record` directly rather than through
     // `consult_registry`, because a role is a property of a record and not of
-    // the code: this asks about four records without needing four contracts.
+    // the code: this asks about one record per role without needing one contract
+    // per role.
     for (index, (role, expected)) in [
         ("0", Role::Licence),
         ("1", Role::Factory),
         ("2", Role::Deployer),
         ("3", Role::CodeRegistry),
+        ("4", Role::DiscoveryRegistry),
     ]
     .into_iter()
     .enumerate()
