@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Ownable}      from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /// @notice The version authority for rub3 contract code: which masked code
@@ -185,12 +185,12 @@ contract Rub3CodeRegistry is Ownable2Step {
     ///         exactly once and can never be taken back.
     event Published(
         bytes32 indexed maskedCodeHash,
-        Role    indexed role,
+        Role indexed role,
         uint256 indexed offsetTable,
-        string  contractName,
-        string  version,
+        string contractName,
+        string version,
         bytes32 sourceCommit,
-        string  solcVersion
+        string solcVersion
     );
 
     /// @notice A release stopped being recommended for new purchases. It did not
@@ -327,11 +327,7 @@ contract Rub3CodeRegistry is Ownable2Step {
     ///         Clamped, so one call is enough: a `count` past the end returns
     ///         every table there is, and no reader needs {offsetTableCount}
     ///         first to avoid a revert.
-    function latestOffsetTables(uint256 count)
-        external
-        view
-        returns (ByteRange[][] memory window)
-    {
+    function latestOffsetTables(uint256 count) external view returns (ByteRange[][] memory window) {
         uint256 total = _offsetTables.length;
         uint256 taken = count < total ? count : total;
         window = new ByteRange[][](taken);
@@ -383,7 +379,9 @@ contract Rub3CodeRegistry is Ownable2Step {
         string calldata solcVersion,
         ByteRange[] calldata offsets
     ) external onlyOwner {
-        if (maskedCodeHash == bytes32(0)) revert MaskedCodeHashRequired();
+        if (maskedCodeHash == bytes32(0)) {
+            revert MaskedCodeHashRequired();
+        }
         if (_records[maskedCodeHash].status != Status.Unknown) {
             revert AlreadyPublished(maskedCodeHash);
         }

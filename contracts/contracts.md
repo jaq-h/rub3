@@ -18,6 +18,38 @@ forge --version   # forge 1.x.x
 anvil --version
 ```
 
+## Formatting
+
+Every Solidity file in this project is formatted by `forge fmt`, and CI gates it: `forge fmt --check` runs beside `cargo fmt --all -- --check` in the `lint` job of `.github/workflows/ci.yml`, and a drift turns that job red.
+
+```bash
+cd contracts
+forge fmt          # rewrite every file
+forge fmt --check  # what CI runs
+```
+
+`forge fmt` is not idempotent on a tree it has never formatted: one pass over unformatted source can leave output that a second pass changes again. If `forge fmt --check` is still red immediately after `forge fmt`, run `forge fmt` once more. A tree already in the committed shape converges in a single pass.
+
+### The `[fmt]` section is tuned, not stock
+
+`foundry.toml` carries a `[fmt]` section, and each entry there has a comment saying why it is set. The short version:
+
+| Setting | Value | Why |
+|---|---|---|
+| `line_length` | `100` | The style these files were hand-written in wraps at 100 columns. Stock 120 unwraps multi-line function headers, event parameter lists and struct literals that were split on purpose. |
+| `prefer_compact` | `"none"` | One parameter per line once a call, event or error has to wrap. Stock `"all"` repacks them into one dense line, which hides `indexed` markers and turns a one-parameter change into a whole-line diff. |
+| `single_line_imports` | `true` | An import stays one line even when a long dependency path pushes it past `line_length`. |
+| `wrap_comments` | `false` | Stock default, restated: doc comments here carry Markdown tables and ASCII rules that a re-wrap would destroy. |
+| `sort_imports` | `false` | Stock default, restated: imports are grouped by origin, not sorted. |
+
+### Keeping a block the formatter would flatten
+
+`forge fmt` has no notion of column alignment, so a hand-aligned block is flattened wherever the formatter touches it. That is accepted almost everywhere: the aligned assignment and declaration blocks that used to be here read fine one fact per line, and preserving them all would have meant opting most of the tree out of the formatter it just adopted.
+
+One block is exempt, via the formatter's own `// forgefmt: disable-next-item` marker: `_summary` in `script/Deploy.s.sol`. It prints a fixed-width, label-aligned deploy summary, and its source is laid out to mirror that output, one `console.log` per printed line with the label column aligned inside the format strings. Splitting the calls that run past `line_length` across four lines each breaks that correspondence and makes the printed layout unreadable from the source. The marker is the narrow fix; loosening `line_length` for the whole tree to save one function would not be.
+
+Prefer that marker, scoped to one item, over a config change, whenever a single block needs to keep its shape.
+
 ## Local testing with Anvil
 
 No `.env` file needed. Forge tests use Foundry's built-in VM - they run against an in-process EVM with no network.

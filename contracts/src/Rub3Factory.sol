@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Rub3Access}       from "./Rub3Access.sol";
-import {Rub3License}      from "./Rub3License.sol";
+import {Rub3Access} from "./Rub3Access.sol";
+import {Rub3License} from "./Rub3License.sol";
 import {Rub3Subscription} from "./Rub3Subscription.sol";
 
 /// @notice Everything a license contract needs at deploy except its economics,
@@ -12,16 +12,16 @@ import {Rub3Subscription} from "./Rub3Subscription.sol";
 /// would be naming rub3's revenue, so `feeBps` and `treasury` come from the
 /// factory's own immutables and from nowhere else - see {Rub3Factory}.
 struct Rub3LicenseParams {
-    string    name;
-    string    symbol;
+    string name;
+    string symbol;
     Rub3License.IdentityTerms identity;
     bytes32[] wrapperHashes;
-    Rub3License.SaleTerms     sale;
-    uint256   supplyCap;
-    uint256   cooldownBlocks;
-    address   predecessor;
+    Rub3License.SaleTerms sale;
+    uint256 supplyCap;
+    uint256 cooldownBlocks;
+    address predecessor;
     /// Contract owner. `address(0)` means the caller, which is the common case.
-    address   owner;
+    address owner;
 }
 
 /// @notice Deploys {Rub3Access}. Split out of {Rub3Factory} for one reason: a
@@ -216,8 +216,8 @@ contract Rub3Factory {
         address indexed license,
         address indexed owner,
         address indexed deployer,
-        uint8   model,
-        uint16  feeBps,
+        uint8 model,
+        uint16 feeBps,
         address treasury
     );
 
@@ -260,13 +260,17 @@ contract Rub3Factory {
                 revert IncompatiblePreviousFactory(previousFactory_);
             }
             try Rub3Factory(previousFactory_).isDeployed(address(0)) returns (bool) {}
-            catch { revert IncompatiblePreviousFactory(previousFactory_); }
+            catch {
+                revert IncompatiblePreviousFactory(previousFactory_);
+            }
             try Rub3Factory(previousFactory_).previousFactory() returns (address) {}
-            catch { revert IncompatiblePreviousFactory(previousFactory_); }
+            catch {
+                revert IncompatiblePreviousFactory(previousFactory_);
+            }
         }
 
-        feeBps          = feeBps_;
-        treasury        = treasury_;
+        feeBps = feeBps_;
+        treasury = treasury_;
         previousFactory = previousFactory_;
 
         // Created here rather than passed in, so the implementations this
@@ -274,7 +278,7 @@ contract Rub3Factory {
         // cannot be substituted afterwards or mis-supplied at construction. The
         // `new` sits in a constructor, so their creation code lives in this
         // factory's initcode and never in its runtime code.
-        accessDeployer       = address(new Rub3AccessDeployer());
+        accessDeployer = address(new Rub3AccessDeployer());
         subscriptionDeployer = address(new Rub3SubscriptionDeployer());
     }
 

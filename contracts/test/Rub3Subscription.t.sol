@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test}              from "forge-std/Test.sol";
-import {Rub3Subscription}  from "../src/Rub3Subscription.sol";
-import {Rub3License}       from "../src/Rub3License.sol";
+import {Test} from "forge-std/Test.sol";
+import {Rub3Subscription} from "../src/Rub3Subscription.sol";
+import {Rub3License} from "../src/Rub3License.sol";
 
 contract Rub3SubscriptionTest is Test {
     Rub3Subscription internal nft;
@@ -11,14 +11,14 @@ contract Rub3SubscriptionTest is Test {
     address internal owner = address(0xA11CE);
     address internal alice = address(0xA);
 
-    bytes32 internal constant WRAPPER_HASH    = keccak256("sub-wrapper-v1");
-    uint256 internal constant PRICE           = 0.01 ether;
-    uint256 internal constant SUPPLY_CAP      = 0;            // uncapped
-    uint256 internal constant PERIOD          = 30 days;
+    bytes32 internal constant WRAPPER_HASH = keccak256("sub-wrapper-v1");
+    uint256 internal constant PRICE = 0.01 ether;
+    uint256 internal constant SUPPLY_CAP = 0; // uncapped
+    uint256 internal constant PERIOD = 30 days;
     uint256 internal constant COOLDOWN_BLOCKS = 15;
-    uint8   internal constant IDENTITY        = 1;            // account (TBA)
-    address internal constant TBA_IMPL        = address(0xBEEF); // any non-zero impl
-    address internal constant NO_PREDECESSOR  = address(0);
+    uint8 internal constant IDENTITY = 1; // account (TBA)
+    address internal constant TBA_IMPL = address(0xBEEF); // any non-zero impl
+    address internal constant NO_PREDECESSOR = address(0);
 
     function _identity(uint8 model, address tbaImplementation)
         internal
@@ -48,9 +48,17 @@ contract Rub3SubscriptionTest is Test {
 
     function setUp() public {
         nft = new Rub3Subscription(
-            "Rub3 Sub", "R3S", _identity(IDENTITY, TBA_IMPL),
-            _hashes(WRAPPER_HASH), _sale(PRICE), _noFee(), SUPPLY_CAP, PERIOD, COOLDOWN_BLOCKS,
-            NO_PREDECESSOR, owner
+            "Rub3 Sub",
+            "R3S",
+            _identity(IDENTITY, TBA_IMPL),
+            _hashes(WRAPPER_HASH),
+            _sale(PRICE),
+            _noFee(),
+            SUPPLY_CAP,
+            PERIOD,
+            COOLDOWN_BLOCKS,
+            NO_PREDECESSOR,
+            owner
         );
         vm.deal(alice, 10 ether);
     }
@@ -58,8 +66,8 @@ contract Rub3SubscriptionTest is Test {
     // ── Metadata ──────────────────────────────────────────────────────────────
 
     function test_metadata() public view {
-        assertEq(nft.period(),            PERIOD);
-        assertEq(nft.identityModel(),     IDENTITY);
+        assertEq(nft.period(), PERIOD);
+        assertEq(nft.identityModel(), IDENTITY);
         assertEq(nft.tbaImplementation(), TBA_IMPL);
     }
 
@@ -118,7 +126,9 @@ contract Rub3SubscriptionTest is Test {
         uint256 id = nft.purchase{value: PRICE}(alice);
 
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE - 1, PRICE));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE - 1, PRICE)
+        );
         nft.renew{value: PRICE - 1}(id);
     }
 
@@ -131,7 +141,9 @@ contract Rub3SubscriptionTest is Test {
         uint256 expiry = nft.expiresAt(id);
 
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE * 2, PRICE));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE * 2, PRICE)
+        );
         nft.renew{value: PRICE * 2}(id);
 
         assertEq(nft.expiresAt(id), expiry, "a rejected renewal extends nothing");
@@ -185,9 +197,9 @@ contract Rub3SubscriptionTest is Test {
         nft.setPrice(PRICE / 10);
 
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(
-            Rub3License.IncorrectPayment.selector, PRICE / 10, PRICE
-        ));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE / 10, PRICE)
+        );
         nft.renew{value: PRICE / 10}(id);
 
         vm.prank(alice);
@@ -207,14 +219,14 @@ contract Rub3SubscriptionTest is Test {
         uint256 dear = nft.purchase{value: PRICE * 5}(alice);
 
         assertEq(nft.renewPrice(cheap), PRICE);
-        assertEq(nft.renewPrice(dear),  PRICE * 5);
+        assertEq(nft.renewPrice(dear), PRICE * 5);
 
         vm.startPrank(alice);
         nft.renew{value: PRICE}(cheap);
 
-        vm.expectRevert(abi.encodeWithSelector(
-            Rub3License.IncorrectPayment.selector, PRICE, PRICE * 5
-        ));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE, PRICE * 5)
+        );
         nft.renew{value: PRICE}(dear);
 
         nft.renew{value: PRICE * 5}(dear);
@@ -228,9 +240,9 @@ contract Rub3SubscriptionTest is Test {
     /// snapshot ignored it.
     function test_renewPrice_snapshotCannotBeInflatedByOverpaying() public {
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(
-            Rub3License.IncorrectPayment.selector, PRICE * 3, PRICE
-        ));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE * 3, PRICE)
+        );
         nft.purchase{value: PRICE * 3}(alice);
 
         vm.prank(alice);
@@ -241,7 +253,13 @@ contract Rub3SubscriptionTest is Test {
     function test_purchase_emitsSnapshotInEvent() public {
         vm.expectEmit(true, true, true, true);
         emit Rub3Subscription.Purchased(
-            0, alice, alice, block.timestamp + PERIOD, PRICE, address(0), 0
+            0,
+            alice,
+            alice,
+            block.timestamp + PERIOD,
+            PRICE,
+            address(0),
+            0
         );
         vm.prank(alice);
         nft.purchase{value: PRICE}(alice);

@@ -125,6 +125,16 @@ jobs:
   #
   # The repo has no `rustfmt.toml`: formatting is stock rustfmt defaults on
   # purpose, so `cargo fmt --all` is always the whole fix for a red fmt step.
+  #
+  # Solidity formatting is gated here too, beside its Rust counterpart, so both
+  # style gates live in one job and turn one check red. Unlike rustfmt, the
+  # Solidity side is NOT stock defaults: contracts/foundry.toml carries a tuned
+  # `[fmt]` section, and each non-default setting there is justified in a
+  # comment beside it. `forge fmt` (from contracts/) is always the whole fix for
+  # a red step. The checkout here takes no submodules on purpose: `forge fmt`
+  # parses and reprints, it never resolves an import, so it needs neither
+  # lib/openzeppelin-contracts nor lib/forge-std. It runs after the two cargo
+  # steps because it is the cheap one and the toolchain install is not.
   # ---------------------------------------------------------------------------
   lint:
     name: lint (fmt + clippy, blocking)
@@ -152,6 +162,14 @@ jobs:
       - name: cargo clippy (tier-3,sdk)
         if: always()
         run: cargo clippy -p rub3-wrapper --no-default-features --features tier-3,sdk --all-targets -- -D warnings
+
+      - uses: foundry-rs/foundry-toolchain@v1.9.1
+        if: always()
+
+      - name: forge fmt --check
+        if: always()
+        working-directory: contracts
+        run: forge fmt --check
 
   # ---------------------------------------------------------------------------
   # The `rub3` SDK crate (implementation.md §3.5), the library a wrapped

@@ -29,3 +29,30 @@ base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
 [etherscan]
 base         = { key = "${BASESCAN_API_KEY}", chain = "base"         }
 base_sepolia = { key = "${BASESCAN_API_KEY}", chain = "base-sepolia" }
+
+# `forge fmt` settings. Every entry below is a deliberate departure from, or a
+# deliberate restatement of, a stock default; see contracts/contracts.md ->
+# "Formatting". CI runs `forge fmt --check` as a blocking gate.
+[fmt]
+# The hand-written style these files already carried wraps at 100 columns
+# (measured: the 99th percentile line is 105 characters, and only 30 lines in
+# the whole tree exceed 100). Stock 120 would unwrap multi-line function
+# headers, event parameter lists and struct literals that were split on purpose
+# and are read one field per line.
+line_length = 100
+# Keep one parameter per line once a call, event or error has to wrap. The
+# stock "all" repacks the wrapped parameters into a single dense line inside
+# the parentheses, which hides the `indexed` markers on event parameters and
+# makes a one-parameter change show up as a whole-line diff.
+prefer_compact = "none"
+# Never explode a `import {Symbol} from "long/path.sol"` into a braces-on-their-
+# own-lines block just because the path pushes it past `line_length`. An import
+# is one fact and reads best as one line; the path length is not the author's
+# choice.
+single_line_imports = true
+# Restated defaults, load-bearing here rather than incidental:
+# doc comments in this tree are hand-wrapped around embedded Markdown tables
+# and ASCII rules that a re-wrap would destroy, and import order is grouped by
+# origin (OpenZeppelin, then local) rather than sorted.
+wrap_comments = false
+sort_imports = false

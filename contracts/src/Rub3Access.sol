@@ -13,20 +13,30 @@ contract Rub3Access is Rub3License {
     event Purchased(uint256 indexed tokenId, address indexed recipient, address indexed payer);
 
     constructor(
-        string        memory name_,
-        string        memory symbol_,
+        string memory name_,
+        string memory symbol_,
         IdentityTerms memory identity_,
-        bytes32[]     memory wrapperHashes_,
-        SaleTerms     memory sale_,
-        FeeTerms      memory fee_,
-        uint256              supplyCap_,
-        uint256              cooldownBlocks_,
-        address              predecessor_,
-        address              owner_
-    ) Rub3License(
-        name_, symbol_, identity_, wrapperHashes_,
-        sale_, fee_, supplyCap_, cooldownBlocks_, predecessor_, owner_
-    ) {
+        bytes32[] memory wrapperHashes_,
+        SaleTerms memory sale_,
+        FeeTerms memory fee_,
+        uint256 supplyCap_,
+        uint256 cooldownBlocks_,
+        address predecessor_,
+        address owner_
+    )
+        Rub3License(
+            name_,
+            symbol_,
+            identity_,
+            wrapperHashes_,
+            sale_,
+            fee_,
+            supplyCap_,
+            cooldownBlocks_,
+            predecessor_,
+            owner_
+        )
+    {
         // Succession is same-model only, and that is enforced here rather than
         // left to the deployer. {Rub3License} has already established that a
         // non-zero predecessor is a live contract answering the base read slice;
@@ -38,7 +48,9 @@ contract Rub3Access is Rub3License {
         if (predecessor_ != address(0)) {
             bool answersPeriod = true;
             try IRub3Predecessor(predecessor_).period() returns (uint256) {}
-            catch { answersPeriod = false; }
+            catch {
+                answersPeriod = false;
+            }
             if (answersPeriod) revert IncompatiblePredecessor(predecessor_);
         }
     }
@@ -78,10 +90,7 @@ contract Rub3Access is Rub3License {
     {
         address to = _resolveAuthorizedRecipient(recipient, auth.from);
         _payWithAuthorization(
-            auth,
-            priceToken,
-            priceAmount,
-            purchaseAuthorizationNonce(to, auth.salt)
+            auth, priceToken, priceAmount, purchaseAuthorizationNonce(to, auth.salt)
         );
         return _mintPurchased(to, auth.from);
     }

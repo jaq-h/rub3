@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {Rub3Factory}     from "../src/Rub3Factory.sol";
+import {Rub3Factory} from "../src/Rub3Factory.sol";
 
 /// @notice Deploys a {Rub3Factory}, the canonical deployment path and the point
 ///         at which the protocol's economics are chosen.
@@ -45,8 +45,8 @@ import {Rub3Factory}     from "../src/Rub3Factory.sol";
 /// license contract through it.
 contract DeployFactory is Script {
     function run() external {
-        uint16  feeBps          = uint16(vm.envUint("FEE_BPS"));
-        address treasury        = vm.envAddress("TREASURY");
+        uint16 feeBps = uint16(vm.envUint("FEE_BPS"));
+        address treasury = vm.envAddress("TREASURY");
         address previousFactory = vm.envOr("PREVIOUS_FACTORY", address(0));
 
         vm.startBroadcast();
@@ -59,11 +59,13 @@ contract DeployFactory is Script {
         console.log("  chain:                %d", block.chainid);
         console.log("  feeBps:               %d  (of every payment, immutable)", factory.feeBps());
         console.log("  treasury:             %s", factory.treasury());
-        console.log("  previousFactory:      %s%s",
+        console.log(
+            "  previousFactory:      %s%s",
             factory.previousFactory(),
             factory.previousFactory() == address(0)
                 ? "  (first factory: its deploys are the only canonical predecessors)"
-                : "");
+                : ""
+        );
         console.log("  accessDeployer:       %s", factory.accessDeployer());
         console.log("  subscriptionDeployer: %s", factory.subscriptionDeployer());
         console.log("");

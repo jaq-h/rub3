@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test}             from "forge-std/Test.sol";
-import {Rub3Access}       from "../src/Rub3Access.sol";
+import {Test} from "forge-std/Test.sol";
+import {Rub3Access} from "../src/Rub3Access.sol";
 import {Rub3Subscription} from "../src/Rub3Subscription.sol";
-import {Rub3Factory}      from "../src/Rub3Factory.sol";
-import {Rub3License}      from "../src/Rub3License.sol";
+import {Rub3Factory} from "../src/Rub3Factory.sol";
+import {Rub3License} from "../src/Rub3License.sol";
 import {MockEIP3009Token} from "./mocks/MockEIP3009Token.sol";
 
 /// @notice The ownership-invariant suite for implementation.md §2.4.
@@ -25,17 +25,17 @@ import {MockEIP3009Token} from "./mocks/MockEIP3009Token.sol";
 contract Rub3InvariantsTest is Test {
     Rub3Access internal nft;
 
-    address internal owner    = address(0xA11CE);
-    address internal alice    = address(0xA);
-    address internal bob      = address(0xB);
+    address internal owner = address(0xA11CE);
+    address internal alice = address(0xA);
+    address internal bob = address(0xB);
     address internal attacker = address(0xBAD);
 
     bytes32 internal constant HASH_V1 = keccak256("wrapper-v1-darwin-arm64");
     bytes32 internal constant HASH_V2 = keccak256("wrapper-v1-linux-x86_64");
     bytes32 internal constant HASH_V3 = keccak256("wrapper-v2-darwin-arm64");
 
-    uint256 internal constant PRICE           = 0.05 ether;
-    uint256 internal constant PERIOD          = 30 days;
+    uint256 internal constant PRICE = 0.05 ether;
+    uint256 internal constant PERIOD = 30 days;
     uint256 internal constant COOLDOWN_BLOCKS = 15;
 
     /// Stands in for USDC wherever an owner power over the stablecoin rail has
@@ -52,12 +52,19 @@ contract Rub3InvariantsTest is Test {
     function setUp() public {
         usdc = new MockEIP3009Token();
         nft = new Rub3Access(
-            "Rub3 Test", "R3T", _identity(0, address(0)),
-            _hashes(HASH_V1, HASH_V2), _sale(PRICE), _noFee(), 0, COOLDOWN_BLOCKS,
-            address(0), owner
+            "Rub3 Test",
+            "R3T",
+            _identity(0, address(0)),
+            _hashes(HASH_V1, HASH_V2),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            owner
         );
-        vm.deal(alice,    10 ether);
-        vm.deal(bob,      10 ether);
+        vm.deal(alice, 10 ether);
+        vm.deal(bob, 10 ether);
         vm.deal(attacker, 10 ether);
     }
 
@@ -99,17 +106,32 @@ contract Rub3InvariantsTest is Test {
     /// predecessor via {Rub3License-setSuccessor}.
     function _deploySuccessor(address predecessor_) internal returns (Rub3Access) {
         return new Rub3Access(
-            "Rub3 Test v2", "R3T2", _identity(0, address(0)),
-            _hashes(HASH_V3), _sale(PRICE), _noFee(), 0, COOLDOWN_BLOCKS,
-            predecessor_, owner
+            "Rub3 Test v2",
+            "R3T2",
+            _identity(0, address(0)),
+            _hashes(HASH_V3),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            predecessor_,
+            owner
         );
     }
 
     function _deploySubscription(address predecessor_) internal returns (Rub3Subscription) {
         return new Rub3Subscription(
-            "Rub3 Sub", "R3S", _identity(0, address(0)),
-            _hashes(HASH_V1), _sale(PRICE), _noFee(), 0, PERIOD, COOLDOWN_BLOCKS,
-            predecessor_, owner
+            "Rub3 Sub",
+            "R3S",
+            _identity(0, address(0)),
+            _hashes(HASH_V1),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            PERIOD,
+            COOLDOWN_BLOCKS,
+            predecessor_,
+            owner
         );
     }
 
@@ -129,23 +151,49 @@ contract Rub3InvariantsTest is Test {
     function test_hashSet_constructorRejectsZeroHash() public {
         vm.expectRevert(Rub3License.ZeroWrapperHash.selector);
         new Rub3Access(
-            "x", "x", _identity(0, address(0)),
-            _hashes(bytes32(0)), _sale(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, address(0), owner
+            "x",
+            "x",
+            _identity(0, address(0)),
+            _hashes(bytes32(0)),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            owner
         );
     }
 
     function test_hashSet_constructorRejectsDuplicate() public {
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.WrapperHashAlreadyKnown.selector, HASH_V1));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.WrapperHashAlreadyKnown.selector, HASH_V1)
+        );
         new Rub3Access(
-            "x", "x", _identity(0, address(0)),
-            _hashes(HASH_V1, HASH_V1), _sale(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, address(0), owner
+            "x",
+            "x",
+            _identity(0, address(0)),
+            _hashes(HASH_V1, HASH_V1),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            owner
         );
     }
 
     function test_hashSet_emptySetIsAllowed() public {
         Rub3Access bare = new Rub3Access(
-            "x", "x", _identity(0, address(0)),
-            new bytes32[](0), _sale(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, address(0), owner
+            "x",
+            "x",
+            _identity(0, address(0)),
+            new bytes32[](0),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            owner
         );
         assertEq(bare.wrapperHashCount(), 0);
         assertEq(bare.wrapperHashList().length, 0);
@@ -182,7 +230,9 @@ contract Rub3InvariantsTest is Test {
 
     function test_addWrapperHash_rejectsDuplicate() public {
         vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.WrapperHashAlreadyKnown.selector, HASH_V1));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.WrapperHashAlreadyKnown.selector, HASH_V1)
+        );
         nft.addWrapperHash(HASH_V1);
     }
 
@@ -192,7 +242,9 @@ contract Rub3InvariantsTest is Test {
         vm.startPrank(owner);
         nft.revokeWrapperHash(HASH_V1, "key material leaked in CI logs");
 
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.WrapperHashAlreadyKnown.selector, HASH_V1));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.WrapperHashAlreadyKnown.selector, HASH_V1)
+        );
         nft.addWrapperHash(HASH_V1);
         vm.stopPrank();
 
@@ -333,7 +385,7 @@ contract Rub3InvariantsTest is Test {
         assertEq(nft.ownerOf(id), alice);
         assertTrue(nft.honorsContract(address(nft), id));
 
-        (bool ready, ) = nft.cooldownReady(id);
+        (bool ready,) = nft.cooldownReady(id);
         assertTrue(ready);
 
         vm.roll(block.number + COOLDOWN_BLOCKS);
@@ -413,8 +465,16 @@ contract Rub3InvariantsTest is Test {
 
         vm.expectRevert(Rub3License.SelfReference.selector);
         new Rub3Access(
-            "x", "x", _identity(0, address(0)),
-            _hashes(HASH_V1), _sale(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, next, owner
+            "x",
+            "x",
+            _identity(0, address(0)),
+            _hashes(HASH_V1),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            next,
+            owner
         );
     }
 
@@ -499,7 +559,9 @@ contract Rub3InvariantsTest is Test {
 
         // The predecessor has not pointed at v2 yet.
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.SuccessorNotDeclared.selector, address(0)));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.SuccessorNotDeclared.selector, address(0))
+        );
         v2.claimFromPredecessor(id);
 
         vm.prank(owner);
@@ -529,9 +591,9 @@ contract Rub3InvariantsTest is Test {
 
         vm.startPrank(alice);
         v2.claimFromPredecessor(id);
-        vm.expectRevert(abi.encodeWithSelector(
-            Rub3License.PredecessorTokenAlreadyClaimed.selector, id
-        ));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.PredecessorTokenAlreadyClaimed.selector, id)
+        );
         v2.claimFromPredecessor(id);
         vm.stopPrank();
 
@@ -539,9 +601,9 @@ contract Rub3InvariantsTest is Test {
         vm.prank(alice);
         nft.transferFrom(alice, bob, id);
         vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSelector(
-            Rub3License.PredecessorTokenAlreadyClaimed.selector, id
-        ));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.PredecessorTokenAlreadyClaimed.selector, id)
+        );
         v2.claimFromPredecessor(id);
     }
 
@@ -579,8 +641,8 @@ contract Rub3InvariantsTest is Test {
         vm.prank(alice);
         uint256 newId = v2.claimFromPredecessor(id);
 
-        assertEq(v2.expiresAt(newId),  expiry, "remaining time carries across");
-        assertEq(v2.renewPrice(newId), PRICE,  "the frozen renewal price carries across");
+        assertEq(v2.expiresAt(newId), expiry, "remaining time carries across");
+        assertEq(v2.renewPrice(newId), PRICE, "the frozen renewal price carries across");
 
         // And renewal on the successor charges the carried price, not v2's.
         vm.prank(alice);
@@ -602,9 +664,17 @@ contract Rub3InvariantsTest is Test {
 
         uint256 shortPeriod = PERIOD / 30;
         Rub3Subscription v2 = new Rub3Subscription(
-            "Rub3 Sub v2", "R3S2", _identity(0, address(0)),
-            _hashes(HASH_V3), _sale(PRICE), _noFee(), 0, shortPeriod, COOLDOWN_BLOCKS,
-            address(v1), owner
+            "Rub3 Sub v2",
+            "R3S2",
+            _identity(0, address(0)),
+            _hashes(HASH_V3),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            shortPeriod,
+            COOLDOWN_BLOCKS,
+            address(v1),
+            owner
         );
         vm.prank(owner);
         v1.setSuccessor(address(v2));
@@ -612,14 +682,16 @@ contract Rub3InvariantsTest is Test {
         vm.prank(alice);
         uint256 newId = v2.claimFromPredecessor(id);
 
-        assertEq(v2.expiresAt(newId),  expiry, "remaining time carries across unchanged");
-        assertEq(v2.renewPrice(newId), PRICE,  "the frozen renewal price carries across unchanged");
-        assertEq(v2.period(),          shortPeriod, "the successor keeps its own period");
+        assertEq(v2.expiresAt(newId), expiry, "remaining time carries across unchanged");
+        assertEq(v2.renewPrice(newId), PRICE, "the frozen renewal price carries across unchanged");
+        assertEq(v2.period(), shortPeriod, "the successor keeps its own period");
 
         // The carried price now buys the successor's period, not v1's.
         vm.prank(alice);
         v2.renew{value: PRICE}(newId);
-        assertEq(v2.expiresAt(newId), expiry + shortPeriod, "the successor's period governs the renewal");
+        assertEq(
+            v2.expiresAt(newId), expiry + shortPeriod, "the successor's period governs the renewal"
+        );
 
         // Nothing granted was taken: the original token renews on v1 at v1's
         // period for the same price, forever.
@@ -647,7 +719,7 @@ contract Rub3InvariantsTest is Test {
         // Arm two: the successor, holding a token claimed from the configured
         // contract.
         assertTrue(v2.honorsContract(address(nft), claimedId));
-        assertTrue(v2.honorsContract(address(v2),  claimedId));
+        assertTrue(v2.honorsContract(address(v2), claimedId));
 
         // A token *bought* on the successor is not a claim, so a wrapper pinned
         // to the old contract does not accept it.
@@ -658,9 +730,9 @@ contract Rub3InvariantsTest is Test {
 
         // Unrelated contracts, the zero address, and tokens that do not exist.
         assertFalse(v2.honorsContract(address(0xC0FFEE), claimedId));
-        assertFalse(v2.honorsContract(address(0),        claimedId));
-        assertFalse(v2.honorsContract(address(nft),      999));
-        assertFalse(nft.honorsContract(address(nft),     999));
+        assertFalse(v2.honorsContract(address(0), claimedId));
+        assertFalse(v2.honorsContract(address(nft), 999));
+        assertFalse(nft.honorsContract(address(nft), 999));
     }
 
     /// A claim, once made, is a grant. Repointing the predecessor's successor
@@ -718,7 +790,7 @@ contract Rub3InvariantsTest is Test {
             _bytecodeHasSelector(target, sel),
             string.concat("selector present in bytecode: ", signature)
         );
-        (bool ok, ) = target.call(abi.encodePacked(sel, new bytes(128)));
+        (bool ok,) = target.call(abi.encodePacked(sel, new bytes(128)));
         assertFalse(ok, string.concat("call did not revert: ", signature));
     }
 
@@ -754,9 +826,9 @@ contract Rub3InvariantsTest is Test {
         );
 
         // No fallback, no receive: an unknown selector and plain ETH both revert.
-        (bool ok, ) = address(nft).call(hex"deadbeef");
+        (bool ok,) = address(nft).call(hex"deadbeef");
         assertFalse(ok, "unknown selector must revert");
-        (bool paid, ) = address(nft).call{value: 1 wei}("");
+        (bool paid,) = address(nft).call{value: 1 wei}("");
         assertFalse(paid, "contract must not accept bare ETH");
     }
 
@@ -862,15 +934,15 @@ contract Rub3InvariantsTest is Test {
         Rub3Access v2 = _deploySuccessor(address(nft));
 
         vm.startPrank(owner);
-        nft.setPrice(type(uint256).max);          // price out every future buyer
-        nft.addWrapperHash(HASH_V3);              // ship a new build
+        nft.setPrice(type(uint256).max); // price out every future buyer
+        nft.addWrapperHash(HASH_V3); // ship a new build
         nft.revokeWrapperHash(HASH_V1, "burned"); // flag every old one
         nft.revokeWrapperHash(HASH_V2, "burned");
-        nft.setSuccessor(address(v2));            // point elsewhere
+        nft.setSuccessor(address(v2)); // point elsewhere
         nft.setTokenPrice(address(usdc), type(uint256).max); // and on the other rail
-        nft.withdraw(payable(owner));             // drain the balance
-        nft.withdrawToken(address(usdc), owner);  // both balances
-        nft.transferOwnership(attacker);          // hand the keys to an attacker
+        nft.withdraw(payable(owner)); // drain the balance
+        nft.withdrawToken(address(usdc), owner); // both balances
+        nft.transferOwnership(attacker); // hand the keys to an attacker
         vm.stopPrank();
 
         // The attacker now owns the contract and repeats the exercise.
@@ -899,10 +971,17 @@ contract Rub3InvariantsTest is Test {
         // Deployed with both rails listed, so the hostile run below can try to
         // move each of them out from under a token that is already issued.
         Rub3Subscription sub = new Rub3Subscription(
-            "Rub3 Sub", "R3S", _identity(0, address(0)),
+            "Rub3 Sub",
+            "R3S",
+            _identity(0, address(0)),
             _hashes(HASH_V1),
-            Rub3License.SaleTerms({price: PRICE, priceToken: address(usdc), priceAmount: 5e6}), _noFee(),
-            0, PERIOD, COOLDOWN_BLOCKS, address(0), owner
+            Rub3License.SaleTerms({price: PRICE, priceToken: address(usdc), priceAmount: 5e6}),
+            _noFee(),
+            0,
+            PERIOD,
+            COOLDOWN_BLOCKS,
+            address(0),
+            owner
         );
         vm.prank(alice);
         uint256 id = sub.purchase{value: PRICE}(alice);
@@ -921,8 +1000,7 @@ contract Rub3InvariantsTest is Test {
         assertEq(sub.expiresAt(id), expiry, "expiry is not writable by anyone");
         assertEq(sub.renewPrice(id), PRICE, "the renewal snapshot is not writable by anyone");
         assertEq(
-            sub.renewPriceToken(id), address(usdc),
-            "the stablecoin rail is frozen per token too"
+            sub.renewPriceToken(id), address(usdc), "the stablecoin rail is frozen per token too"
         );
         assertEq(sub.renewPriceAmount(id), 5e6, "and so is its amount");
 
@@ -977,7 +1055,9 @@ contract Rub3InvariantsTest is Test {
         uint256 newId = probe.claim(v2, id);
 
         assertTrue(probe.seenWasClaimed(), "claim provenance is recorded before the callback");
-        assertEq(probe.seenRenewPrice(), PRICE, "the carried renewal price is set before the callback");
+        assertEq(
+            probe.seenRenewPrice(), PRICE, "the carried renewal price is set before the callback"
+        );
         assertEq(v2.renewPrice(newId), PRICE);
     }
 
@@ -989,21 +1069,35 @@ contract Rub3InvariantsTest is Test {
             abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, address(nft))
         );
         new Rub3Subscription(
-            "Rub3 Sub", "R3S", _identity(0, address(0)),
-            _hashes(HASH_V1), _sale(PRICE), _noFee(), 0, PERIOD, COOLDOWN_BLOCKS,
-            address(nft), owner
+            "Rub3 Sub",
+            "R3S",
+            _identity(0, address(0)),
+            _hashes(HASH_V1),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            PERIOD,
+            COOLDOWN_BLOCKS,
+            address(nft),
+            owner
         );
     }
 
     /// A mistyped address with no code at all is rejected the same way.
     function test_predecessorProbe_rejectsNonContractPredecessor() public {
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, alice)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, alice));
         new Rub3Subscription(
-            "Rub3 Sub", "R3S", _identity(0, address(0)),
-            _hashes(HASH_V1), _sale(PRICE), _noFee(), 0, PERIOD, COOLDOWN_BLOCKS,
-            alice, owner
+            "Rub3 Sub",
+            "R3S",
+            _identity(0, address(0)),
+            _hashes(HASH_V1),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            PERIOD,
+            COOLDOWN_BLOCKS,
+            alice,
+            owner
         );
     }
 
@@ -1014,12 +1108,18 @@ contract Rub3InvariantsTest is Test {
     function test_predecessorProbe_accessRejectsCodelessPredecessor() public {
         assertEq(alice.code.length, 0);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, alice)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, alice));
         new Rub3Access(
-            "x", "x", _identity(0, address(0)),
-            _hashes(HASH_V3), _sale(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, alice, owner
+            "x",
+            "x",
+            _identity(0, address(0)),
+            _hashes(HASH_V3),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            alice,
+            owner
         );
     }
 
@@ -1033,8 +1133,16 @@ contract Rub3InvariantsTest is Test {
             abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, notALicense)
         );
         new Rub3Access(
-            "x", "x", _identity(0, address(0)),
-            _hashes(HASH_V3), _sale(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, notALicense, owner
+            "x",
+            "x",
+            _identity(0, address(0)),
+            _hashes(HASH_V3),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            notALicense,
+            owner
         );
     }
 
@@ -1051,8 +1159,16 @@ contract Rub3InvariantsTest is Test {
             abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, address(sub))
         );
         new Rub3Access(
-            "x", "x", _identity(0, address(0)),
-            _hashes(HASH_V3), _sale(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, address(sub), owner
+            "x",
+            "x",
+            _identity(0, address(0)),
+            _hashes(HASH_V3),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            address(sub),
+            owner
         );
     }
 
@@ -1082,13 +1198,19 @@ contract Rub3InvariantsTest is Test {
     function test_predecessorProbe_rejectsPredecessorMissingExpiresAt() public {
         address stub = address(new PeriodOnlyPredecessor());
 
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, stub)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, stub));
         new Rub3Subscription(
-            "Rub3 Sub", "R3S", _identity(0, address(0)),
-            _hashes(HASH_V1), _sale(PRICE), _noFee(), 0, PERIOD, COOLDOWN_BLOCKS,
-            stub, owner
+            "Rub3 Sub",
+            "R3S",
+            _identity(0, address(0)),
+            _hashes(HASH_V1),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            PERIOD,
+            COOLDOWN_BLOCKS,
+            stub,
+            owner
         );
     }
 
@@ -1097,13 +1219,19 @@ contract Rub3InvariantsTest is Test {
     function test_predecessorProbe_rejectsPredecessorMissingRenewPrice() public {
         address stub = address(new NoRenewPricePredecessor());
 
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, stub)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, stub));
         new Rub3Subscription(
-            "Rub3 Sub", "R3S", _identity(0, address(0)),
-            _hashes(HASH_V1), _sale(PRICE), _noFee(), 0, PERIOD, COOLDOWN_BLOCKS,
-            stub, owner
+            "Rub3 Sub",
+            "R3S",
+            _identity(0, address(0)),
+            _hashes(HASH_V1),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            PERIOD,
+            COOLDOWN_BLOCKS,
+            stub,
+            owner
         );
     }
 
@@ -1134,8 +1262,8 @@ contract MintCallbackProbe {
 
     uint256 public seenRenewPrice;
     uint256 public seenExpiresAt;
-    bool    public seenWasClaimed;
-    bool    public fired;
+    bool public seenWasClaimed;
+    bool public fired;
 
     function watch(Rub3Subscription sub_) external {
         sub = sub_;
@@ -1157,16 +1285,15 @@ contract MintCallbackProbe {
         external
         returns (bytes4)
     {
-        fired          = true;
+        fired = true;
         seenRenewPrice = sub.renewPrice(tokenId);
-        seenExpiresAt  = sub.expiresAt(tokenId);
+        seenExpiresAt = sub.expiresAt(tokenId);
         seenWasClaimed = sub.wasClaimed(tokenId);
         return this.onERC721Received.selector;
     }
 
     receive() external payable {}
 }
-
 
 /// @notice Answers the base read slice and the `period()` discriminator, but
 ///         none of the per-token getters {Rub3Subscription-_afterClaim} reads.

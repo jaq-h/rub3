@@ -61,24 +61,39 @@ contract Rub3Subscription is Rub3License {
     /// @notice A renewal. `priceToken` is `address(0)` when paid in ETH, in
     ///         which case `pricePaid` is wei; otherwise `pricePaid` is in
     ///         `priceToken`'s smallest unit.
-    event Renewed(uint256 indexed tokenId, uint256 expiresAt, address priceToken, uint256 pricePaid);
+    event Renewed(
+        uint256 indexed tokenId,
+        uint256 expiresAt,
+        address priceToken,
+        uint256 pricePaid
+    );
 
     constructor(
-        string        memory name_,
-        string        memory symbol_,
+        string memory name_,
+        string memory symbol_,
         IdentityTerms memory identity_,
-        bytes32[]     memory wrapperHashes_,
-        SaleTerms     memory sale_,
-        FeeTerms      memory fee_,
-        uint256              supplyCap_,
-        uint256              period_,
-        uint256              cooldownBlocks_,
-        address              predecessor_,
-        address              owner_
-    ) Rub3License(
-        name_, symbol_, identity_, wrapperHashes_,
-        sale_, fee_, supplyCap_, cooldownBlocks_, predecessor_, owner_
-    ) {
+        bytes32[] memory wrapperHashes_,
+        SaleTerms memory sale_,
+        FeeTerms memory fee_,
+        uint256 supplyCap_,
+        uint256 period_,
+        uint256 cooldownBlocks_,
+        address predecessor_,
+        address owner_
+    )
+        Rub3License(
+            name_,
+            symbol_,
+            identity_,
+            wrapperHashes_,
+            sale_,
+            fee_,
+            supplyCap_,
+            cooldownBlocks_,
+            predecessor_,
+            owner_
+        )
+    {
         period = period_;
 
         // {Rub3License} has already established that a non-zero predecessor is a
@@ -93,13 +108,19 @@ contract Rub3Subscription is Rub3License {
         // for an unset key rather than reverting the way `ownerOf` would.
         if (predecessor_ != address(0)) {
             try IRub3Predecessor(predecessor_).period() returns (uint256) {}
-            catch { revert IncompatiblePredecessor(predecessor_); }
+            catch {
+                revert IncompatiblePredecessor(predecessor_);
+            }
 
             try IRub3Predecessor(predecessor_).expiresAt(0) returns (uint256) {}
-            catch { revert IncompatiblePredecessor(predecessor_); }
+            catch {
+                revert IncompatiblePredecessor(predecessor_);
+            }
 
             try IRub3Predecessor(predecessor_).renewPrice(0) returns (uint256) {}
-            catch { revert IncompatiblePredecessor(predecessor_); }
+            catch {
+                revert IncompatiblePredecessor(predecessor_);
+            }
         }
     }
 
@@ -130,10 +151,7 @@ contract Rub3Subscription is Rub3License {
     {
         address to = _resolveAuthorizedRecipient(recipient, auth.from);
         _payWithAuthorization(
-            auth,
-            priceToken,
-            priceAmount,
-            purchaseAuthorizationNonce(to, auth.salt)
+            auth, priceToken, priceAmount, purchaseAuthorizationNonce(to, auth.salt)
         );
         return _mintSubscription(to, auth.from);
     }
@@ -151,14 +169,14 @@ contract Rub3Subscription is Rub3License {
     function _mintSubscription(address to, address payer) private returns (uint256 tokenId) {
         tokenId = _reserveNextId();
 
-        uint256 newExpiry  = block.timestamp + period;
-        uint256 dueEth     = price;
-        address dueToken   = priceToken;
-        uint256 dueAmount  = priceAmount;
+        uint256 newExpiry = block.timestamp + period;
+        uint256 dueEth = price;
+        address dueToken = priceToken;
+        uint256 dueAmount = priceAmount;
 
-        expiresAt[tokenId]        = newExpiry;
-        renewPrice[tokenId]       = dueEth;
-        renewPriceToken[tokenId]  = dueToken;
+        expiresAt[tokenId] = newExpiry;
+        renewPrice[tokenId] = dueEth;
+        renewPriceToken[tokenId] = dueToken;
         renewPriceAmount[tokenId] = dueAmount;
 
         _safeMint(to, tokenId);
@@ -201,7 +219,7 @@ contract Rub3Subscription is Rub3License {
         nonReentrant
     {
         _requireOwned(tokenId);
-        address token  = renewPriceToken[tokenId];
+        address token = renewPriceToken[tokenId];
         uint256 amount = renewPriceAmount[tokenId];
         _payWithAuthorization(auth, token, amount, renewAuthorizationNonce(tokenId, auth.salt));
         _extend(tokenId, token, amount);
@@ -212,18 +230,14 @@ contract Rub3Subscription is Rub3License {
     /// The renewal counterpart of
     /// {Rub3License-purchaseAuthorizationNonce}: it binds the signature to one
     /// token id under a distinct domain tag.
-    function renewAuthorizationNonce(uint256 tokenId, bytes32 salt)
-        public
-        view
-        returns (bytes32)
-    {
+    function renewAuthorizationNonce(uint256 tokenId, bytes32 salt) public view returns (bytes32) {
         return keccak256(abi.encode(_RENEW_AUTHORIZATION, address(this), tokenId, salt));
     }
 
     /// @dev The one extension, reached by both rails.
     function _extend(uint256 tokenId, address token, uint256 amountPaid) private {
-        uint256 current   = expiresAt[tokenId];
-        uint256 base      = current > block.timestamp ? current : block.timestamp;
+        uint256 current = expiresAt[tokenId];
+        uint256 base = current > block.timestamp ? current : block.timestamp;
         uint256 newExpiry = base + period;
         expiresAt[tokenId] = newExpiry;
         emit Renewed(tokenId, newExpiry, token, amountPaid);
@@ -252,7 +266,7 @@ contract Rub3Subscription is Rub3License {
     ///      is allowed to touch, so migration can never disturb the old contract.
     function _afterClaim(uint256 tokenId, uint256 predecessorTokenId) internal override {
         IRub3Predecessor pred = IRub3Predecessor(predecessor);
-        expiresAt[tokenId]  = pred.expiresAt(predecessorTokenId);
+        expiresAt[tokenId] = pred.expiresAt(predecessorTokenId);
         renewPrice[tokenId] = pred.renewPrice(predecessorTokenId);
 
         // The stablecoin rail is *this* contract's own listing, not the
@@ -262,7 +276,7 @@ contract Rub3Subscription is Rub3License {
         // holders migration exists to serve. A claimed token therefore renews in
         // ETH at the carried price - which is what the predecessor granted - and
         // in this contract's listed token at its listed amount if it offers one.
-        renewPriceToken[tokenId]  = priceToken;
+        renewPriceToken[tokenId] = priceToken;
         renewPriceAmount[tokenId] = priceAmount;
     }
 }
