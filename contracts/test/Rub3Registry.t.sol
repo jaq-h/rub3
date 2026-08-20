@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test}             from "forge-std/Test.sol";
-import {Ownable}          from "@openzeppelin/contracts/access/Ownable.sol";
+import {Test} from "forge-std/Test.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-import {Rub3Access}       from "../src/Rub3Access.sol";
+import {Rub3Access} from "../src/Rub3Access.sol";
 import {Rub3CodeRegistry} from "../src/Rub3CodeRegistry.sol";
-import {Rub3License}      from "../src/Rub3License.sol";
-import {Rub3Registry}     from "../src/Rub3Registry.sol";
+import {Rub3License} from "../src/Rub3License.sol";
+import {Rub3Registry} from "../src/Rub3Registry.sol";
 import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 import {Rub3Factory, Rub3LicenseParams} from "../src/Rub3Factory.sol";
 import {MockEIP3009Token} from "./mocks/MockEIP3009Token.sol";
@@ -77,28 +77,28 @@ contract DirtyQuote {
 ///      presentation fields is stored here, so a card cannot describe terms the
 ///      licence contract no longer offers.
 contract Rub3RegistryTest is Test {
-    bytes32 internal constant WRAPPER_HASH    = keccak256("registry-test-wrapper-v1");
-    uint256 internal constant PRICE           = 1 ether;
-    uint256 internal constant USDC_PRICE      = 5_000_000; // 5 USDC, 6 decimals
+    bytes32 internal constant WRAPPER_HASH = keccak256("registry-test-wrapper-v1");
+    uint256 internal constant PRICE = 1 ether;
+    uint256 internal constant USDC_PRICE = 5_000_000; // 5 USDC, 6 decimals
     uint256 internal constant COOLDOWN_BLOCKS = 15;
-    uint256 internal constant PERIOD          = 30 days;
-    uint16  internal constant FEE_BPS         = 250;
+    uint256 internal constant PERIOD = 30 days;
+    uint16 internal constant FEE_BPS = 250;
 
-    address internal treasury     = address(0x7EA5);
-    address internal developer    = address(0xDE7);
-    address internal otherDev     = address(0xDE72);
+    address internal treasury = address(0x7EA5);
+    address internal developer = address(0xDE7);
+    address internal otherDev = address(0xDE72);
     address internal registryOwner = address(0xC0FFEE);
-    address internal alice        = address(0xA11CE);
-    address internal stranger     = address(0x5747A);
+    address internal alice = address(0xA11CE);
+    address internal stranger = address(0x5747A);
 
-    Rub3Factory      internal factory;
-    Rub3Registry     internal registry;
+    Rub3Factory internal factory;
+    Rub3Registry internal registry;
     MockEIP3009Token internal usdc;
     MockEIP3009Token internal shiba; // a token the registry does not recognise
 
     function setUp() public {
-        usdc    = new MockEIP3009Token();
-        shiba   = new MockEIP3009Token();
+        usdc = new MockEIP3009Token();
+        shiba = new MockEIP3009Token();
         factory = new Rub3Factory(FEE_BPS, treasury, address(0));
 
         registry = new Rub3Registry(address(factory), registryOwner);
@@ -135,15 +135,15 @@ contract Rub3RegistryTest is Test {
         returns (Rub3LicenseParams memory)
     {
         return Rub3LicenseParams({
-            name:           "Rub3 Registry Test",
-            symbol:         "R3R",
-            identity:       _identity(),
-            wrapperHashes:  _hashes(WRAPPER_HASH),
-            sale:           sale,
-            supplyCap:      0,
+            name: "Rub3 Registry Test",
+            symbol: "R3R",
+            identity: _identity(),
+            wrapperHashes: _hashes(WRAPPER_HASH),
+            sale: sale,
+            supplyCap: 0,
             cooldownBlocks: COOLDOWN_BLOCKS,
-            predecessor:    address(0),
-            owner:          address(0) // defaults to the caller
+            predecessor: address(0),
+            owner: address(0) // defaults to the caller
         });
     }
 
@@ -166,9 +166,16 @@ contract Rub3RegistryTest is Test {
     /// valid software, no `isDeployed` row, and therefore not listable.
     function _deployDirect(address owner_) internal returns (Rub3Access) {
         return new Rub3Access(
-            "Direct", "DIR", _identity(), _hashes(WRAPPER_HASH),
-            _sale(address(0), 0), Rub3License.FeeTerms({feeBps: 0, treasury: address(0)}),
-            0, COOLDOWN_BLOCKS, address(0), owner_
+            "Direct",
+            "DIR",
+            _identity(),
+            _hashes(WRAPPER_HASH),
+            _sale(address(0), 0),
+            Rub3License.FeeTerms({feeBps: 0, treasury: address(0)}),
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            owner_
         );
     }
 
@@ -244,9 +251,7 @@ contract Rub3RegistryTest is Test {
         Rub3Access license = _deployEthOnly(developer);
 
         vm.expectEmit(true, true, false, true, address(registry));
-        emit Rub3Registry.Registered(
-            address(license), developer, "Test App", "ipfs://bafyTestApp"
-        );
+        emit Rub3Registry.Registered(address(license), developer, "Test App", "ipfs://bafyTestApp");
         _register(license, developer);
 
         assertTrue(registry.isListed(address(license)));
@@ -833,14 +838,14 @@ contract Rub3RegistryTest is Test {
         vm.prank(alice);
         uint256 sessionId = license.activate(tokenId);
 
-        address ownerBefore     = license.ownerOf(tokenId);
-        uint256 priceBefore     = license.price();
-        address tokenBefore     = license.priceToken();
-        uint256 amountBefore    = license.priceAmount();
-        uint256 nextIdBefore    = license.nextTokenId();
+        address ownerBefore = license.ownerOf(tokenId);
+        uint256 priceBefore = license.price();
+        address tokenBefore = license.priceToken();
+        uint256 amountBefore = license.priceAmount();
+        uint256 nextIdBefore = license.nextTokenId();
         address successorBefore = license.successor();
-        address licOwnerBefore  = license.owner();
-        uint8   hashStatus      = uint8(license.wrapperHashes(WRAPPER_HASH));
+        address licOwnerBefore = license.owner();
+        uint8 hashStatus = uint8(license.wrapperHashes(WRAPPER_HASH));
 
         vm.prank(developer);
         registry.updateListing(address(license), "Renamed", "ipfs://bafyRenamed");
@@ -981,9 +986,9 @@ contract Rub3RegistryTest is Test {
     }
 
     function test_rank_unrecognisedTokenRailRanksBelow() public {
-        Rub3Access recognised   = _deployThrough(factory, developer, address(usdc), USDC_PRICE);
+        Rub3Access recognised = _deployThrough(factory, developer, address(usdc), USDC_PRICE);
         Rub3Access unrecognised = _deployThrough(factory, otherDev, address(shiba), 1e18);
-        Rub3Access ethOnly      = _deployEthOnly(developer);
+        Rub3Access ethOnly = _deployEthOnly(developer);
 
         _register(recognised, developer);
         _register(unrecognised, otherDev);
@@ -1009,7 +1014,7 @@ contract Rub3RegistryTest is Test {
     /// returns the registration order and fails here while passing every other
     /// test in this file.
     function test_rank_followsAPostRegistrationTokenPriceChange() public {
-        Rub3Access first  = _deployThrough(factory, developer, address(usdc), USDC_PRICE);
+        Rub3Access first = _deployThrough(factory, developer, address(usdc), USDC_PRICE);
         Rub3Access second = _deployThrough(factory, otherDev, address(shiba), 1e18);
 
         _register(first, developer);
@@ -1076,8 +1081,8 @@ contract Rub3RegistryTest is Test {
     }
 
     function test_rank_omitsDelistedAndSuspendedEntries() public {
-        Rub3Access listed    = _deployEthOnly(developer);
-        Rub3Access delisted  = _deployEthOnly(otherDev);
+        Rub3Access listed = _deployEthOnly(developer);
+        Rub3Access delisted = _deployEthOnly(otherDev);
         Rub3Access suspended = _deployThrough(factory, developer, address(usdc), USDC_PRICE);
 
         _register(listed, developer);
@@ -1213,7 +1218,9 @@ contract Rub3RegistryTest is Test {
         uint256 found;
         for (uint256 start = 0; start < registry.registeredCount(); start += 2) {
             address[] memory page = registry.rankedRegistrationWindow(start, 2);
-            for (uint256 i = 0; i < page.length; i++) seen[found++] = page[i];
+            for (uint256 i = 0; i < page.length; i++) {
+                seen[found++] = page[i];
+            }
         }
 
         assertEq(found, 2, "every listed entry is reached exactly once");
@@ -1524,7 +1531,7 @@ contract Rub3RegistryTest is Test {
     ///      than scanning bytes, so a push immediate is never mistaken for an
     ///      instruction.
     function _hasStateChangingCall(bytes memory code) internal pure returns (bool) {
-        for (uint256 i = 0; i < code.length; ) {
+        for (uint256 i = 0; i < code.length;) {
             uint8 op = uint8(code[i]);
             if (op >= 0x60 && op <= 0x7F) {
                 i += 1 + (uint256(op) - 0x5F);

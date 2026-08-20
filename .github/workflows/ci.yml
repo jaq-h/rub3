@@ -125,6 +125,21 @@ jobs:
   #
   # The repo has no `rustfmt.toml`: formatting is stock rustfmt defaults on
   # purpose, so `cargo fmt --all` is always the whole fix for a red fmt step.
+  #
+  # Solidity formatting is gated here too, beside its Rust counterpart, so both
+  # style gates live in one job and turn one check red. Unlike rustfmt, the
+  # Solidity side is NOT stock defaults: contracts/foundry.toml carries a tuned
+  # `[fmt]` section, and each non-default setting there is justified in a
+  # comment beside it. `forge fmt` (from contracts/) is always the whole fix for
+  # a red step. The checkout here takes no submodules on purpose: `forge fmt`
+  # parses and reprints, it never resolves an import, so it needs neither
+  # lib/openzeppelin-contracts nor lib/forge-std. It runs after the cargo steps
+  # because it is the cheap one and the toolchain install is not.
+  #
+  # That same "never resolves an import" property is why forge itself is pinned
+  # for this step: the formatter never invokes solc, so foundry.toml's
+  # solc_version anchors nothing here and the verdict is decided entirely by the
+  # forge binary. See WHICH FOUNDRY JOBS PIN forge, AND WHY, below.
   # ---------------------------------------------------------------------------
   lint:
     name: lint (fmt + clippy, blocking)
@@ -152,6 +167,18 @@ jobs:
       - name: cargo clippy (tier-3,sdk)
         if: always()
         run: cargo clippy -p rub3-wrapper --no-default-features --features tier-3,sdk --all-targets -- -D warnings
+
+      # Pinned on purpose; see HOW TO BUMP THE PIN below. This is the forge that
+      # produced the checked-in formatting of the Solidity tree.
+      - uses: foundry-rs/foundry-toolchain@v1.9.1
+        if: always()
+        with:
+          version: v1.5.1
+
+      - name: forge fmt --check
+        if: always()
+        working-directory: contracts
+        run: forge fmt --check
 
   # ---------------------------------------------------------------------------
   # The `rub3` SDK crate (implementation.md §3.5), the library a wrapped
@@ -230,10 +257,11 @@ jobs:
   # cannot go green having tested nothing - the same reason
   # scripts/assert-e2e-ran.sh exists for the anvil suites.
   #
-  # forge is deliberately unpinned here, like every foundry job except the
-  # fingerprint one: this job cares only about what forge *compiles* into the ABI
-  # and methodIdentifiers, and foundry.toml pins solc_version, so any forge
-  # produces the same artifact fields it reads.
+  # forge is deliberately unpinned here: this job cares only about what forge
+  # *compiles* into the ABI and methodIdentifiers, and foundry.toml pins
+  # solc_version, so any forge produces the same artifact fields it reads. See
+  # WHICH FOUNDRY JOBS PIN forge, AND WHY, below, for the rule and the two gates
+  # that fall on the other side of it.
   # ---------------------------------------------------------------------------
   docs:
     name: docs surface (mcp server + legibility gate)
@@ -329,28 +357,56 @@ jobs:
   # regenerated contracts/canonical-bytecode.json is committed in the same pull
   # request. That is the intended workflow, not a nuisance.
   #
-  # WHY THIS ONE JOB PINS forge AND ITS SIBLINGS DO NOT
-  # The other foundry jobs here care only about what forge *compiles*, and
-  # foundry.toml pins solc_version, so any forge builds the same bytecode. This
-  # job also cares about what forge *emits*: the manifest records solc's own
-  # settings object as forge assembled it, and the check diffs the whole
-  # manifest. A forge release that starts passing an extra standard-json setting
-  # to the pinned solc, or stops passing one, would therefore turn this blocking
-  # job red on an unrelated pull request with no repo change and byte-identical
-  # fingerprints. A blocking check people learn to ignore is worse than no
-  # check, so this job alone pins the version. Leave the sibling jobs unpinned.
+  # WHICH FOUNDRY JOBS PIN forge, AND WHY
+  # The rule: a blocking gate whose verdict depends on forge's OWN OUTPUT pins
+  # the version. A gate that depends only on what forge *compiles* does not,
+  # because contracts/foundry.toml pins solc_version and that already fixes the
+  # result - any forge builds the same bytecode, ABI and methodIdentifiers. The
+  # `forge test`, `forge build` and anvil jobs therefore stay unpinned on
+  # purpose; something else is already holding their result still.
+  #
+  # Two gates fall on the pinned side, and both pin the same v1.5.1:
+  #
+  #   - this `bytecode-fingerprints` job, which cares about what forge *emits*:
+  #     the manifest records solc's own settings object as forge assembled it,
+  #     and the check diffs the whole manifest. A forge release that starts
+  #     passing an extra standard-json setting to the pinned solc, or stops
+  #     passing one, would turn this blocking job red on an unrelated pull
+  #     request with no repo change and byte-identical fingerprints.
+  #
+  #   - the `forge fmt --check` step in the `lint` job, which is the MORE
+  #     exposed of the two. Nothing outside the forge binary constrains
+  #     `forge fmt` output at all: the formatter parses and reprints without
+  #     ever invoking solc, so solc_version anchors nothing there. Worse, two
+  #     settings this tree relies on, `prefer_compact` and
+  #     `single_line_imports`, are new-generation formatter keys that an older
+  #     forge silently IGNORES rather than rejects, so an unpinned older forge
+  #     would not error - it would quietly format differently and turn the gate
+  #     red on an unrelated pull request.
+  #
+  # A blocking check people learn to ignore is worse than no check, and that is
+  # what either failure mode buys. Adding a foundry gate: ask which side it
+  # falls on, forge's own output or only what forge compiles.
   #
   # HOW TO BUMP THE PIN
-  # Deliberately, and never on its own: raise the `version:` below, run
+  # This is the only bump note in this file and it covers BOTH pinned jobs;
+  # they move together or not at all. Deliberately, and never on its own: raise
+  # the `version:` in both places, then run
   #
   #     scripts/canonical-bytecode-hashes.sh update
+  #     cd contracts && forge fmt
   #
-  # and commit the regenerated contracts/canonical-bytecode.json in the SAME
-  # pull request, so the recorded build inputs and the forge that produced them
-  # move together. This is the same workflow the index-based lock/gitlink
-  # cross-check already supports for a dependency bump. The fingerprints
-  # themselves should not move across a forge bump; if one does, the contracts
-  # or the pinned solc changed too, and that is worth understanding first.
+  # and commit BOTH the regenerated contracts/canonical-bytecode.json and the
+  # resulting Solidity reformat in the SAME pull request, so the recorded build
+  # inputs, the formatter's output, and the forge that produced them all move
+  # together. The formatter's output is part of what this pin stabilises,
+  # exactly as the manifest is. `forge fmt` is not idempotent on a tree the new
+  # forge has not formatted before, so re-run it until `forge fmt --check` is
+  # clean; see contracts/contracts.md -> "Formatting". This is the same
+  # workflow the index-based lock/gitlink cross-check already supports for a
+  # dependency bump. The fingerprints themselves should not move across a forge
+  # bump; if one does, the contracts or the pinned solc changed too, and that is
+  # worth understanding first.
   # ---------------------------------------------------------------------------
   bytecode-fingerprints:
     name: canonical bytecode fingerprints (blocking)

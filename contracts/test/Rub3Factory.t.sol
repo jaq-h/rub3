@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test, Vm}         from "forge-std/Test.sol";
-import {Rub3Access}       from "../src/Rub3Access.sol";
-import {Rub3License}      from "../src/Rub3License.sol";
+import {Test, Vm} from "forge-std/Test.sol";
+import {Rub3Access} from "../src/Rub3Access.sol";
+import {Rub3License} from "../src/Rub3License.sol";
 import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 import {Rub3Factory, Rub3LicenseParams, Rub3AccessDeployer} from "../src/Rub3Factory.sol";
 import {MockEIP3009Token} from "./mocks/MockEIP3009Token.sol";
@@ -61,30 +61,30 @@ contract Rub3FactoryTest is Test {
 
     uint256 internal constant BUYER_PK = 0xA11CE5E;
 
-    bytes32 internal constant WRAPPER_HASH    = keccak256("test-wrapper-v1");
-    uint256 internal constant PRICE           = 1 ether;
-    uint256 internal constant USDC_PRICE      = 5_000_000; // 5 USDC, 6 decimals
+    bytes32 internal constant WRAPPER_HASH = keccak256("test-wrapper-v1");
+    uint256 internal constant PRICE = 1 ether;
+    uint256 internal constant USDC_PRICE = 5_000_000; // 5 USDC, 6 decimals
     uint256 internal constant COOLDOWN_BLOCKS = 15;
-    uint256 internal constant PERIOD          = 30 days;
+    uint256 internal constant PERIOD = 30 days;
 
     /// Within [MIN_FEE_BPS, MAX_FEE_BPS]. Deliberately not a round 2% or 3%: the
     /// rate is a deploy-time decision and the tests must not read as if one
     /// value inside the range were the settled one.
     uint16 internal constant FEE_BPS = 250;
 
-    address internal treasury  = address(0x7EA5);
+    address internal treasury = address(0x7EA5);
     address internal developer = address(0xDE7);
     address internal submitter = address(0x5B417);
     address internal buyer;
 
-    Rub3Factory      internal factory;
+    Rub3Factory internal factory;
     MockEIP3009Token internal usdc;
-    Rub3Access       internal nft;
+    Rub3Access internal nft;
     Rub3Subscription internal sub;
 
     function setUp() public {
-        buyer   = vm.addr(BUYER_PK);
-        usdc    = new MockEIP3009Token();
+        buyer = vm.addr(BUYER_PK);
+        usdc = new MockEIP3009Token();
         factory = new Rub3Factory(FEE_BPS, treasury, address(0));
 
         vm.startPrank(developer);
@@ -105,11 +105,12 @@ contract Rub3FactoryTest is Test {
     }
 
     function _sale(uint256 price) internal view returns (Rub3License.SaleTerms memory) {
-        return Rub3License.SaleTerms({
-            price:       price,
-            priceToken:  address(usdc),
-            priceAmount: USDC_PRICE
-        });
+        return
+            Rub3License.SaleTerms({
+                price: price,
+                priceToken: address(usdc),
+                priceAmount: USDC_PRICE
+            });
     }
 
     function _saleEthOnly(uint256 price) internal pure returns (Rub3License.SaleTerms memory) {
@@ -128,15 +129,15 @@ contract Rub3FactoryTest is Test {
         returns (Rub3LicenseParams memory)
     {
         return Rub3LicenseParams({
-            name:           "Rub3 Test",
-            symbol:         "R3T",
-            identity:       _identity(),
-            wrapperHashes:  _hashes(WRAPPER_HASH),
-            sale:           sale,
-            supplyCap:      0,
+            name: "Rub3 Test",
+            symbol: "R3T",
+            identity: _identity(),
+            wrapperHashes: _hashes(WRAPPER_HASH),
+            sale: sale,
+            supplyCap: 0,
             cooldownBlocks: COOLDOWN_BLOCKS,
-            predecessor:    address(0),
-            owner:          address(0) // defaults to the caller
+            predecessor: address(0),
+            owner: address(0) // defaults to the caller
         });
     }
 
@@ -160,8 +161,16 @@ contract Rub3FactoryTest is Test {
     /// open-source template.
     function _deployDirect(uint256 price) internal returns (Rub3Access) {
         return new Rub3Access(
-            "Direct", "DIR", _identity(), _hashes(WRAPPER_HASH),
-            _saleEthOnly(price), _noFee(), 0, COOLDOWN_BLOCKS, address(0), developer
+            "Direct",
+            "DIR",
+            _identity(),
+            _hashes(WRAPPER_HASH),
+            _saleEthOnly(price),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            developer
         );
     }
 
@@ -189,11 +198,11 @@ contract Rub3FactoryTest is Test {
         view
         returns (Rub3License.PaymentAuthorization memory auth)
     {
-        auth.from        = buyer;
-        auth.validAfter  = 0;
+        auth.from = buyer;
+        auth.validAfter = 0;
         auth.validBefore = block.timestamp + 1 hours;
-        auth.salt        = salt;
-        auth.signature   = _sign(
+        auth.salt = salt;
+        auth.signature = _sign(
             address(target),
             value,
             auth.validAfter,
@@ -207,11 +216,11 @@ contract Rub3FactoryTest is Test {
         view
         returns (Rub3License.PaymentAuthorization memory auth)
     {
-        auth.from        = buyer;
-        auth.validAfter  = 0;
+        auth.from = buyer;
+        auth.validAfter = 0;
         auth.validBefore = block.timestamp + 1 hours;
-        auth.salt        = salt;
-        auth.signature   = _sign(
+        auth.salt = salt;
+        auth.signature = _sign(
             address(target),
             value,
             auth.validAfter,
@@ -239,12 +248,12 @@ contract Rub3FactoryTest is Test {
     // ══ 1. The factory ═══════════════════════════════════════════════════════
 
     function test_factory_stampsItsOwnTermsOnBothModels() public view {
-        assertEq(factory.feeBps(),   FEE_BPS);
+        assertEq(factory.feeBps(), FEE_BPS);
         assertEq(factory.treasury(), treasury);
 
-        assertEq(nft.feeBps(),   FEE_BPS);
+        assertEq(nft.feeBps(), FEE_BPS);
         assertEq(nft.treasury(), treasury);
-        assertEq(sub.feeBps(),   FEE_BPS);
+        assertEq(sub.feeBps(), FEE_BPS);
         assertEq(sub.treasury(), treasury);
     }
 
@@ -366,11 +375,11 @@ contract Rub3FactoryTest is Test {
         Rub3Access fresh = Rub3Access(v2.deployAccess(_params(_saleEthOnly(PRICE))));
 
         // The new factory's deploy carries the new terms...
-        assertEq(fresh.feeBps(),   300);
+        assertEq(fresh.feeBps(), 300);
         assertEq(fresh.treasury(), newTreasury);
 
         // ...and the old one is untouched, terms and money alike.
-        assertEq(nft.feeBps(),   FEE_BPS);
+        assertEq(nft.feeBps(), FEE_BPS);
         assertEq(nft.treasury(), treasury);
 
         vm.prank(buyer);
@@ -378,7 +387,7 @@ contract Rub3FactoryTest is Test {
         assertEq(nft.feesAccrued(), _expectedFee(PRICE, FEE_BPS));
 
         nft.withdrawFees();
-        assertEq(treasury.balance,    _expectedFee(PRICE, FEE_BPS));
+        assertEq(treasury.balance, _expectedFee(PRICE, FEE_BPS));
         assertEq(newTreasury.balance, 0);
     }
 
@@ -410,7 +419,7 @@ contract Rub3FactoryTest is Test {
         vm.prank(address(0xBAD));
         nft.renounceOwnership();
 
-        assertEq(nft.feeBps(),   FEE_BPS);
+        assertEq(nft.feeBps(), FEE_BPS);
         assertEq(nft.treasury(), treasury);
 
         // And the split still runs on an ownerless contract.
@@ -425,7 +434,7 @@ contract Rub3FactoryTest is Test {
         vm.prank(developer);
         nft.setSuccessor(address(0xB0B));
 
-        assertEq(nft.feeBps(),   FEE_BPS);
+        assertEq(nft.feeBps(), FEE_BPS);
         assertEq(nft.treasury(), treasury);
     }
 
@@ -437,17 +446,17 @@ contract Rub3FactoryTest is Test {
         vm.prank(buyer);
         nft.purchase{value: PRICE}(address(0));
 
-        assertEq(nft.feesAccrued(),       fee);
-        assertEq(address(nft).balance,    PRICE);
+        assertEq(nft.feesAccrued(), fee);
+        assertEq(address(nft).balance, PRICE);
 
         nft.withdrawFees();
-        assertEq(treasury.balance,     fee);
-        assertEq(nft.feesAccrued(),    0);
+        assertEq(treasury.balance, fee);
+        assertEq(nft.feesAccrued(), 0);
         assertEq(address(nft).balance, PRICE - fee);
 
         vm.prank(developer);
         nft.withdraw(payable(developer));
-        assertEq(developer.balance,    PRICE - fee);
+        assertEq(developer.balance, PRICE - fee);
         assertEq(address(nft).balance, 0);
 
         // The whole point, stated as one equation.
@@ -464,7 +473,7 @@ contract Rub3FactoryTest is Test {
         vm.prank(developer);
         nft.withdraw(payable(developer));
 
-        assertEq(developer.balance,    PRICE - fee);
+        assertEq(developer.balance, PRICE - fee);
         assertEq(address(nft).balance, fee);
 
         nft.withdrawFees();
@@ -504,7 +513,7 @@ contract Rub3FactoryTest is Test {
         vm.prank(developer);
         nft.withdraw(payable(developer));
 
-        assertEq(treasury.balance,  fee * 3);
+        assertEq(treasury.balance, fee * 3);
         assertEq(developer.balance, 3 * PRICE - fee * 3);
         assertEq(treasury.balance + developer.balance, 3 * PRICE);
     }
@@ -518,9 +527,7 @@ contract Rub3FactoryTest is Test {
         uint256 over = PRICE + 0.37 ether;
 
         vm.prank(buyer);
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, over, PRICE)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, over, PRICE));
         nft.purchase{value: over}(address(0));
 
         assertEq(nft.feesAccrued(), 0, "a rejected payment accrues nothing");
@@ -544,13 +551,11 @@ contract Rub3FactoryTest is Test {
         Rub3Access free = _deployWithFee(0, FEE_BPS, treasury);
 
         vm.prank(buyer);
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, 10 ether, 0)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, 10 ether, 0));
         free.purchase{value: 10 ether}(address(0));
 
         assertEq(address(free).balance, 0);
-        assertEq(free.feesAccrued(),    0);
+        assertEq(free.feesAccrued(), 0);
 
         // Zero is the only amount it accepts, and it is genuinely free.
         vm.prank(buyer);
@@ -566,12 +571,12 @@ contract Rub3FactoryTest is Test {
         vm.prank(buyer);
         tiny.purchase{value: 1}(address(0));
 
-        assertEq(tiny.feesAccrued(),    0);
+        assertEq(tiny.feesAccrued(), 0);
         assertEq(address(tiny).balance, 1);
 
         vm.prank(developer);
         tiny.withdraw(payable(developer));
-        assertEq(developer.balance,     1);
+        assertEq(developer.balance, 1);
         assertEq(address(tiny).balance, 0);
     }
 
@@ -683,21 +688,19 @@ contract Rub3FactoryTest is Test {
         uint256 fee = _expectedFee(USDC_PRICE, FEE_BPS);
 
         vm.prank(submitter);
-        nft.purchaseWithAuthorization(
-            buyer, _purchaseAuth(nft, buyer, USDC_PRICE, keccak256("s1"))
-        );
+        nft.purchaseWithAuthorization(buyer, _purchaseAuth(nft, buyer, USDC_PRICE, keccak256("s1")));
 
-        assertEq(usdc.balanceOf(address(nft)),         USDC_PRICE);
-        assertEq(nft.tokenFeesAccrued(address(usdc)),  fee);
+        assertEq(usdc.balanceOf(address(nft)), USDC_PRICE);
+        assertEq(nft.tokenFeesAccrued(address(usdc)), fee);
 
         nft.withdrawTokenFees(address(usdc));
-        assertEq(usdc.balanceOf(treasury),            fee);
+        assertEq(usdc.balanceOf(treasury), fee);
         assertEq(nft.tokenFeesAccrued(address(usdc)), 0);
 
         vm.prank(developer);
         nft.withdrawToken(address(usdc), developer);
-        assertEq(usdc.balanceOf(developer),      USDC_PRICE - fee);
-        assertEq(usdc.balanceOf(address(nft)),   0);
+        assertEq(usdc.balanceOf(developer), USDC_PRICE - fee);
+        assertEq(usdc.balanceOf(address(nft)), 0);
 
         assertEq(usdc.balanceOf(treasury) + usdc.balanceOf(developer), USDC_PRICE);
     }
@@ -706,14 +709,12 @@ contract Rub3FactoryTest is Test {
         uint256 fee = _expectedFee(USDC_PRICE, FEE_BPS);
 
         vm.prank(submitter);
-        nft.purchaseWithAuthorization(
-            buyer, _purchaseAuth(nft, buyer, USDC_PRICE, keccak256("s1"))
-        );
+        nft.purchaseWithAuthorization(buyer, _purchaseAuth(nft, buyer, USDC_PRICE, keccak256("s1")));
 
         vm.prank(developer);
         nft.withdrawToken(address(usdc), developer);
 
-        assertEq(usdc.balanceOf(developer),    USDC_PRICE - fee);
+        assertEq(usdc.balanceOf(developer), USDC_PRICE - fee);
         assertEq(usdc.balanceOf(address(nft)), fee);
 
         nft.withdrawTokenFees(address(usdc));
@@ -749,11 +750,7 @@ contract Rub3FactoryTest is Test {
 
         Rub3Factory f = new Rub3Factory(FEE_BPS, treasury, address(0));
         Rub3LicenseParams memory p = _params(
-            Rub3License.SaleTerms({
-                price:       amount,
-                priceToken:  address(usdc),
-                priceAmount: amount
-            })
+            Rub3License.SaleTerms({price: amount, priceToken: address(usdc), priceAmount: amount})
         );
         vm.prank(developer);
         Rub3Access twin = Rub3Access(f.deployAccess(p));
@@ -762,9 +759,7 @@ contract Rub3FactoryTest is Test {
         twin.purchase{value: amount}(address(0));
 
         vm.prank(submitter);
-        twin.purchaseWithAuthorization(
-            buyer, _purchaseAuth(twin, buyer, amount, keccak256("s1"))
-        );
+        twin.purchaseWithAuthorization(buyer, _purchaseAuth(twin, buyer, amount, keccak256("s1")));
 
         assertEq(twin.feesAccrued(), twin.tokenFeesAccrued(address(usdc)));
         assertEq(twin.feesAccrued(), _expectedFee(amount, FEE_BPS));
@@ -804,9 +799,7 @@ contract Rub3FactoryTest is Test {
         emit Rub3License.ProtocolFeeAccrued(address(usdc), USDC_PRICE, fee, USDC_PRICE - fee);
 
         vm.prank(submitter);
-        nft.purchaseWithAuthorization(
-            buyer, _purchaseAuth(nft, buyer, USDC_PRICE, keccak256("s1"))
-        );
+        nft.purchaseWithAuthorization(buyer, _purchaseAuth(nft, buyer, USDC_PRICE, keccak256("s1")));
     }
 
     // ══ 5. Direct deployment stays possible ══════════════════════════════════
@@ -814,7 +807,7 @@ contract Rub3FactoryTest is Test {
     function test_direct_deployWorksAndCarriesNoFee() public {
         Rub3Access direct = _deployDirect(PRICE);
 
-        assertEq(direct.feeBps(),   0);
+        assertEq(direct.feeBps(), 0);
         assertEq(direct.treasury(), address(0));
         assertFalse(factory.isDeployed(address(direct)));
 
@@ -842,8 +835,16 @@ contract Rub3FactoryTest is Test {
 
     function test_direct_isNotPenalisedOnEitherRail() public {
         Rub3Access direct = new Rub3Access(
-            "Direct", "DIR", _identity(), _hashes(WRAPPER_HASH),
-            _sale(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, address(0), developer
+            "Direct",
+            "DIR",
+            _identity(),
+            _hashes(WRAPPER_HASH),
+            _sale(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            developer
         );
 
         vm.prank(submitter);
@@ -866,9 +867,16 @@ contract Rub3FactoryTest is Test {
             )
         );
         new Rub3Access(
-            "x", "x", _identity(), _hashes(WRAPPER_HASH), _saleEthOnly(PRICE),
+            "x",
+            "x",
+            _identity(),
+            _hashes(WRAPPER_HASH),
+            _saleEthOnly(PRICE),
             Rub3License.FeeTerms({feeBps: 10_001, treasury: treasury}),
-            0, COOLDOWN_BLOCKS, address(0), developer
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            developer
         );
     }
 
@@ -879,22 +887,34 @@ contract Rub3FactoryTest is Test {
             )
         );
         new Rub3Access(
-            "x", "x", _identity(), _hashes(WRAPPER_HASH), _saleEthOnly(PRICE),
+            "x",
+            "x",
+            _identity(),
+            _hashes(WRAPPER_HASH),
+            _saleEthOnly(PRICE),
             Rub3License.FeeTerms({feeBps: 250, treasury: address(0)}),
-            0, COOLDOWN_BLOCKS, address(0), developer
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            developer
         );
     }
 
     function test_license_rejectsTreasuryWithNoFee() public {
         vm.expectRevert(
-            abi.encodeWithSelector(
-                Rub3License.FeeTermsInconsistent.selector, uint16(0), treasury
-            )
+            abi.encodeWithSelector(Rub3License.FeeTermsInconsistent.selector, uint16(0), treasury)
         );
         new Rub3Access(
-            "x", "x", _identity(), _hashes(WRAPPER_HASH), _saleEthOnly(PRICE),
+            "x",
+            "x",
+            _identity(),
+            _hashes(WRAPPER_HASH),
+            _saleEthOnly(PRICE),
             Rub3License.FeeTerms({feeBps: 0, treasury: treasury}),
-            0, COOLDOWN_BLOCKS, address(0), developer
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            developer
         );
     }
 
@@ -921,7 +941,7 @@ contract Rub3FactoryTest is Test {
         uint256 fee = _expectedFee(PRICE, FEE_BPS) * 2;
         vm.prank(developer);
         hostile.withdraw(payable(developer));
-        assertEq(developer.balance,       2 * PRICE - fee);
+        assertEq(developer.balance, 2 * PRICE - fee);
         assertEq(address(hostile).balance, fee);
 
         // Only rub3's own collection fails, which is rub3's problem to fix by
@@ -955,8 +975,16 @@ contract Rub3FactoryTest is Test {
     function test_predecessor_launderingThroughTheFactoryReverts() public {
         vm.prank(developer);
         Rub3Access shadow = new Rub3Access(
-            "Shadow", "SHD", _identity(), _hashes(WRAPPER_HASH),
-            _saleEthOnly(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, address(0), developer
+            "Shadow",
+            "SHD",
+            _identity(),
+            _hashes(WRAPPER_HASH),
+            _saleEthOnly(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            address(0),
+            developer
         );
 
         // The sale itself is legitimate and stays legitimate: a direct deploy is
@@ -1014,8 +1042,17 @@ contract Rub3FactoryTest is Test {
     function test_predecessor_subscriptionPathIsGuardedToo() public {
         vm.prank(developer);
         Rub3Subscription shadow = new Rub3Subscription(
-            "Shadow", "SHD", _identity(), _hashes(WRAPPER_HASH),
-            _saleEthOnly(PRICE), _noFee(), 0, PERIOD, COOLDOWN_BLOCKS, address(0), developer
+            "Shadow",
+            "SHD",
+            _identity(),
+            _hashes(WRAPPER_HASH),
+            _saleEthOnly(PRICE),
+            _noFee(),
+            0,
+            PERIOD,
+            COOLDOWN_BLOCKS,
+            address(0),
+            developer
         );
 
         vm.prank(developer);
@@ -1131,8 +1168,16 @@ contract Rub3FactoryTest is Test {
 
         vm.prank(developer);
         Rub3Access successor = new Rub3Access(
-            "Direct v2", "DIR2", _identity(), _hashes(WRAPPER_HASH),
-            _saleEthOnly(PRICE), _noFee(), 0, COOLDOWN_BLOCKS, address(shadow), developer
+            "Direct v2",
+            "DIR2",
+            _identity(),
+            _hashes(WRAPPER_HASH),
+            _saleEthOnly(PRICE),
+            _noFee(),
+            0,
+            COOLDOWN_BLOCKS,
+            address(shadow),
+            developer
         );
 
         assertEq(successor.predecessor(), address(shadow));

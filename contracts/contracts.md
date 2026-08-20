@@ -18,6 +18,42 @@ forge --version   # forge 1.x.x
 anvil --version
 ```
 
+## Formatting
+
+Every Solidity file in this project is formatted by `forge fmt`, and CI gates it: `forge fmt --check` runs beside `cargo fmt --all -- --check` in the `lint` job of `.github/workflows/ci.yml`, and a drift turns that job red.
+
+```bash
+cd contracts
+forge fmt          # rewrite every file
+forge fmt --check  # what CI runs
+```
+
+The version matters. The checked-in formatting was produced by forge v1.5.1, and CI checks it with exactly that version, pinned on the toolchain step of the `lint` job in `.github/workflows/ci.yml`, which also records why. `forge fmt` output is a pure function of the forge binary, so a different local forge may legitimately disagree with the committed tree in either direction: a red local `forge fmt --check` on files you have not touched, or a locally clean run that lands a red gate. That is a version mismatch, not drift, so check `forge --version` before committing a reformat you did not set out to make.
+
+`forge fmt` is not idempotent on a tree it has never formatted: one pass over unformatted source can leave output that a second pass changes again. If `forge fmt --check` is still red immediately after `forge fmt`, run `forge fmt` once more. A tree already in the committed shape converges in a single pass.
+
+### The `[fmt]` section is tuned, not stock
+
+`foundry.toml` carries a `[fmt]` section, and each entry there has a comment saying why it is set. The short version:
+
+| Setting | Value | Why |
+|---|---|---|
+| `line_length` | `100` | The style these files were hand-written in wraps at 100 columns. Stock 120 unwraps multi-line function headers, event parameter lists and struct literals that were split on purpose. |
+| `prefer_compact` | `"none"` | One parameter per line once a call, event or error has to wrap. Stock `"all"` repacks them into one dense line, which hides `indexed` markers and turns a one-parameter change into a whole-line diff. |
+| `single_line_imports` | `true` | An import stays one line even when a long dependency path pushes it past `line_length`. |
+| `wrap_comments` | `false` | Stock default, restated: doc comments here carry Markdown tables and ASCII rules that a re-wrap would destroy. |
+| `sort_imports` | `false` | Stock default, restated: imports are grouped by origin, not sorted. |
+
+### Keeping a block the formatter would flatten
+
+`forge fmt` has no notion of column alignment, so a hand-aligned block is flattened wherever the formatter touches it. That is accepted almost everywhere: the aligned assignment and declaration blocks that used to be here read fine one fact per line, and preserving them all would have meant opting most of the tree out of the formatter it just adopted.
+
+One block is exempt, via the formatter's own `// forgefmt: disable-next-item` marker: `_summary` in `script/Deploy.s.sol`. It prints a fixed-width, label-aligned deploy summary, and its source is laid out to mirror that output, one `console.log` per printed line with the label column aligned inside the format strings. Splitting the calls that run past `line_length` across four lines each breaks that correspondence and makes the printed layout unreadable from the source. The marker is the narrow fix; loosening `line_length` for the whole tree to save one function would not be.
+
+Prefer that marker, scoped to one item, over a config change, whenever a single block needs to keep its shape.
+
+One block keeps its shape without a marker and must go on doing so: the `string[30] memory forbidden` list in `test/Rub3Invariants.t.sol`. `prefer_compact = "none"` and `line_length = 100` leave it one signature per line, and that is the layout the wrapper's mirror test parses when it checks `attest::FORBIDDEN_SIGNATURES` against the Solidity list. A `[fmt]` change that repacked the array would turn that Rust test red rather than drift in silence, but the coupling is worth knowing before touching the settings. The sibling `string[10]` in `test/Rub3CodeRegistry.t.sol` has the same shape and no such reader.
+
 ## Local testing with Anvil
 
 No `.env` file needed. Forge tests use Foundry's built-in VM - they run against an in-process EVM with no network.
@@ -666,7 +702,7 @@ Two keys are dropped from that settings object. `compilationTarget` is per-contr
 
 Beyond those recorded inputs nothing else moves the fingerprint: not the `forge` version (it fetches and drives the pinned `solc` rather than compiling anything itself), not the checkout path, not comments in the source.
 
-The `forge` version earns one caveat, because it is the only entry on that list that can still turn the blocking gate red. forge assembles the standard-json input it hands to solc, so a forge release that starts passing an extra setting, or stops passing one, changes the `solc_settings` block the manifest records even though every fingerprint is byte-identical. The gate diffs the whole manifest, so that reads as drift. `.github/workflows/ci.yml` therefore pins `foundry-rs/foundry-toolchain` to a fixed forge version for the `bytecode-fingerprints` job alone, so an unrelated pull request cannot go red because a new forge shipped that morning. Bumping that pin is a deliberate act: raise it and commit the regenerated manifest in the same pull request.
+The `forge` version earns one caveat, because it is the only entry on that list that can still turn the blocking gate red. forge assembles the standard-json input it hands to solc, so a forge release that starts passing an extra setting, or stops passing one, changes the `solc_settings` block the manifest records even though every fingerprint is byte-identical. The gate diffs the whole manifest, so that reads as drift. `.github/workflows/ci.yml` therefore pins `foundry-rs/foundry-toolchain` to a fixed forge version for the `bytecode-fingerprints` job, so an unrelated pull request cannot go red because a new forge shipped that morning. It is one of the two gates in that file that pin; the other is the `forge fmt --check` step of the `lint` job, and the two pin the same version and move together. Bumping the pin is a deliberate act, and `.github/workflows/ci.yml` owns the rule and the procedure for both gates: see its `WHICH FOUNDRY JOBS PIN forge, AND WHY` and `HOW TO BUMP THE PIN` comments.
 
 The checkout path and the comments in the source are the reason `bytecode_hash = "none"` is set. With solc's default (`ipfs`) the compiler appends a CBOR metadata trailer that hashes the metadata JSON, and that JSON covers comment text and source file paths. Measured on these contracts:
 

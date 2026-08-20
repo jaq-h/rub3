@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Ownable}      from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 import {Rub3Factory} from "./Rub3Factory.sol";
@@ -496,9 +496,13 @@ contract Rub3Registry is Ownable2Step {
         // factory in it validated its own link when it was built, so the chain
         // is well-formed by induction.
         try Rub3Factory(factory_).isDeployed(address(0)) returns (bool) {}
-        catch { revert IncompatibleFactory(factory_); }
+        catch {
+            revert IncompatibleFactory(factory_);
+        }
         try Rub3Factory(factory_).previousFactory() returns (address) {}
-        catch { revert IncompatibleFactory(factory_); }
+        catch {
+            revert IncompatibleFactory(factory_);
+        }
 
         factory = factory_;
     }
@@ -892,25 +896,25 @@ contract Rub3Registry is Ownable2Step {
         address token = priceTokenOf(license);
 
         return AgentCard({
-            license:           license,
-            licenseOwner:      lic.owner(),
-            appName:           entry.appName,
-            contentURI:        entry.contentURI,
-            status:            entry.status,
-            suspended:         entry.suspended,
-            listed:            isListed(license),
-            price:             lic.price(),
-            priceToken:        token,
-            priceAmount:       lic.priceAmount(),
-            recognisedRail:    isRecognisedToken(token),
-            identityModel:     lic.identityModel(),
+            license: license,
+            licenseOwner: lic.owner(),
+            appName: entry.appName,
+            contentURI: entry.contentURI,
+            status: entry.status,
+            suspended: entry.suspended,
+            listed: isListed(license),
+            price: lic.price(),
+            priceToken: token,
+            priceAmount: lic.priceAmount(),
+            recognisedRail: isRecognisedToken(token),
+            identityModel: lic.identityModel(),
             tbaImplementation: lic.tbaImplementation(),
-            feeBps:            lic.feeBps(),
-            treasury:          lic.treasury(),
-            wrapperHashes:          published,
-            wrapperHashCount:       hashCount,
+            feeBps: lic.feeBps(),
+            treasury: lic.treasury(),
+            wrapperHashes: published,
+            wrapperHashCount: hashCount,
             wrapperHashesTruncated: skipped > 0,
-            registeredAtBlock:      entry.registeredAtBlock
+            registeredAtBlock: entry.registeredAtBlock
         });
     }
 

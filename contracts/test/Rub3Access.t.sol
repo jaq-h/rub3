@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test}           from "forge-std/Test.sol";
-import {Rub3Access}     from "../src/Rub3Access.sol";
-import {Rub3License}    from "../src/Rub3License.sol";
+import {Test} from "forge-std/Test.sol";
+import {Rub3Access} from "../src/Rub3Access.sol";
+import {Rub3License} from "../src/Rub3License.sol";
 
 contract Rub3AccessTest is Test {
     Rub3Access internal nft;
 
     address internal owner = address(0xA11CE);
     address internal alice = address(0xA);
-    address internal bob   = address(0xB);
+    address internal bob = address(0xB);
 
-    bytes32 internal constant WRAPPER_HASH    = keccak256("test-wrapper-v1");
-    uint256 internal constant PRICE           = 0.05 ether;
-    uint256 internal constant SUPPLY_CAP      = 3;
+    bytes32 internal constant WRAPPER_HASH = keccak256("test-wrapper-v1");
+    uint256 internal constant PRICE = 0.05 ether;
+    uint256 internal constant SUPPLY_CAP = 3;
     uint256 internal constant COOLDOWN_BLOCKS = 15; // == MIN_COOLDOWN_BLOCKS
-    uint8   internal constant IDENTITY        = 0; // access
-    address internal constant TBA_IMPL        = address(0); // unused for access model
-    address internal constant NO_PREDECESSOR  = address(0); // accepts no migrations
+    uint8 internal constant IDENTITY = 0; // access
+    address internal constant TBA_IMPL = address(0); // unused for access model
+    address internal constant NO_PREDECESSOR = address(0); // accepts no migrations
 
     /// The constructor seeds the append-only hash set from an array; most
     /// fixtures want exactly one launch hash.
@@ -50,76 +50,118 @@ contract Rub3AccessTest is Test {
 
     function setUp() public {
         nft = new Rub3Access(
-            "Rub3 Test", "R3T", _identity(IDENTITY, TBA_IMPL),
-            _hashes(WRAPPER_HASH), _sale(PRICE), _noFee(), SUPPLY_CAP, COOLDOWN_BLOCKS,
-            NO_PREDECESSOR, owner
+            "Rub3 Test",
+            "R3T",
+            _identity(IDENTITY, TBA_IMPL),
+            _hashes(WRAPPER_HASH),
+            _sale(PRICE),
+            _noFee(),
+            SUPPLY_CAP,
+            COOLDOWN_BLOCKS,
+            NO_PREDECESSOR,
+            owner
         );
         vm.deal(alice, 10 ether);
-        vm.deal(bob,   10 ether);
+        vm.deal(bob, 10 ether);
     }
 
     // ── Metadata ──────────────────────────────────────────────────────────────
 
     function test_metadata() public view {
-        assertEq(nft.identityModel(),     IDENTITY);
+        assertEq(nft.identityModel(), IDENTITY);
         assertEq(nft.tbaImplementation(), TBA_IMPL);
         assertEq(uint8(nft.wrapperHashes(WRAPPER_HASH)), uint8(Rub3License.HashStatus.Valid));
-        assertEq(nft.wrapperHashCount(),  1);
-        assertEq(nft.wrapperHashAt(0),    WRAPPER_HASH);
-        assertEq(nft.price(),             PRICE);
-        assertEq(nft.supplyCap(),         SUPPLY_CAP);
-        assertEq(nft.owner(),             owner);
+        assertEq(nft.wrapperHashCount(), 1);
+        assertEq(nft.wrapperHashAt(0), WRAPPER_HASH);
+        assertEq(nft.price(), PRICE);
+        assertEq(nft.supplyCap(), SUPPLY_CAP);
+        assertEq(nft.owner(), owner);
     }
 
     function test_invalidIdentityModel_reverts() public {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.InvalidIdentityModel.selector, 2));
         new Rub3Access(
-            "x", "x", _identity(2, TBA_IMPL), _hashes(WRAPPER_HASH),
-            _sale(PRICE), _noFee(), SUPPLY_CAP, COOLDOWN_BLOCKS,
-            NO_PREDECESSOR, owner
+            "x",
+            "x",
+            _identity(2, TBA_IMPL),
+            _hashes(WRAPPER_HASH),
+            _sale(PRICE),
+            _noFee(),
+            SUPPLY_CAP,
+            COOLDOWN_BLOCKS,
+            NO_PREDECESSOR,
+            owner
         );
     }
 
     function test_cooldownTooSmall_reverts() public {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.CooldownTooSmall.selector, 14, 15));
         new Rub3Access(
-            "x", "x", _identity(IDENTITY, TBA_IMPL), _hashes(WRAPPER_HASH),
-            _sale(PRICE), _noFee(), SUPPLY_CAP, 14,
-            NO_PREDECESSOR, owner
+            "x",
+            "x",
+            _identity(IDENTITY, TBA_IMPL),
+            _hashes(WRAPPER_HASH),
+            _sale(PRICE),
+            _noFee(),
+            SUPPLY_CAP,
+            14,
+            NO_PREDECESSOR,
+            owner
         );
     }
 
     function test_accessModel_rejectsNonZeroTbaImpl() public {
         vm.expectRevert(Rub3License.TbaImplementationForbidden.selector);
         new Rub3Access(
-            "x", "x", _identity(0, address(0xBEEF)),
-            _hashes(WRAPPER_HASH), _sale(PRICE), _noFee(), SUPPLY_CAP, COOLDOWN_BLOCKS,
-            NO_PREDECESSOR, owner
+            "x",
+            "x",
+            _identity(0, address(0xBEEF)),
+            _hashes(WRAPPER_HASH),
+            _sale(PRICE),
+            _noFee(),
+            SUPPLY_CAP,
+            COOLDOWN_BLOCKS,
+            NO_PREDECESSOR,
+            owner
         );
     }
 
     function test_accountModel_requiresTbaImpl() public {
         vm.expectRevert(Rub3License.TbaImplementationRequired.selector);
         new Rub3Access(
-            "x", "x", _identity(1, address(0)),
-            _hashes(WRAPPER_HASH), _sale(PRICE), _noFee(), SUPPLY_CAP, COOLDOWN_BLOCKS,
-            NO_PREDECESSOR, owner
+            "x",
+            "x",
+            _identity(1, address(0)),
+            _hashes(WRAPPER_HASH),
+            _sale(PRICE),
+            _noFee(),
+            SUPPLY_CAP,
+            COOLDOWN_BLOCKS,
+            NO_PREDECESSOR,
+            owner
         );
     }
 
     function test_accountModel_acceptsTbaImpl() public {
         address impl = address(0xDEAD);
         Rub3Access acct = new Rub3Access(
-            "Rub3 Acct", "R3A", _identity(1, impl),
-            _hashes(WRAPPER_HASH), _sale(PRICE), _noFee(), SUPPLY_CAP, COOLDOWN_BLOCKS,
-            NO_PREDECESSOR, owner
+            "Rub3 Acct",
+            "R3A",
+            _identity(1, impl),
+            _hashes(WRAPPER_HASH),
+            _sale(PRICE),
+            _noFee(),
+            SUPPLY_CAP,
+            COOLDOWN_BLOCKS,
+            NO_PREDECESSOR,
+            owner
         );
-        assertEq(acct.identityModel(),     1);
+        assertEq(acct.identityModel(), 1);
         assertEq(acct.tbaImplementation(), impl);
     }
 
     function test_metadata_cooldownBlocks() public view {
-        assertEq(nft.cooldownBlocks(),      COOLDOWN_BLOCKS);
+        assertEq(nft.cooldownBlocks(), COOLDOWN_BLOCKS);
         assertEq(nft.MIN_COOLDOWN_BLOCKS(), 15);
     }
 
@@ -148,7 +190,9 @@ contract Rub3AccessTest is Test {
     /// always was.
     function test_purchase_underpay_reverts() public {
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE - 1, PRICE));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE - 1, PRICE)
+        );
         nft.purchase{value: PRICE - 1}(alice);
     }
 
@@ -159,7 +203,9 @@ contract Rub3AccessTest is Test {
         uint256 balanceBefore = alice.balance;
 
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE * 2, PRICE));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.IncorrectPayment.selector, PRICE * 2, PRICE)
+        );
         nft.purchase{value: PRICE * 2}(alice);
 
         assertEq(nft.nextTokenId(), 0);
@@ -281,8 +327,10 @@ contract Rub3AccessTest is Test {
         uint256 a = _mint(alice);
         uint256 b = _mint(bob);
 
-        vm.prank(alice); uint256 s1 = nft.activate(a);
-        vm.prank(bob);   uint256 s2 = nft.activate(b);
+        vm.prank(alice);
+        uint256 s1 = nft.activate(a);
+        vm.prank(bob);
+        uint256 s2 = nft.activate(b);
 
         assertEq(s1, 1);
         assertEq(s2, 2);
@@ -298,9 +346,9 @@ contract Rub3AccessTest is Test {
         vm.roll(block.number + 1);
 
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(
-            Rub3License.CooldownActive.selector, COOLDOWN_BLOCKS - 1
-        ));
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.CooldownActive.selector, COOLDOWN_BLOCKS - 1)
+        );
         nft.activate(id);
     }
 
