@@ -431,7 +431,7 @@ refusal that matters.
   conversion on both rails, a price finer than the unit refused rather than
   rounded, and the wrapper-hash shape including the zero hash the contract reads
   as "unknown"; `repo::tests` covers checkout resolution
-- **`tests/cli.rs`** (23) - the binary itself, driven against a temporary
+- **`tests/cli.rs`** (26) - the binary itself, driven against a temporary
   checkout carrying one manifest or the other. Both subcommands exit 2 on a null
   entry with a message naming the chain and containing no address to paste, and
   print no plan while doing it; a published factory is what gets baked in and
@@ -454,7 +454,14 @@ refusal that matters.
   deploy and not only a `--dry-run`. Two more drive a real `pack` with `CARGO`
   pointed at a stand-in that records the environment it was given: an exported
   `RUB3_PACK_DEVELOPER_ENS` never reaches the build, and one asked for with
-  `--developer-ens` does
+  `--developer-ens` does. Three cover the boundary between a rub3 flag and the
+  forge passthrough, which begins at `--` and nowhere else: a `--slow` placed
+  before the separator is a usage error naming it rather than an argument handed
+  to forge, a `--dry-run` written after other flags still runs nothing (with
+  `forge` replaced on `PATH` by a stand-in that records having been called, so
+  "nothing ran" is observed rather than inferred), and a malformed command line
+  on a chain with no canonical factory is reported as itself rather than as the
+  factory refusal, which is the signal an orchestrator waits on
 - **`tests/pack_build_gate.rs`** (6, `#[ignore]`d) - the wrapper's own gate,
   `crates/rub3-wrapper/build.rs`, which is not reachable from the CLI. Each test
   runs a **real `cargo check`** against a poisoned environment and reads what
@@ -462,7 +469,7 @@ refusal that matters.
   that would escape the cache directory, and the placeholders `null`, `TBD` and
   `0xYourFactory` are each refused. The last is
   the positive control - a complete environment builds - without which the other
-  four would pass on a gate that refused everything. They are ignored because
+  five would pass on a gate that refused everything. They are ignored because
   each one costs a compile, and they serialise on a mutex since they share a
   target directory:
 

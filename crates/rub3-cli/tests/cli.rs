@@ -410,6 +410,115 @@ fn a_usage_error_does_not_look_like_a_missing_factory() {
 }
 
 #[test]
+fn a_rub3_flag_before_the_double_dash_is_never_swallowed_by_the_passthrough() {
+    // The passthrough starts at `--` and nowhere else. Starting it at the first
+    // unrecognised hyphenated token would put every later rub3 flag into it,
+    // and a swallowed --dry-run broadcasts instead of simulating.
+    let repo = checkout(COMMITTED_MANIFEST);
+    let mut args = deploy_args();
+    args.retain(|a| *a != "--dry-run");
+    args.extend([
+        "--direct",
+        "--broadcast",
+        "--slow",
+        "--dry-run",
+        "--",
+        "--private-key",
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    ]);
+    let output = rub3(repo.path(), &args);
+
+    // `--slow` is not a rub3 flag and it is before the `--`, so it is a usage
+    // error naming it rather than an argument handed to forge.
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let message = stderr(&output);
+    assert!(message.contains("--slow"), "{message}");
+    assert!(
+        !message.contains("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"),
+        "the refusal echoed the signer: {message}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_dry_run_after_other_flags_still_runs_nothing() {
+    // The reported failure: with the passthrough starting at the first
+    // unrecognised token, --dry-run was collected into it and forge was spawned
+    // for real. `forge` here is a stand-in that records having been called, so
+    // "nothing ran" is observed rather than inferred from the exit code.
+    let repo = checkout(COMMITTED_MANIFEST);
+    let tmp = tempfile::tempdir().unwrap();
+    let record = tmp.path().join("forge-ran");
+    write_stub(&tmp.path().join("forge"), &record);
+
+    let mut args = deploy_args();
+    args.retain(|a| *a != "--dry-run");
+    args.extend([
+        "--direct",
+        "--broadcast",
+        "--dry-run",
+        "--",
+        "--private-key",
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    ]);
+    let path = format!(
+        "{}:{}",
+        tmp.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_rub3"))
+        .arg("--repo-root")
+        .arg(repo.path())
+        .args(&args)
+        .env("PATH", &path)
+        .output()
+        .expect("the rub3 binary runs");
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Dry run"), "{}", stdout(&output));
+    assert!(
+        !record.exists(),
+        "a --dry-run spawned forge: {}",
+        std::fs::read_to_string(&record).unwrap_or_default()
+    );
+}
+
+#[test]
+fn a_malformed_command_line_is_never_reported_as_the_missing_factory() {
+    // Exit 2 means "nothing is deployed yet", which an orchestrator waits on.
+    // Every entry in the committed manifest is null, so resolving the factory
+    // before validating the rest would give every typo that same answer.
+    let repo = checkout(COMMITTED_MANIFEST);
+
+    let mut bad_type = deploy_args();
+    let kind = bad_type.iter().position(|a| *a == "access").unwrap();
+    bad_type[kind] = "bogus";
+    let output = rub3(repo.path(), &bad_type);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(stderr(&output).contains("--type"), "{}", stderr(&output));
+
+    let mut bad_owner = deploy_args();
+    bad_owner.extend(["--owner", "notanaddress"]);
+    let output = rub3(repo.path(), &bad_owner);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(stderr(&output).contains("--owner"), "{}", stderr(&output));
+
+    let mut bad_app_id = pack_args();
+    let id = bad_app_id
+        .iter()
+        .position(|a| *a == "com.example.myapp")
+        .unwrap();
+    bad_app_id[id] = "../../etc";
+    let output = rub3(repo.path(), &bad_app_id);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(stderr(&output).contains("--app-id"), "{}", stderr(&output));
+
+    // And an otherwise-valid command line still gets the factory refusal.
+    let output = rub3(repo.path(), &pack_args());
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}
+
+#[test]
 fn help_and_version_are_not_failures() {
     let repo = checkout(COMMITTED_MANIFEST);
     for args in [vec!["--help"], vec!["--version"], vec!["pack", "--help"]] {
@@ -479,6 +588,22 @@ fn the_deploy_summary_never_echoes_what_follows_the_double_dash() {
         printed.contains("4 arguments passed straight to forge"),
         "the operator is told how many, without being shown them:\n{printed}"
     );
+}
+
+/// A stand-in tool that records having been called, with the arguments it was
+/// given, and exits without doing anything.
+#[cfg(unix)]
+fn write_stub(path: &Path, record: &Path) {
+    std::fs::write(
+        path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
+            record.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// A stand-in for cargo that records the environment it was run with and exits

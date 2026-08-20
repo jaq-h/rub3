@@ -162,11 +162,13 @@ pub struct DeployArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Arguments passed straight to `forge script`, after `--`. This is where
-    /// the signer goes: --private-key, --ledger, --account, and --verify with
-    /// its API key.
+    /// Arguments passed straight to `forge script`. Everything after an
+    /// explicit `--` and nothing before it, so a rub3 flag is never mistaken
+    /// for one of these: this is where the signer goes, and a `--dry-run`
+    /// swallowed into it would broadcast instead of simulating.
     #[arg(
-        trailing_var_arg = true,
+        last = true,
+        num_args = 0..,
         allow_hyphen_values = true,
         value_name = "FORGE ARGS"
     )]
@@ -244,17 +246,10 @@ impl DeployPlan {
     pub fn resolve(args: &DeployArgs, manifest: &Manifest) -> Result<DeployPlan, DeployError> {
         let chain = manifest.resolve_chain(&ChainSelector::parse(&args.chain))?;
 
-        let factory = match (&args.factory, args.direct) {
-            (Some(address), _) => {
-                validate_address(address)
-                    .map_err(|detail| DeployError::Config(format!("--factory {detail}")))?;
-                FactoryChoice::Explicit(address.clone())
-            }
-            (None, true) => FactoryChoice::None,
-            (None, false) => {
-                FactoryChoice::Canonical(manifest.canonical_factory(&chain, DEPLOY_ALTERNATIVES)?)
-            }
-        };
+        if let Some(address) = &args.factory {
+            validate_address(address)
+                .map_err(|detail| DeployError::Config(format!("--factory {detail}")))?;
+        }
 
         let contract_type = match args.contract_type.as_str() {
             kind @ ("access" | "subscription") => kind,
@@ -407,13 +402,6 @@ impl DeployPlan {
             env.insert("WRAPPER_HASHES".to_string(), args.wrapper_hashes.join(","));
         }
 
-        match &factory {
-            FactoryChoice::Canonical(address) | FactoryChoice::Explicit(address) => {
-                env.insert("FACTORY".to_string(), address.clone());
-            }
-            FactoryChoice::None => {}
-        }
-
         let rpc_url = match (&args.rpc_url, chain.in_manifest) {
             (Some(url), _) => url.clone(),
             // foundry.toml keys its [rpc_endpoints] by the same names
@@ -427,6 +415,24 @@ impl DeployPlan {
                 )))
             }
         };
+
+        // Last, so that every refusal above is reported as itself. Until a
+        // factory is published anywhere, resolving it first would report a
+        // malformed command line as the null-factory refusal, which is the one
+        // signal an orchestrator reads as "nothing is deployed yet".
+        let factory = match (&args.factory, args.direct) {
+            (Some(address), _) => FactoryChoice::Explicit(address.clone()),
+            (None, true) => FactoryChoice::None,
+            (None, false) => {
+                FactoryChoice::Canonical(manifest.canonical_factory(&chain, DEPLOY_ALTERNATIVES)?)
+            }
+        };
+        match &factory {
+            FactoryChoice::Canonical(address) | FactoryChoice::Explicit(address) => {
+                env.insert("FACTORY".to_string(), address.clone());
+            }
+            FactoryChoice::None => {}
+        }
 
         let mut forge_args = vec![
             "script".to_string(),

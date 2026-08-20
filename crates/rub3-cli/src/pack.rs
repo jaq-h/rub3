@@ -242,20 +242,10 @@ impl PackPlan {
         let chain =
             manifest.resolve_chain(&crate::deployments::ChainSelector::parse(&args.chain))?;
 
-        // The load-bearing resolution: the manifest's address, or a refusal
-        // that names the chain. `--factory` is the only other way to get one,
-        // and it is an explicit claim rather than a fallback.
-        let (factory, factory_is_explicit) = match &args.factory {
-            Some(address) => {
-                validate_address(address)
-                    .map_err(|detail| PackError::Config(format!("--factory {detail}")))?;
-                (address.clone(), true)
-            }
-            None => (
-                manifest.canonical_factory(&chain, PACK_ALTERNATIVES)?,
-                false,
-            ),
-        };
+        if let Some(address) = &args.factory {
+            validate_address(address)
+                .map_err(|detail| PackError::Config(format!("--factory {detail}")))?;
+        }
 
         validate_address(&args.contract)
             .map_err(|detail| PackError::Config(format!("--contract {detail}")))?;
@@ -329,6 +319,22 @@ impl PackPlan {
         if args.sdk {
             features.push("sdk".into());
         }
+
+        // The load-bearing resolution: the manifest's address, or a refusal
+        // that names the chain. `--factory` is the only other way to get one,
+        // and it is an explicit claim rather than a fallback.
+        //
+        // Last, so that every refusal above is reported as itself. Until a
+        // factory is published anywhere, resolving it first would report a
+        // malformed command line as the null-factory refusal, which is the one
+        // signal an orchestrator reads as "nothing is deployed yet".
+        let (factory, factory_is_explicit) = match &args.factory {
+            Some(address) => (address.clone(), true),
+            None => (
+                manifest.canonical_factory(&chain, PACK_ALTERNATIVES)?,
+                false,
+            ),
+        };
 
         let mut env = BTreeMap::new();
         env.insert("RUB3_PACK_APP_ID".into(), args.app_id.clone());
