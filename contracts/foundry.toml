@@ -37,10 +37,10 @@ base_sepolia = { key = "${BASESCAN_API_KEY}", chain = "base-sepolia" }
 # The hand-written style these files already carried wraps at 100 columns
 # (measured on the pre-format tree: the 99th percentile line is 105 characters,
 # and only 26 non-comment lines in the whole tree exceed 100. 127 lines exceed
-# it in total, but the rest are doc comments and string literals, which
-# `wrap_comments = false` below leaves alone). Stock 120 would unwrap
-# multi-line function headers, event parameter lists and struct literals that
-# were split on purpose and are read one field per line.
+# it in total, but the rest are doc comments, which `wrap_comments = false`
+# below leaves alone). Stock 120 would unwrap multi-line function headers,
+# event parameter lists and struct literals that were split on purpose and are
+# read one field per line.
 line_length = 100
 # Keep one parameter per line once a call, event or error has to wrap. The
 # stock "all" repacks the wrapped parameters into a single dense line inside

@@ -28,6 +28,8 @@ forge fmt          # rewrite every file
 forge fmt --check  # what CI runs
 ```
 
+The version matters. The checked-in formatting was produced by forge v1.5.1, and CI checks it with exactly that version, pinned on the toolchain step of the `lint` job in `.github/workflows/ci.yml`, which also records why. `forge fmt` output is a pure function of the forge binary, so a different local forge may legitimately disagree with the committed tree in either direction: a red local `forge fmt --check` on files you have not touched, or a locally clean run that lands a red gate. That is a version mismatch, not drift, so check `forge --version` before committing a reformat you did not set out to make.
+
 `forge fmt` is not idempotent on a tree it has never formatted: one pass over unformatted source can leave output that a second pass changes again. If `forge fmt --check` is still red immediately after `forge fmt`, run `forge fmt` once more. A tree already in the committed shape converges in a single pass.
 
 ### The `[fmt]` section is tuned, not stock
