@@ -18,6 +18,42 @@ forge --version   # forge 1.x.x
 anvil --version
 ```
 
+## Formatting
+
+Every Solidity file in this project is formatted by `forge fmt`, and CI gates it: `forge fmt --check` runs beside `cargo fmt --all -- --check` in the `lint` job of `.github/workflows/ci.yml`, and a drift turns that job red.
+
+```bash
+cd contracts
+forge fmt          # rewrite every file
+forge fmt --check  # what CI runs
+```
+
+The version matters. The checked-in formatting was produced by forge v1.5.1, and CI checks it with exactly that version, pinned on the toolchain step of the `lint` job in `.github/workflows/ci.yml`, which also records why. `forge fmt` output is a pure function of the forge binary, so a different local forge may legitimately disagree with the committed tree in either direction: a red local `forge fmt --check` on files you have not touched, or a locally clean run that lands a red gate. That is a version mismatch, not drift, so check `forge --version` before committing a reformat you did not set out to make.
+
+`forge fmt` is not idempotent on a tree it has never formatted: one pass over unformatted source can leave output that a second pass changes again. If `forge fmt --check` is still red immediately after `forge fmt`, run `forge fmt` once more. A tree already in the committed shape converges in a single pass.
+
+### The `[fmt]` section is tuned, not stock
+
+`foundry.toml` carries a `[fmt]` section, and each entry there has a comment saying why it is set. The short version:
+
+| Setting | Value | Why |
+|---|---|---|
+| `line_length` | `100` | The style these files were hand-written in wraps at 100 columns. Stock 120 unwraps multi-line function headers, event parameter lists and struct literals that were split on purpose. |
+| `prefer_compact` | `"none"` | One parameter per line once a call, event or error has to wrap. Stock `"all"` repacks them into one dense line, which hides `indexed` markers and turns a one-parameter change into a whole-line diff. |
+| `single_line_imports` | `true` | An import stays one line even when a long dependency path pushes it past `line_length`. |
+| `wrap_comments` | `false` | Stock default, restated: doc comments here carry Markdown tables and ASCII rules that a re-wrap would destroy. |
+| `sort_imports` | `false` | Stock default, restated: imports are grouped by origin, not sorted. |
+
+### Keeping a block the formatter would flatten
+
+`forge fmt` has no notion of column alignment, so a hand-aligned block is flattened wherever the formatter touches it. That is accepted almost everywhere: the aligned assignment and declaration blocks that used to be here read fine one fact per line, and preserving them all would have meant opting most of the tree out of the formatter it just adopted.
+
+One block is exempt, via the formatter's own `// forgefmt: disable-next-item` marker: `_summary` in `script/Deploy.s.sol`. It prints a fixed-width, label-aligned deploy summary, and its source is laid out to mirror that output, one `console.log` per printed line with the label column aligned inside the format strings. Splitting the calls that run past `line_length` across four lines each breaks that correspondence and makes the printed layout unreadable from the source. The marker is the narrow fix; loosening `line_length` for the whole tree to save one function would not be.
+
+Prefer that marker, scoped to one item, over a config change, whenever a single block needs to keep its shape.
+
+One block keeps its shape without a marker and must go on doing so: the `string[30] memory forbidden` list in `test/Rub3Invariants.t.sol`. `prefer_compact = "none"` and `line_length = 100` leave it one signature per line, and that is the layout the wrapper's mirror test parses when it checks `attest::FORBIDDEN_SIGNATURES` against the Solidity list. A `[fmt]` change that repacked the array would turn that Rust test red rather than drift in silence, but the coupling is worth knowing before touching the settings. The sibling `string[10]` in `test/Rub3CodeRegistry.t.sol` has the same shape and no such reader.
+
 ## Local testing with Anvil
 
 No `.env` file needed. Forge tests use Foundry's built-in VM - they run against an in-process EVM with no network.
@@ -510,9 +546,9 @@ Stated plainly, because it is a decided trade-off rather than a gap:
 
 **The factory path stamps 200-300 bps and grants an `isDeployed` row.** That is the entire difference.
 
-**What the row buys today:** a durable, immutable, on-chain record that this contract was deployed through a specific factory - a canonical referent that anyone can check, and the eligibility criterion for the registry and marketplace when they exist.
+**What the row buys today:** a durable, immutable, on-chain record that this contract was deployed through a specific factory - a canonical referent that anyone can check, and the eligibility criterion for the registry and marketplace once they are live.
 
-**What is planned, not shipped:** the registry (§3.2) and the marketplace (§4.3). Until they land, the row buys the record and the future eligibility, and no distribution, no verification service, and no liquidity. Do not read the fee's rationale as a description of features that exist.
+**What is built, and what is not:** the registry (§3.2) is built and tested and deployed nowhere; the marketplace (§4.3) is not built. Until both are live, the row buys the record and the future eligibility, and no distribution, no verification service, and no liquidity. Do not read the fee's rationale as a description of features that exist.
 
 **The fee does not go live ahead of the registry.** The contracts are not deployed to mainnet, and are not declared ready for use, until the registry is ready: the factory and the registry launch together. So there is no window in which a developer pays a live fee for a carrot that does not exist yet.
 
@@ -632,7 +668,7 @@ Step 2 is not optional and it is not a refinement. Skipping it fails 100% of the
 
 Measured on this branch, `Rub3Access` declares seven immutables inherited from `Rub3License` (`identityModel`, `tbaImplementation`, `supplyCap`, `predecessor`, `cooldownBlocks`, and the §2.3 fee terms `feeBps` and `treasury`), and `Rub3Subscription` declares those seven plus its own `period`, eight in total. Because a single immutable is read at several places in the runtime code, the slot count is higher than the variable count: `Rub3Access` carries 18 ranges (576 bytes) and `Rub3Subscription` 22 (704 bytes). Those numbers move whenever the code that reads an immutable moves, which is also whenever the fingerprint moves, so the manifest records both together and the drift gate compares both.
 
-`Rub3Factory` is fingerprinted too, with five immutables of its own (`feeBps`, `treasury`, `accessDeployer`, `subscriptionDeployer`, and `previousFactory`) across 12 ranges. `Rub3AccessDeployer` and `Rub3SubscriptionDeployer` have none, so their `immutable_ranges` are empty and their runtime code hashes directly - which is what makes them the thing to compare a factory's declared deployers against.
+`Rub3Factory` is fingerprinted too, with five immutables of its own (`feeBps`, `treasury`, `accessDeployer`, `subscriptionDeployer`, and `previousFactory`) across 12 ranges. `Rub3Registry`, the §3.2 discovery registry, carries one immutable (`factory`, the canonical factory whose deploys it will list) across 3 ranges, because a single immutable read at three places in the runtime code reserves a slot at each. `Rub3AccessDeployer`, `Rub3SubscriptionDeployer` and `Rub3CodeRegistry` have none, so their `immutable_ranges` are empty and their runtime code hashes directly - which is what makes the two deployer helpers the thing to compare a factory's declared deployers against.
 
 Zeroing an immutable range destroys the constructor argument it held, which is the point: the fingerprint answers "is this the code I expect", not "was this deployed with the terms I expect". Read the terms separately from the contract's own getters (`supplyCap()`, `period()`, `predecessor()`, and the rest), which is where they are authoritative anyway.
 
@@ -666,7 +702,7 @@ Two keys are dropped from that settings object. `compilationTarget` is per-contr
 
 Beyond those recorded inputs nothing else moves the fingerprint: not the `forge` version (it fetches and drives the pinned `solc` rather than compiling anything itself), not the checkout path, not comments in the source.
 
-The `forge` version earns one caveat, because it is the only entry on that list that can still turn the blocking gate red. forge assembles the standard-json input it hands to solc, so a forge release that starts passing an extra setting, or stops passing one, changes the `solc_settings` block the manifest records even though every fingerprint is byte-identical. The gate diffs the whole manifest, so that reads as drift. `.github/workflows/ci.yml` therefore pins `foundry-rs/foundry-toolchain` to a fixed forge version for the `bytecode-fingerprints` job alone, so an unrelated pull request cannot go red because a new forge shipped that morning. Bumping that pin is a deliberate act: raise it and commit the regenerated manifest in the same pull request.
+The `forge` version earns one caveat, because it is the only entry on that list that can still turn the blocking gate red. forge assembles the standard-json input it hands to solc, so a forge release that starts passing an extra setting, or stops passing one, changes the `solc_settings` block the manifest records even though every fingerprint is byte-identical. The gate diffs the whole manifest, so that reads as drift. `.github/workflows/ci.yml` therefore pins `foundry-rs/foundry-toolchain` to a fixed forge version for the `bytecode-fingerprints` job, so an unrelated pull request cannot go red because a new forge shipped that morning. It is one of the two gates in that file that pin; the other is the `forge fmt --check` step of the `lint` job, and the two pin the same version and move together. Bumping the pin is a deliberate act, and `.github/workflows/ci.yml` owns the rule and the procedure for both gates: see its `WHICH FOUNDRY JOBS PIN forge, AND WHY` and `HOW TO BUMP THE PIN` comments.
 
 The checkout path and the comments in the source are the reason `bytecode_hash = "none"` is set. With solc's default (`ipfs`) the compiler appends a CBOR metadata trailer that hashes the metadata JSON, and that JSON covers comment text and source file paths. Measured on these contracts:
 
@@ -736,7 +772,7 @@ OFFSETS=$(jq -r "[.contracts.$NAME.immutable_ranges[] | \"(\(.start),\(.length))
 SOLC=$(jq -er '.build.solc_version' canonical-bytecode.json)
 COMMIT=0x$(git rev-parse HEAD | sed 's/$/000000000000000000000000/')   # 20-byte sha1, right-padded to bytes32
 
-# role: 0 licence, 1 factory, 2 deployer helper, 3 code registry
+# role: 0 licence, 1 factory, 2 deployer helper, 3 code registry, 4 discovery registry
 cast send <CODE_REGISTRY> \
   "publish(bytes32,uint8,string,string,bytes32,string,(uint32,uint32)[])" \
   "0x$MCH" 0 "$NAME" "<release label>" "$COMMIT" "$SOLC" "[$OFFSETS]" \
@@ -752,7 +788,7 @@ cast send <CODE_REGISTRY> "deprecate(bytes32,string)" \
 
 ### Reading it, and the offsets bootstrap
 
-Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. The registry breaks that circle by publishing the *distinct* tables its releases use - four across today's canonical set, one each for `Rub3Access`, `Rub3Subscription` and `Rub3Factory` plus the empty one the two deployer helpers and the registry share - so a verifier fetches the short candidate list once, hashes under each, and looks each result up.
+Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. The registry breaks that circle by publishing the *distinct* tables its releases use - five across today's canonical set, one each for `Rub3Access`, `Rub3Subscription`, `Rub3Factory` and `Rub3Registry` plus the empty one the two deployer helpers and the code registry share - so a verifier fetches the short candidate list once, hashes under each, and looks each result up.
 
 **On a purchase path, read a bounded window of the newest tables.** How many tables exist is the owner key's to choose, and the append-only bound on that key covers what it can publish, not how long a buyer waits for it. `latestOffsetTables(count)` returns at most `count` tables newest-first, clamped, so a verifier asks for the number of candidates it is willing to try and never pays to transfer or decode more; each surviving candidate then costs its own `record` round trip, so hold the same bound over the loop as well - a node need not honour what it was asked for. The wrapper reads `latestOffsetTables(attest::MAX_CANDIDATE_OFFSET_TABLES)` and caps the lookups at the same number.
 
@@ -778,6 +814,144 @@ Be precise about what that last check does *not* settle, because the guarantee i
 A verifier must fetch the registry's own runtime code and compare it against `Rub3CodeRegistry` in `canonical-bytecode.json` before believing a word it says. Otherwise the trust rests on whoever put an address in front of you, which is what a published fingerprint exists to avoid. The wrapper carries one registry address per chain and the registry's own masked hash, both frozen into the binary at pack time, and refuses to consult an address whose code does not match.
 
 **It rests on an honest RPC, like everything else here.** A single endpoint that lies returns canonical code for a hostile contract, and lies about the registry's own code in the same breath - the second authority neither dilutes that risk nor compounds it, because one dishonest view of chain state defeats both reads at once. The claim supported is "an honest view of chain state implies canonical code", and no stronger one. A read quorum would close it and is not built.
+
+## The discovery registry
+
+`Rub3Registry` is the discovery surface of `../implementation.md` §3.2: which applications exist, which of them are listable, and in what order a buyer should be shown them.
+
+**It is not `Rub3CodeRegistry`**, and the two are never interchangeable. They share four letters and nothing else:
+
+| Contract | Question it answers | Keyed by | Read by |
+|---|---|---|---|
+| `Rub3CodeRegistry` | is this bytecode a genuine rub3 release? | masked code hash | a wrapper on the purchase path, when its pinned table missed |
+| `Rub3Registry` | which apps exist, and which are listable? | licence contract address | an agent shopping, before it has an address to verify |
+
+Neither is evidence for the other's question. Canonical *code* says nothing about which address runs it, and a listing says nothing about whether the code at that address is genuine. An agent that wants both asks both, in that order: find a candidate here, then verify it against the code registry and the canonical fingerprint before spending.
+
+**Nothing is deployed.** The registry and the factory launch together (`../implementation.md` §2.3), and every entry in [`deployments.json`](deployments.json) is `null`, so there is no discovery registry to read on any public chain yet.
+
+### Discovery, never validity
+
+This is the invariant the contract is built around, and it is the one to check first when reading it. **Delisting removes the badge and the listing. It cannot invalidate a token, end a session, block a renewal, or change what a licence contract charges.**
+
+The proof is an absence rather than a promise. No licence contract in this project reads the registry, holds its address, or has any function that could be made to; `ownerOf`, `isValid` and `activate` run on state that lives in the licence contract, and every external call the registry makes is a `view`. `test/Rub3Registry.t.sol` asserts it behaviourally rather than leaving it as a claim: `test_delisting_cannotTouchAHeldTokenOrALiveSession` pulls every discovery lever at once - the owner delists, the registry suspends, and the payment token stops being recognised - and then measures the held token, its validation, its live session, a fresh activation, a fresh purchase and a renewal, all of which survive. `test_registryWrites_leaveTheLicenseContractUntouched` makes the same claim from the other side, snapshotting nine pieces of licence state across every registry write.
+
+That is what bounds a compromise of the registry's owner key: it can hide listings, restore them, and reorder them. It cannot take away anything anyone paid for. There is no state here whose worst case is worse than "the discovery surface is wrong until it is fixed".
+
+`Rub3Registry` is deliberately **not** one of the targets in the forbidden-selector audit under [Auditing the invariants before buying](#auditing-the-invariants-before-buying). That list is about tokens - burns, seizures, pauses, renewal-term setters - and asserting it against a contract that holds no tokens would be a weak claim dressed as a strong one. The registry's invariant is a different one and is tested where it means something.
+
+### What may be listed
+
+`register(address,string,string)` gates on two things, both read live:
+
+1. **A canonical factory deployed the contract.** `isCanonicalDeploy(address)` checks `factory.isDeployed`, then walks `previousFactory` for up to `MAX_FACTORY_GENERATION_HOPS` (8) further generations, so an older generation's deploys stay listable when rub3 ships a new factory. A directly deployed licence is perfectly good software and is simply not listable; that is the trade the fee-free path makes, see [The accepted position on fee-free deployment](#the-accepted-position-on-fee-free-deployment).
+2. **The caller owns that licence contract**, by `Rub3License.owner()` at the moment of the call. Authority over a listing therefore follows the licence contract's ownership with nothing to update here: transfer the contract and the new owner controls the listing.
+
+Which factory a registry trusts is fixed at its deploy, from [`deployments.json`](deployments.json) keyed by chain id - the same committed answer everything else on this page reads, carrying the deploy block an indexer starts at and the generation in the `previousFactory` chain. It is immutable, because a registry that could be repointed at another factory could list contracts no rub3 factory ever deployed, which is the only thing a listing here asserts.
+
+The walk is deliberately a second implementation rather than a call to `Rub3Factory.isCanonicalPredecessor`, which performs the same steps for a different question. Binding discovery to the deploy path's rule would mean a future factory tightening its predecessor rule silently delisted applications, which is a validity decision reaching into discovery by the back door.
+
+### The entry is an agent card
+
+`card(address)` returns one machine-readable record: the contract address and its current owner, both price rails, the identity model and its ERC-6551 implementation, the wrapper hash set with each hash's status, the content URI, and the frozen `feeBps` / `treasury`. `cards(start,count)` returns a globally ranked page of them and `cardWindow(start,count)` a bounded one; which of those an agent's spend policy should call is [the next section](#reads-whose-cost-the-caller-controls).
+
+The wrapper hash set is the one field a card does not carry whole. `Rub3License.addWrapperHash` is append-only and uncapped, so without a bound a licence owner would decide what reading their own card cost - and with it what any page of cards containing them cost, which is a reach into unrelated listings' discoverability. A card carries the newest `MAX_CARD_WRAPPER_HASHES` (32) hashes and reports `wrapperHashCount`, the number the licence contract really holds, beside them, plus a `wrapperHashesTruncated` flag saying the same thing without arithmetic. Nothing is capped on the licence contract itself: the full set stays readable there through `wrapperHashCount()` and `wrapperHashAt(index)`. The newest end is kept for the reason `latestOffsetTables` spends its budget there - a buyer checking the build it just downloaded is asking about the most recently published hash.
+
+**Everything on a card except the two presentation fields is read off the licence contract at call time.** Only `appName` and `contentURI` are stored here, because they are the two facts the chain does not carry yet - §3.1 puts `contentURI` on the licence contract, and this field is what a listing quotes until it does. A card can therefore never describe terms the contract no longer offers.
+
+`appName` is required, because a listing nobody can name is not a listing. `contentURI` is not: an empty string means "nothing published yet", which is the honest state while §3.1 is unbuilt, and a mandatory field a developer has no value for is filled with a placeholder that reads like a URI. That is the position [`deployments.json`](deployments.json) already takes on unpublished addresses.
+
+**Both are length-bounded, and the limits are the two numbers a publisher has to plan around:**
+
+| Field | Limit | Constant |
+|---|---|---|
+| `appName` | 128 bytes | `MAX_APP_NAME_BYTES` |
+| `contentURI` | 512 bytes | `MAX_CONTENT_URI_BYTES` |
+| `suspend` reason | 512 bytes | `MAX_SUSPENSION_REASON_BYTES` |
+
+Bytes, not characters: that is what the chain charges for, so a multi-byte name fits fewer glyphs. Two limits rather than one because a name and a locator are not the same kind of value - a CIDv1 base32 `ipfs://` URI already runs to about 66 bytes before any path is added. Over-length input reverts `TextTooLong(field, length, limit)`, which names what to shorten and to what, so a rejected registration takes one more attempt rather than a bisection.
+
+The bound exists for the same reason the hash cap above does, and it is checked at the point the text *enters* the contract rather than while a card is assembled. `card` copies both strings, and registration is permissionless for anyone holding a factory deploy, so an unbounded `appName` would have let one listing's owner decide what reading a shared page of cards cost everybody in it - exactly the reach `MAX_CARD_WRAPPER_HASHES` was added to close. Bounding at entry also closes the class rather than the two known instances: a text field added later is bounded by being written through the same helper, which is the only way it gets written at all. `contentURI` stays optional throughout - it passes a length-only sibling of the required-text check, so an empty value is still accepted and still means "nothing published yet".
+
+```bash
+cast call <REGISTRY> "isCanonicalDeploy(address)(bool)" <LICENCE> --rpc-url $RPC
+cast call <REGISTRY> "rankedListings()(address[])" --rpc-url $RPC
+cast call <REGISTRY> "rankedListingWindow(uint256,uint256)(address[])" 0 25 --rpc-url $RPC
+cast call <REGISTRY> "isRecognisedRail(address)(bool)" <LICENCE> --rpc-url $RPC
+
+# One listing, whole.
+cast call <REGISTRY> \
+  "card(address)((address,address,string,string,uint8,bool,bool,uint256,address,uint256,bool,uint8,address,uint16,address,(bytes32,uint8)[],uint256,bool,uint64))" \
+  <LICENCE> --rpc-url $RPC
+```
+
+Listing an application is one transaction from the licence contract's owner:
+
+```bash
+cast send <REGISTRY> "register(address,string,string)" \
+  <LICENCE> "My App" "ipfs://<cid>" --rpc-url $RPC --private-key $DEVELOPER_KEY
+
+# Presentation fields only; everything else is changed on the licence contract.
+cast send <REGISTRY> "updateListing(address,string,string)" \
+  <LICENCE> "My App" "ipfs://<newer cid>" --rpc-url $RPC --private-key $DEVELOPER_KEY
+
+# Withdraw and restore your own listing. Discovery only, both ways.
+cast send <REGISTRY> "delist(address)" <LICENCE> --rpc-url $RPC --private-key $DEVELOPER_KEY
+cast send <REGISTRY> "relist(address)" <LICENCE> --rpc-url $RPC --private-key $DEVELOPER_KEY
+```
+
+### Reads whose cost the caller controls
+
+Registration is permissionless for anyone holding a factory deploy, and nothing is ever removed - `delist` and `suspend` change an entry's flags and leave it in `registered()`. The set therefore only grows, at a rate strangers decide, and the contract cannot be redeployed to fix that later. So every read that would scan all of it has a counterpart whose cost is the caller's:
+
+| Whole set | Bounded | What the bounded one gives up |
+|---|---|---|
+| `registered()` | `registeredWindow(start,count)` | nothing |
+| `rankedListings()`, `rankedListingWindow(start,count)` | `rankedRegistrationWindow(start,count)` | a globally correct order |
+| `cards(start,count)` | `cardWindow(start,count)` | the same |
+
+**`rankedListingWindow` and `cards` are in the left column deliberately.** They take a `start` and a `count` and look bounded, but those index into the global ranking, which has to be computed over every registered entry before a page of it can be cut: they bound the response, not the work, and cost what `rankedListings()` costs however small a page is asked for. That is a legitimate read - a globally correct page is worth paying for - and it is written on both functions rather than left to be discovered from a gas limit.
+
+The bounded reads take their cursor over registration order instead, so they scan at most `count` entries and make at most one `priceToken()` read per listed entry among them. **The price is that a bounded page is ranked within its window and not globally**: an entry quoting an unrecognised rail in an early window still comes back before a recognised entry from a later one, because no window can know what the others hold without reading them. Paging through does not reconstruct `rankedListings()`. A caller that needs the global order either pays for it, or collects the windows and ranks them off-chain, where `isRecognisedRail` is the same input the contract uses.
+
+A bounded page is also shorter than `count` whenever its window holds delisted, suspended or never-listed entries, so advance the cursor by `count` rather than by the page length. All of them clamp rather than revert at either end, exactly like `Rub3CodeRegistry.offsetTableWindow`, so one call is enough and no caller needs `registeredCount()` first.
+
+```bash
+# A ranked page whose cost does not follow how large the registry has grown.
+cast call <REGISTRY> "rankedRegistrationWindow(uint256,uint256)(address[])" 0 25 --rpc-url $RPC
+cast call <REGISTRY> "registeredWindow(uint256,uint256)(address[])" 0 25 --rpc-url $RPC
+```
+
+
+### The recognised-token list, and why the rank is read live
+
+The protocol fee accrues in whatever asset a contract lists as its `priceToken`, and the licence contracts deliberately hold no policy about which assets count (see [../architecture.md](../architecture.md#why-the-fee-split-is-shaped-this-way)). That judgement lives in the registry instead: entries quoting a recognised token rank above entries that do not, in a stable partition that keeps registration order inside each group.
+
+**The native rail is always recognised and cannot be un-recognised.** An ETH-only contract quotes no token at all (`priceToken == address(0)`) and its fee accrues in ETH, so the only entries that rank below are those quoting a token rail in an asset the registry does not recognise. `setTokenRecognised` rejects `address(0)` in both directions: allowing it would put the entire ETH-only population one owner transaction away from the bottom of the list.
+
+The list is registry-maintained rather than baked into a licence contract precisely so it can move as tokens do - deprecated, migrated, or newly worth accruing a fee in - without touching anything already deployed.
+
+**The rank reads `priceToken` live, on every call, and this is the part that would be wrong if it were done the obvious way.** `setTokenPrice(address,uint256)` stays owner-callable on a licence contract for its whole life, so a contract registered while priced in a recognised token can switch the block afterwards. A rank frozen at registration would go on advertising that contract on a quote it no longer honours, and no event the registry emits would say so. `test_rank_followsAPostRegistrationTokenPriceChange` is the test for exactly that sequence: two entries swap quotes after registration and the order swaps with them, so a snapshot implementation passes every other test in the file and fails that one.
+
+An off-chain indexer that would rather not re-read everything has the equivalent: re-validate an entry whenever the licence contract emits `TokenPriceUpdated`. What it must not do is read the quote once at registration and keep it.
+
+Demotion is discovery, bound by the same invariant as delisting: an entry that drops to the bottom has lost placement and nothing else.
+
+```bash
+# Curation, from the registry owner's key.
+cast send <REGISTRY> "setTokenRecognised(address,bool)" <TOKEN> true \
+  --rpc-url $RPC --private-key $OWNER_KEY
+cast call <REGISTRY> "recognisedTokens()(address[])" --rpc-url $RPC
+cast call <REGISTRY> "isRecognisedToken(address)(bool)" <TOKEN> --rpc-url $RPC
+
+# Withholding and restoring the badge. A suspension carries its reason, the way
+# revokeWrapperHash and deprecate do, and the listing's own owner cannot undo it.
+cast send <REGISTRY> "suspend(address,string)" <LICENCE> "<why>" \
+  --rpc-url $RPC --private-key $OWNER_KEY
+cast send <REGISTRY> "reinstate(address)" <LICENCE> --rpc-url $RPC --private-key $OWNER_KEY
+```
+
+Ownership is `Ownable2Step` and cannot be renounced: abandoning it would freeze the recognised-token list at whatever it happened to say, permanently and with no recovery, on a chain where the assets it names can be deprecated or migrated.
 
 ## Auditing the invariants before buying
 

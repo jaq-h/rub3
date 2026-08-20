@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {ERC20}            from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {IERC1271}         from "@openzeppelin/contracts/interfaces/IERC1271.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 
 /// @notice A faithful, minimal EIP-3009 token, standing in for USDC in tests.
@@ -99,7 +99,12 @@ contract MockEIP3009Token is ERC20 {
             keccak256(
                 abi.encode(
                     TRANSFER_WITH_AUTHORIZATION_TYPEHASH,
-                    from, to, value, validAfter, validBefore, nonce
+                    from,
+                    to,
+                    value,
+                    validAfter,
+                    validBefore,
+                    nonce
                 )
             ),
             signature
@@ -125,7 +130,12 @@ contract MockEIP3009Token is ERC20 {
             keccak256(
                 abi.encode(
                     RECEIVE_WITH_AUTHORIZATION_TYPEHASH,
-                    from, to, value, validAfter, validBefore, nonce
+                    from,
+                    to,
+                    value,
+                    validAfter,
+                    validBefore,
+                    nonce
                 )
             ),
             signature
@@ -162,11 +172,10 @@ contract MockEIP3009Token is ERC20 {
 
     /// Mirrors FiatTokenV2_2: one signature checker for both kinds of signer,
     /// with no branch on signature length in the token's own code.
-    function _requireValidSignature(
-        address signer,
-        bytes32 structHash,
-        bytes calldata signature
-    ) private view {
+    function _requireValidSignature(address signer, bytes32 structHash, bytes calldata signature)
+        private
+        view
+    {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash));
         if (!SignatureChecker.isValidSignatureNowCalldata(signer, digest, signature)) {
             revert InvalidSignature();
@@ -195,7 +204,13 @@ contract SilentEIP3009Token is ERC20 {
     }
 
     function receiveWithAuthorization(
-        address, address, uint256, uint256, uint256, bytes32, bytes calldata
+        address,
+        address,
+        uint256,
+        uint256,
+        uint256,
+        bytes32,
+        bytes calldata
     ) external {}
 }
 
@@ -238,7 +253,13 @@ contract NoDomainSeparatorEIP3009Token is ERC20 {
     /// Present so the token is spendable in principle; no test reaches it,
     /// because no authorization for it can be signed in the first place.
     function receiveWithAuthorization(
-        address, address, uint256, uint256, uint256, bytes32, bytes calldata
+        address,
+        address,
+        uint256,
+        uint256,
+        uint256,
+        bytes32,
+        bytes calldata
     ) external {}
 }
 
@@ -305,7 +326,7 @@ contract NoSignatureOverloadEIP3009Token is ERC20 {
         uint256 validAfter,
         uint256 validBefore,
         bytes32 nonce,
-        uint8   v,
+        uint8 v,
         bytes32 r,
         bytes32 s
     ) external {
@@ -321,7 +342,12 @@ contract NoSignatureOverloadEIP3009Token is ERC20 {
                 keccak256(
                     abi.encode(
                         RECEIVE_WITH_AUTHORIZATION_TYPEHASH,
-                        from, to, value, validAfter, validBefore, nonce
+                        from,
+                        to,
+                        value,
+                        validAfter,
+                        validBefore,
+                        nonce
                     )
                 )
             )
@@ -355,14 +381,11 @@ contract SmartWallet is IERC1271 {
         owner = owner_;
     }
 
-    function isValidSignature(bytes32 hash, bytes memory signature)
-        external
-        view
-        returns (bytes4)
-    {
-        return SignatureChecker.isValidSignatureNow(owner, hash, signature)
-            ? _MAGIC
-            : bytes4(0xffffffff);
+    function isValidSignature(bytes32 hash, bytes memory signature) external view returns (bytes4) {
+        return
+            SignatureChecker.isValidSignatureNow(owner, hash, signature)
+                ? _MAGIC
+                : bytes4(0xffffffff);
     }
 
     function onERC721Received(address, address, uint256, bytes calldata)

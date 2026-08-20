@@ -46,20 +46,30 @@ contract NonCanonicalRub3Access is Rub3Access {
     event LedgerReconciled(uint256 indexed tokenId, address indexed from, address indexed to);
 
     constructor(
-        string        memory name_,
-        string        memory symbol_,
+        string memory name_,
+        string memory symbol_,
         IdentityTerms memory identity_,
-        bytes32[]     memory wrapperHashes_,
-        SaleTerms     memory sale_,
-        FeeTerms      memory fee_,
-        uint256              supplyCap_,
-        uint256              cooldownBlocks_,
-        address              predecessor_,
-        address              owner_
-    ) Rub3Access(
-        name_, symbol_, identity_, wrapperHashes_,
-        sale_, fee_, supplyCap_, cooldownBlocks_, predecessor_, owner_
-    ) {}
+        bytes32[] memory wrapperHashes_,
+        SaleTerms memory sale_,
+        FeeTerms memory fee_,
+        uint256 supplyCap_,
+        uint256 cooldownBlocks_,
+        address predecessor_,
+        address owner_
+    )
+        Rub3Access(
+            name_,
+            symbol_,
+            identity_,
+            wrapperHashes_,
+            sale_,
+            fee_,
+            supplyCap_,
+            cooldownBlocks_,
+            predecessor_,
+            owner_
+        )
+    {}
 
     /// @notice Move `tokenId` to `to`, whatever its holder wants. The seizure
     ///         `attest::FORBIDDEN_SIGNATURES` does not name.

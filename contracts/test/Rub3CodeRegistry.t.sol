@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test, Vm}         from "forge-std/Test.sol";
-import {Ownable}          from "@openzeppelin/contracts/access/Ownable.sol";
+import {Test, Vm} from "forge-std/Test.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Rub3CodeRegistry} from "../src/Rub3CodeRegistry.sol";
 
 /// The append-only properties of {Rub3CodeRegistry}, asserted as behaviour.
@@ -15,24 +15,24 @@ import {Rub3CodeRegistry} from "../src/Rub3CodeRegistry.sol";
 contract Rub3CodeRegistryTest is Test {
     Rub3CodeRegistry internal registry;
 
-    address internal owner    = address(0xA11CE);
+    address internal owner = address(0xA11CE);
     address internal stranger = address(0xBAD);
-    address internal nextKey  = address(0xC0FFEE);
+    address internal nextKey = address(0xC0FFEE);
 
-    bytes32 internal constant MCH_A   = keccak256("masked code hash A");
-    bytes32 internal constant MCH_B   = keccak256("masked code hash B");
-    bytes32 internal constant COMMIT  = keccak256("a source commit");
-    string  internal constant SOLC    = "0.8.28+commit.7893614a";
-    string  internal constant VERSION = "2026-08, exact payment on the ETH rail";
+    bytes32 internal constant MCH_A = keccak256("masked code hash A");
+    bytes32 internal constant MCH_B = keccak256("masked code hash B");
+    bytes32 internal constant COMMIT = keccak256("a source commit");
+    string internal constant SOLC = "0.8.28+commit.7893614a";
+    string internal constant VERSION = "2026-08, exact payment on the ETH rail";
 
     event Published(
         bytes32 indexed maskedCodeHash,
         Rub3CodeRegistry.Role indexed role,
         uint256 indexed offsetTable,
-        string  contractName,
-        string  version,
+        string contractName,
+        string version,
         bytes32 sourceCommit,
-        string  solcVersion
+        string solcVersion
     );
     event Deprecated(bytes32 indexed maskedCodeHash, string reason);
     event OffsetTableAdded(uint256 indexed index, Rub3CodeRegistry.ByteRange[] ranges);
@@ -97,15 +97,15 @@ contract Rub3CodeRegistryTest is Test {
 
         Rub3CodeRegistry.Release memory r = registry.record(MCH_A);
         assertEq(uint8(r.status), uint8(Rub3CodeRegistry.Status.Active));
-        assertEq(uint8(r.role),   uint8(Rub3CodeRegistry.Role.Licence));
+        assertEq(uint8(r.role), uint8(Rub3CodeRegistry.Role.Licence));
         assertEq(r.contractName, "Rub3Access");
-        assertEq(r.version,      VERSION);
+        assertEq(r.version, VERSION);
         assertEq(r.sourceCommit, COMMIT);
-        assertEq(r.solcVersion,  SOLC);
+        assertEq(r.solcVersion, SOLC);
         assertEq(r.registeredAtBlock, 1234);
         assertEq(r.offsets.length, ranges.length);
         for (uint256 i = 0; i < ranges.length; i++) {
-            assertEq(r.offsets[i].start,  ranges[i].start);
+            assertEq(r.offsets[i].start, ranges[i].start);
             assertEq(r.offsets[i].length, ranges[i].length);
         }
 
@@ -139,9 +139,7 @@ contract Rub3CodeRegistryTest is Test {
 
     function test_publish_emitsThePermanentEvent() public {
         vm.expectEmit(true, true, true, true, address(registry));
-        emit Published(
-            MCH_A, Rub3CodeRegistry.Role.Licence, 0, "Rub3Access", VERSION, COMMIT, SOLC
-        );
+        emit Published(MCH_A, Rub3CodeRegistry.Role.Licence, 0, "Rub3Access", VERSION, COMMIT, SOLC);
         _publish(MCH_A, Rub3CodeRegistry.Role.Licence);
     }
 
@@ -149,16 +147,18 @@ contract Rub3CodeRegistryTest is Test {
     /// not the same thing as a contract that sells licences. Without the role, a
     /// buyer pointed at the factory would read "canonical" and stop there.
     function test_publish_carriesTheRoleThroughUnchanged() public {
-        Rub3CodeRegistry.Role[4] memory roles = [
-            Rub3CodeRegistry.Role.Licence,
-            Rub3CodeRegistry.Role.Factory,
-            Rub3CodeRegistry.Role.Deployer,
-            Rub3CodeRegistry.Role.CodeRegistry
-        ];
-        for (uint256 i = 0; i < roles.length; i++) {
-            bytes32 mch = keccak256(abi.encode("role fixture", i));
-            _publish(mch, roles[i]);
-            assertEq(uint8(registry.record(mch).role), uint8(roles[i]));
+        // Enumerated by wire value up to the enum's own bound rather than from a
+        // hand-written list, so a `Role` added later is covered the moment it
+        // exists. A fixed-size literal was what let `DiscoveryRegistry` go
+        // uncovered here while this test still passed.
+        uint8 roleCount = uint8(type(Rub3CodeRegistry.Role).max) + 1;
+        assertEq(roleCount, 5, "a new Role needs its wire number settled in code_registry_e2e too");
+
+        for (uint8 raw = 0; raw < roleCount; raw++) {
+            Rub3CodeRegistry.Role role = Rub3CodeRegistry.Role(raw);
+            bytes32 mch = keccak256(abi.encode("role fixture", raw));
+            _publish(mch, role);
+            assertEq(uint8(registry.record(mch).role), raw);
         }
     }
 
@@ -187,9 +187,7 @@ contract Rub3CodeRegistryTest is Test {
     function test_publish_rejectsRepublishingTheSameHash() public {
         _publish(MCH_A, Rub3CodeRegistry.Role.Licence);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3CodeRegistry.AlreadyPublished.selector, MCH_A)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3CodeRegistry.AlreadyPublished.selector, MCH_A));
         _publish(MCH_A, Rub3CodeRegistry.Role.Licence);
     }
 
@@ -200,9 +198,7 @@ contract Rub3CodeRegistryTest is Test {
         _publish(MCH_A, Rub3CodeRegistry.Role.Licence);
 
         vm.prank(owner);
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3CodeRegistry.AlreadyPublished.selector, MCH_A)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3CodeRegistry.AlreadyPublished.selector, MCH_A));
         registry.publish(
             MCH_A,
             Rub3CodeRegistry.Role.Factory,
@@ -227,9 +223,7 @@ contract Rub3CodeRegistryTest is Test {
         vm.prank(owner);
         registry.deprecate(MCH_A, "superseded");
 
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3CodeRegistry.AlreadyPublished.selector, MCH_A)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3CodeRegistry.AlreadyPublished.selector, MCH_A));
         _publish(MCH_A, Rub3CodeRegistry.Role.Licence);
     }
 
@@ -266,24 +260,27 @@ contract Rub3CodeRegistryTest is Test {
     /// fallback. Without this the absence assertions prove nothing.
     function test_audit_scannerIsSound() public view {
         assertTrue(
-            _bytecodeHasSelector(address(registry), bytes4(keccak256("publish(bytes32,uint8,string,string,bytes32,string,(uint32,uint32)[])")))
+            _bytecodeHasSelector(
+                address(registry),
+                bytes4(
+                    keccak256(
+                        "publish(bytes32,uint8,string,string,bytes32,string,(uint32,uint32)[])"
+                    )
+                )
+            )
         );
         assertTrue(
             _bytecodeHasSelector(address(registry), bytes4(keccak256("deprecate(bytes32,string)")))
         );
-        assertTrue(
-            _bytecodeHasSelector(address(registry), bytes4(keccak256("record(bytes32)")))
-        );
+        assertTrue(_bytecodeHasSelector(address(registry), bytes4(keccak256("record(bytes32)"))));
         assertTrue(
             _bytecodeHasSelector(
-                address(registry),
-                bytes4(keccak256("offsetTableWindow(uint256,uint256)"))
+                address(registry), bytes4(keccak256("offsetTableWindow(uint256,uint256)"))
             )
         );
         assertTrue(
             _bytecodeHasSelector(
-                address(registry),
-                bytes4(keccak256("latestOffsetTables(uint256)"))
+                address(registry), bytes4(keccak256("latestOffsetTables(uint256)"))
             )
         );
         assertFalse(
@@ -307,15 +304,15 @@ contract Rub3CodeRegistryTest is Test {
 
         Rub3CodeRegistry.Release memory r = registry.record(MCH_A);
         assertEq(uint8(r.status), uint8(Rub3CodeRegistry.Status.Deprecated));
-        assertEq(uint8(r.role),   uint8(before.role));
-        assertEq(r.contractName,  before.contractName);
-        assertEq(r.version,       before.version);
-        assertEq(r.sourceCommit,  before.sourceCommit);
-        assertEq(r.solcVersion,   before.solcVersion);
+        assertEq(uint8(r.role), uint8(before.role));
+        assertEq(r.contractName, before.contractName);
+        assertEq(r.version, before.version);
+        assertEq(r.sourceCommit, before.sourceCommit);
+        assertEq(r.solcVersion, before.solcVersion);
         assertEq(r.registeredAtBlock, before.registeredAtBlock);
         assertEq(r.offsets.length, before.offsets.length);
         for (uint256 i = 0; i < before.offsets.length; i++) {
-            assertEq(r.offsets[i].start,  before.offsets[i].start);
+            assertEq(r.offsets[i].start, before.offsets[i].start);
             assertEq(r.offsets[i].length, before.offsets[i].length);
         }
 
@@ -344,26 +341,20 @@ contract Rub3CodeRegistryTest is Test {
         registry.deprecate(MCH_A, "superseded");
 
         vm.prank(owner);
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3CodeRegistry.AlreadyDeprecated.selector, MCH_A)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3CodeRegistry.AlreadyDeprecated.selector, MCH_A));
         registry.deprecate(MCH_A, "again");
     }
 
     function test_deprecate_rejectsAnUnpublishedHash() public {
         vm.prank(owner);
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3CodeRegistry.NotPublished.selector, MCH_B)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3CodeRegistry.NotPublished.selector, MCH_B));
         registry.deprecate(MCH_B, "never existed");
     }
 
     function test_deprecate_requiresAReason() public {
         _publish(MCH_A, Rub3CodeRegistry.Role.Licence);
         vm.prank(owner);
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3CodeRegistry.TextRequired.selector, "reason")
-        );
+        vm.expectRevert(abi.encodeWithSelector(Rub3CodeRegistry.TextRequired.selector, "reason"));
         registry.deprecate(MCH_A, "");
     }
 
@@ -388,7 +379,13 @@ contract Rub3CodeRegistryTest is Test {
             abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger)
         );
         registry.publish(
-            MCH_A, Rub3CodeRegistry.Role.Licence, "Rub3Access", VERSION, COMMIT, SOLC, _ranges(1, 64)
+            MCH_A,
+            Rub3CodeRegistry.Role.Licence,
+            "Rub3Access",
+            VERSION,
+            COMMIT,
+            SOLC,
+            _ranges(1, 64)
         );
 
         assertEq(uint8(registry.record(MCH_A).status), uint8(Rub3CodeRegistry.Status.Unknown));
@@ -421,7 +418,13 @@ contract Rub3CodeRegistryTest is Test {
             abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nextKey)
         );
         registry.publish(
-            MCH_A, Rub3CodeRegistry.Role.Licence, "Rub3Access", VERSION, COMMIT, SOLC, _ranges(1, 64)
+            MCH_A,
+            Rub3CodeRegistry.Role.Licence,
+            "Rub3Access",
+            VERSION,
+            COMMIT,
+            SOLC,
+            _ranges(1, 64)
         );
 
         vm.prank(nextKey);
@@ -430,7 +433,13 @@ contract Rub3CodeRegistryTest is Test {
 
         vm.prank(nextKey);
         registry.publish(
-            MCH_A, Rub3CodeRegistry.Role.Licence, "Rub3Access", VERSION, COMMIT, SOLC, _ranges(1, 64)
+            MCH_A,
+            Rub3CodeRegistry.Role.Licence,
+            "Rub3Access",
+            VERSION,
+            COMMIT,
+            SOLC,
+            _ranges(1, 64)
         );
         assertEq(uint8(registry.record(MCH_A).status), uint8(Rub3CodeRegistry.Status.Active));
     }
@@ -625,7 +634,7 @@ contract Rub3CodeRegistryTest is Test {
     function test_publish_rejectsUnsortedOrOverlappingRanges() public {
         Rub3CodeRegistry.ByteRange[] memory unsorted = new Rub3CodeRegistry.ByteRange[](2);
         unsorted[0] = Rub3CodeRegistry.ByteRange({start: 128, length: 32});
-        unsorted[1] = Rub3CodeRegistry.ByteRange({start: 64,  length: 32});
+        unsorted[1] = Rub3CodeRegistry.ByteRange({start: 64, length: 32});
 
         vm.prank(owner);
         vm.expectRevert(
@@ -781,7 +790,7 @@ contract Rub3CodeRegistryTest is Test {
             _bytecodeHasSelector(target, sel),
             string.concat("selector present in bytecode: ", signature)
         );
-        (bool ok, ) = target.call(abi.encodePacked(sel, new bytes(128)));
+        (bool ok,) = target.call(abi.encodePacked(sel, new bytes(128)));
         assertFalse(ok, string.concat("call did not revert: ", signature));
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Ownable}      from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /// @notice The version authority for rub3 contract code: which masked code
@@ -93,8 +93,8 @@ contract Rub3CodeRegistry is Ownable2Step {
     /// @notice What a contract carrying this code is *for*, which decides what
     ///         may be done with it. Canonical rub3 code is not the same thing as
     ///         a contract that sells licences: a buyer pointed at the factory,
-    ///         at one of its deployer helpers, or at this registry has the wrong
-    ///         address, not the wrong code.
+    ///         at one of its deployer helpers, or at either registry has the
+    ///         wrong address, not the wrong code.
     ///
     ///         The order is part of the ABI - the wrapper mirrors these values -
     ///         so new roles are appended and existing ones never renumbered.
@@ -102,7 +102,14 @@ contract Rub3CodeRegistry is Ownable2Step {
         Licence,
         Factory,
         Deployer,
-        CodeRegistry
+        /// This contract: the version authority, keyed by masked code hash.
+        CodeRegistry,
+        /// {Rub3Registry}: the discovery registry, keyed by licence contract
+        /// address. A separate role from {Role.CodeRegistry} because they are
+        /// separate contracts answering separate questions, and a buyer that
+        /// cannot tell them apart is exactly the confusion this enum exists to
+        /// remove.
+        DiscoveryRegistry
     }
 
     /// @notice One byte range of the runtime code that solc reserved for an
@@ -178,12 +185,12 @@ contract Rub3CodeRegistry is Ownable2Step {
     ///         exactly once and can never be taken back.
     event Published(
         bytes32 indexed maskedCodeHash,
-        Role    indexed role,
+        Role indexed role,
         uint256 indexed offsetTable,
-        string  contractName,
-        string  version,
+        string contractName,
+        string version,
         bytes32 sourceCommit,
-        string  solcVersion
+        string solcVersion
     );
 
     /// @notice A release stopped being recommended for new purchases. It did not
@@ -320,11 +327,7 @@ contract Rub3CodeRegistry is Ownable2Step {
     ///         Clamped, so one call is enough: a `count` past the end returns
     ///         every table there is, and no reader needs {offsetTableCount}
     ///         first to avoid a revert.
-    function latestOffsetTables(uint256 count)
-        external
-        view
-        returns (ByteRange[][] memory window)
-    {
+    function latestOffsetTables(uint256 count) external view returns (ByteRange[][] memory window) {
         uint256 total = _offsetTables.length;
         uint256 taken = count < total ? count : total;
         window = new ByteRange[][](taken);
@@ -376,7 +379,9 @@ contract Rub3CodeRegistry is Ownable2Step {
         string calldata solcVersion,
         ByteRange[] calldata offsets
     ) external onlyOwner {
-        if (maskedCodeHash == bytes32(0)) revert MaskedCodeHashRequired();
+        if (maskedCodeHash == bytes32(0)) {
+            revert MaskedCodeHashRequired();
+        }
         if (_records[maskedCodeHash].status != Status.Unknown) {
             revert AlreadyPublished(maskedCodeHash);
         }

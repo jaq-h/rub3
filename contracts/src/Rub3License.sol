@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {ERC721}                   from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import {ERC721Enumerable}         from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
-import {Ownable}                  from "@openzeppelin/contracts/access/Ownable.sol";
-import {IERC20}                   from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20}                from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 /// @notice The EIP-3009 slice of a payment token (USDC and every other
@@ -174,7 +174,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         uint256 validAfter;
         uint256 validBefore;
         bytes32 salt;
-        bytes   signature;
+        bytes signature;
     }
 
     /// @notice 0 = access (user_id = wallet), 1 = account (user_id = TBA).
@@ -268,7 +268,11 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///         re-added, which is what makes the set auditable as append-only.
     ///         A mistaken revocation is corrected by publishing a fresh build,
     ///         not by rewriting history.
-    enum HashStatus { Unknown, Valid, Revoked }
+    enum HashStatus {
+        Unknown,
+        Valid,
+        Revoked
+    }
 
     /// @notice SHA-256 of a distributed wrapper binary → its status.
     ///
@@ -397,16 +401,16 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     error PredecessorTokenAlreadyClaimed(uint256 predecessorTokenId);
 
     constructor(
-        string        memory name_,
-        string        memory symbol_,
+        string memory name_,
+        string memory symbol_,
         IdentityTerms memory identity_,
-        bytes32[]     memory wrapperHashes_,
-        SaleTerms     memory sale_,
-        FeeTerms      memory fee_,
-        uint256              supplyCap_,
-        uint256              cooldownBlocks_,
-        address              predecessor_,
-        address              owner_
+        bytes32[] memory wrapperHashes_,
+        SaleTerms memory sale_,
+        FeeTerms memory fee_,
+        uint256 supplyCap_,
+        uint256 cooldownBlocks_,
+        address predecessor_,
+        address owner_
     ) ERC721(name_, symbol_) Ownable(owner_) {
         if (identity_.model > 1) revert InvalidIdentityModel(identity_.model);
         if (cooldownBlocks_ < MIN_COOLDOWN_BLOCKS) {
@@ -450,19 +454,21 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         if (predecessor_ != address(0)) {
             if (predecessor_.code.length == 0) revert IncompatiblePredecessor(predecessor_);
             try IRub3Predecessor(predecessor_).successor() returns (address) {}
-            catch { revert IncompatiblePredecessor(predecessor_); }
+            catch {
+                revert IncompatiblePredecessor(predecessor_);
+            }
         }
 
         _setTokenPrice(sale_.priceToken, sale_.priceAmount);
 
-        identityModel     = identity_.model;
+        identityModel = identity_.model;
         tbaImplementation = identity_.tbaImplementation;
-        price             = sale_.price;
-        feeBps            = fee_.feeBps;
-        treasury          = fee_.treasury;
-        supplyCap         = supplyCap_;
-        cooldownBlocks    = cooldownBlocks_;
-        predecessor       = predecessor_;
+        price = sale_.price;
+        feeBps = fee_.feeBps;
+        treasury = fee_.treasury;
+        supplyCap = supplyCap_;
+        cooldownBlocks = cooldownBlocks_;
+        predecessor = predecessor_;
 
         // The launch release seeds the set; later builds append to it.
         for (uint256 i = 0; i < wrapperHashes_.length; i++) {
@@ -515,7 +521,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         if (wrapperHashes[hash] != HashStatus.Valid) revert WrapperHashNotValid(hash);
         if (bytes(reason).length == 0) revert RevocationReasonRequired();
 
-        wrapperHashes[hash]    = HashStatus.Revoked;
+        wrapperHashes[hash] = HashStatus.Revoked;
         revocationReason[hash] = reason;
         emit WrapperHashRevoked(hash, reason);
     }
@@ -544,7 +550,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     /// taken on it.
     function withdraw(address payable to) external onlyOwner {
         uint256 amount = address(this).balance - feesAccrued;
-        (bool ok, ) = to.call{value: amount}("");
+        (bool ok,) = to.call{value: amount}("");
         if (!ok) revert WithdrawFailed();
     }
 
@@ -564,7 +570,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         // that re-enters finds nothing left to claim.
         feesAccrued = 0;
 
-        (bool ok, ) = payable(to).call{value: amount}("");
+        (bool ok,) = payable(to).call{value: amount}("");
         if (!ok) revert WithdrawFailed();
 
         emit ProtocolFeeWithdrawn(address(0), to, amount);
@@ -703,8 +709,8 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         }
         predecessorTokenClaimed[predecessorTokenId] = true;
 
-        tokenId                     = _reserveNextId();
-        wasClaimed[tokenId]         = true;
+        tokenId = _reserveNextId();
+        wasClaimed[tokenId] = true;
         claimedFromTokenId[tokenId] = predecessorTokenId;
 
         _afterClaim(tokenId, predecessorTokenId);
@@ -774,7 +780,9 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         }
 
         lastActivationBlock[tokenId] = block.number;
-        unchecked { sessionId = ++_sessionCounter; }
+        unchecked {
+            sessionId = ++_sessionCounter;
+        }
         activeSessionId[tokenId] = sessionId;
 
         emit Activated(tokenId, msg.sender, sessionId);
@@ -878,15 +886,16 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         IERC20 erc20 = IERC20(token);
         uint256 balanceBefore = erc20.balanceOf(address(this));
 
-        IERC3009(token).receiveWithAuthorization(
-            auth.from,
-            address(this),
-            amount,
-            auth.validAfter,
-            auth.validBefore,
-            nonce,
-            auth.signature
-        );
+        IERC3009(token)
+            .receiveWithAuthorization(
+                auth.from,
+                address(this),
+                amount,
+                auth.validAfter,
+                auth.validBefore,
+                nonce,
+                auth.signature
+            );
 
         uint256 received = erc20.balanceOf(address(this)) - balanceBefore;
         if (received < amount) revert InsufficientPayment(received, amount);
@@ -971,11 +980,13 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         } else {
             if (token.code.length == 0) revert IncompatiblePriceToken(token);
             try IERC3009(token).authorizationState(address(0), bytes32(0)) returns (bool) {}
-            catch { revert IncompatiblePriceToken(token); }
+            catch {
+                revert IncompatiblePriceToken(token);
+            }
         }
 
         emit TokenPriceUpdated(priceToken, priceAmount, token, amount);
-        priceToken  = token;
+        priceToken = token;
         priceAmount = amount;
     }
 
@@ -991,7 +1002,9 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     function _reserveNextId() internal returns (uint256 tokenId) {
         if (supplyCap != 0 && nextTokenId >= supplyCap) revert SoldOut();
         tokenId = nextTokenId;
-        unchecked { nextTokenId = tokenId + 1; }
+        unchecked {
+            nextTokenId = tokenId + 1;
+        }
     }
 
     /// @dev Reserves and mints the next sequential id to `to`. Only for mint

@@ -129,9 +129,10 @@ use crate::rpc::{self, RpcError};
 /// What a canonical contract is *for*, which decides what may be done with it.
 ///
 /// A masked-hash match says the code is ours; it does not say the address sells
-/// licences. The factory, its two deployer helpers and the code registry are
-/// canonical rub3 code and are pinned here so the table stays a total mirror of
-/// the published manifest, but buying from one is a category error, and
+/// licences. The factory, its two deployer helpers, the code registry and the
+/// discovery registry are canonical rub3 code and are pinned here so the table
+/// stays a total mirror of the published manifest, but buying from one is a
+/// category error, and
 /// [`verify_before_purchase`] refuses it as such rather than letting a
 /// transaction find out on-chain.
 ///
@@ -156,6 +157,14 @@ pub enum Role {
     /// code hashes to this entry, which is what stops the trust from resting on
     /// whoever deployed it.
     CodeRegistry,
+    /// `Rub3Registry` - the discovery registry of `implementation.md` §3.2,
+    /// which answers "which apps exist and which are listable". Nothing on the
+    /// launch or purchase path reads it; it is pinned so that an address a
+    /// shopper found through discovery and then handed to a purchase is refused
+    /// by name rather than by a transaction failing on chain. Distinct from
+    /// [`Role::CodeRegistry`] because the two are different contracts answering
+    /// different questions.
+    DiscoveryRegistry,
 }
 
 impl Role {
@@ -172,6 +181,7 @@ impl Role {
             1 => Some(Role::Factory),
             2 => Some(Role::Deployer),
             3 => Some(Role::CodeRegistry),
+            4 => Some(Role::DiscoveryRegistry),
             _ => None,
         }
     }
@@ -183,6 +193,7 @@ impl Role {
             Role::Factory => "deploy factory",
             Role::Deployer => "factory-internal deployer helper",
             Role::CodeRegistry => "code registry",
+            Role::DiscoveryRegistry => "discovery registry",
         }
     }
 }
@@ -274,7 +285,7 @@ const RELEASE: &str =
 /// reads top to bottom.
 // One range per line, kept that way on purpose: this table is reviewed against
 // contracts/canonical-bytecode.json by eye as well as by test, and rustfmt's
-// four-lines-per-range expansion buries 52 offsets in 200 lines of braces.
+// four-lines-per-range expansion buries 55 offsets in 220 lines of braces.
 #[rustfmt::skip]
 pub static CANONICAL: &[CanonicalContract] = &[
     CanonicalContract {
@@ -317,7 +328,7 @@ pub static CANONICAL: &[CanonicalContract] = &[
         source: "contracts/src/Rub3CodeRegistry.sol",
         role: Role::CodeRegistry,
         release: RELEASE,
-        masked_sha256: "71c031334bbe5918f71922e0e6b7577ae0ee8c4d2626fe714aa536aa18b06e5c",
+        masked_sha256: "121c884e3098c8170a79d0cae6fa7221986c11fabefe8371dd78ad450459bd9e",
         immutable_ranges: &[],
     },
     CanonicalContract {
@@ -339,6 +350,18 @@ pub static CANONICAL: &[CanonicalContract] = &[
             ImmutableRange { start: 1759, length: 32 },
             ImmutableRange { start: 2010, length: 32 },
             ImmutableRange { start: 2049, length: 32 },
+        ],
+    },
+    CanonicalContract {
+        contract: "Rub3Registry",
+        source: "contracts/src/Rub3Registry.sol",
+        role: Role::DiscoveryRegistry,
+        release: RELEASE,
+        masked_sha256: "d4659f49df7f424e0623e0ce8fb9cf7d03b7b2e1e77882e4f3d393e623091489",
+        immutable_ranges: &[
+            ImmutableRange { start: 1037, length: 32 },
+            ImmutableRange { start: 2731, length: 32 },
+            ImmutableRange { start: 2852, length: 32 },
         ],
     },
     CanonicalContract {
@@ -591,12 +614,13 @@ const PUSH32: u8 = 0x7f;
 ///    and that is what turns "we did not look at these bytes" into "these bytes
 ///    cannot execute". It holds by construction on compiler output: solc
 ///    compiles every read of an immutable to a `PUSH32` whose operand the
-///    deployer fills in. Measured on all three of this repository's contracts
-///    that have immutables - `Rub3Access`, `Rub3Subscription` and `Rub3Factory`;
-///    the two deployer helpers and the registry have none - not assumed. Should
-///    a future compiler emit them another way, this rejects the registry's table
-///    and the gate falls back to refusing - fail-closed, on the path that spends
-///    money, which is the right direction to be wrong in.
+///    deployer fills in. Measured rather than assumed, on all four of this
+///    repository's contracts that have immutables - `Rub3Access`,
+///    `Rub3Subscription`, `Rub3Factory` and `Rub3Registry`; the two deployer
+///    helpers and `Rub3CodeRegistry` have none. Should a future compiler emit
+///    them another way, this rejects the registry's table and the gate falls
+///    back to refusing - fail-closed, on the path that spends money, which is
+///    the right direction to be wrong in.
 ///
 /// **What the one-byte lookback does not establish**, said plainly because the
 /// claim above is the one this module publishes: it does not prove the `PUSH32`
@@ -1060,13 +1084,13 @@ fn sanitised(record: RegistryRecord) -> RegistryRecord {
 ///
 /// Sixteen is deliberately far above anything legitimate rather than tight. A
 /// table is per *code layout*, not per contract and not per release: the whole
-/// canonical set spans four, one each for `Rub3Access`, `Rub3Subscription` and
-/// `Rub3Factory` plus the empty one the two deployer helpers and the registry
-/// share. A fifth appears only when a future contract's immutables land at
-/// offsets none of those describe, so sixteen leaves room for many such
-/// releases live at once. Raise it when a real deployment needs more tables
-/// than this, never to accommodate a registry publishing tables no contract was
-/// deployed under.
+/// canonical set spans five, one each for `Rub3Access`, `Rub3Subscription`,
+/// `Rub3Factory` and `Rub3Registry` plus the empty one the two deployer helpers
+/// and `Rub3CodeRegistry` itself share. A sixth appears only when a future
+/// contract's immutables land at offsets none of those describe, so sixteen
+/// leaves room for many such releases live at once. Raise it when a real
+/// deployment needs more tables than this, never to accommodate a registry
+/// publishing tables no contract was deployed under.
 const MAX_CANDIDATE_OFFSET_TABLES: usize = 16;
 
 /// What the registry said about code the pinned table did not recognise.
@@ -1886,7 +1910,15 @@ mod tests {
     #[test]
     fn the_gate_refuses_canonical_code_that_sells_nothing() {
         let code = fake_code(256, 0x10);
-        for role in [Role::Factory, Role::Deployer, Role::CodeRegistry] {
+        for role in [
+            Role::Factory,
+            Role::Deployer,
+            Role::CodeRegistry,
+            // The discovery registry is the one a shopper is most likely to
+            // hand to a purchase by mistake: it is the address §3.2 tells an
+            // agent to read before it has a licence address at all.
+            Role::DiscoveryRegistry,
+        ] {
             let table = entry_for(&code, vec![], role);
             match gate(&code, table) {
                 Err(Refusal::NotALicence { role: refused, .. }) => {
@@ -2560,6 +2592,7 @@ mod tests {
             Some(Role::Factory),
             Some(Role::Deployer),
             Some(Role::CodeRegistry),
+            Some(Role::DiscoveryRegistry),
             // A role published by a registry newer than this build. Unknown is
             // refused too: a purchase may only target a role this binary can
             // name, and guessing at the first variant would make an unknown
@@ -3514,11 +3547,17 @@ mod tests {
     /// numbering.
     #[test]
     fn an_unknown_role_number_is_never_guessed_at() {
-        assert_eq!(
-            Role::from_u8(4),
-            None,
-            "a role this build has no name for must stay unnamed rather than becoming the first \
-             variant, which is a licence"
-        );
+        // The first free number moves every time `Rub3CodeRegistry.Role` gains a
+        // variant and this enum is appended to match. That is the point of
+        // asserting it: a build that named a fifth role without moving this line
+        // would be claiming a number it has no name for is still unknown.
+        for unknown in [5u8, 6, 255] {
+            assert_eq!(
+                Role::from_u8(unknown),
+                None,
+                "role {unknown} has no name in this build and must stay unnamed rather than \
+                 becoming the first variant, which is a licence"
+            );
+        }
     }
 }
