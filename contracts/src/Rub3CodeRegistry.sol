@@ -93,8 +93,8 @@ contract Rub3CodeRegistry is Ownable2Step {
     /// @notice What a contract carrying this code is *for*, which decides what
     ///         may be done with it. Canonical rub3 code is not the same thing as
     ///         a contract that sells licences: a buyer pointed at the factory,
-    ///         at one of its deployer helpers, or at this registry has the wrong
-    ///         address, not the wrong code.
+    ///         at one of its deployer helpers, or at either registry has the
+    ///         wrong address, not the wrong code.
     ///
     ///         The order is part of the ABI - the wrapper mirrors these values -
     ///         so new roles are appended and existing ones never renumbered.
@@ -102,7 +102,14 @@ contract Rub3CodeRegistry is Ownable2Step {
         Licence,
         Factory,
         Deployer,
-        CodeRegistry
+        /// This contract: the version authority, keyed by masked code hash.
+        CodeRegistry,
+        /// {Rub3Registry}: the discovery registry, keyed by licence contract
+        /// address. A separate role from {Role.CodeRegistry} because they are
+        /// separate contracts answering separate questions, and a buyer that
+        /// cannot tell them apart is exactly the confusion this enum exists to
+        /// remove.
+        DiscoveryRegistry
     }
 
     /// @notice One byte range of the runtime code that solc reserved for an

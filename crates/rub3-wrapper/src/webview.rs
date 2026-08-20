@@ -980,6 +980,9 @@ fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNo
                         Some(Role::CodeRegistry) =>
                             "the registry that records which rub3 code is genuine, which is how \
                              this app checked the address in the first place",
+                        Some(Role::DiscoveryRegistry) =>
+                            "the registry that lists which rub3 apps exist, which is where an \
+                             address like this one is found rather than bought from",
                         // Not a state the gate produces - it accepts every
                         // licence-role match - but kept total rather than
                         // unreachable so a role added to the table later
@@ -1276,6 +1279,60 @@ mod tests {
             not_a_licence.body
         );
         assert!(!unrecognised.retryable && !not_a_licence.retryable);
+    }
+
+    /// Every non-licence role gets its own sentence, and the two registries get
+    /// two different ones.
+    ///
+    /// `Rub3Registry` (discovery) and `Rub3CodeRegistry` (the code authority)
+    /// are the pair a buyer is most likely to have confused in the first place -
+    /// both are "a rub3 registry", and only one of them is the reason this app
+    /// trusted the address it just refused. A window that described them with
+    /// the same words would send someone back to the same wrong address, so the
+    /// copy is checked to differ rather than merely to exist.
+    #[test]
+    fn the_two_registries_are_described_differently_on_the_blocked_screen() {
+        let notice_for = |contract: &str, role: Role| {
+            refusal_notice(
+                CONTRACT,
+                &crate::attest::GateError::Refused(Refusal::NotALicence {
+                    contract: contract.to_string(),
+                    role: Some(role),
+                }),
+            )
+        };
+
+        let discovery = notice_for("Rub3Registry", Role::DiscoveryRegistry);
+        let code = notice_for("Rub3CodeRegistry", Role::CodeRegistry);
+
+        assert!(
+            discovery.body.contains("Rub3Registry")
+                && discovery.body.contains("lists which rub3 apps exist"),
+            "the discovery registry has to be described as what it is: {}",
+            discovery.body
+        );
+        assert_ne!(
+            discovery.body, code.body,
+            "the two registries must not be described with the same sentence"
+        );
+
+        // And no two roles share a description, which is what keeps a role added
+        // later from silently inheriting another one's words.
+        let bodies: Vec<String> = [
+            Role::Factory,
+            Role::Deployer,
+            Role::CodeRegistry,
+            Role::DiscoveryRegistry,
+            Role::Licence,
+        ]
+        .into_iter()
+        .map(|role| notice_for("Rub3Whatever", role).body)
+        .collect();
+        for (i, a) in bodies.iter().enumerate() {
+            for b in bodies.iter().skip(i + 1) {
+                assert_ne!(a, b, "two roles read identically on the blocked screen");
+            }
+        }
     }
 
     /// An address holding nothing is a third thing a person can act on - almost

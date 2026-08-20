@@ -149,16 +149,18 @@ contract Rub3CodeRegistryTest is Test {
     /// not the same thing as a contract that sells licences. Without the role, a
     /// buyer pointed at the factory would read "canonical" and stop there.
     function test_publish_carriesTheRoleThroughUnchanged() public {
-        Rub3CodeRegistry.Role[4] memory roles = [
-            Rub3CodeRegistry.Role.Licence,
-            Rub3CodeRegistry.Role.Factory,
-            Rub3CodeRegistry.Role.Deployer,
-            Rub3CodeRegistry.Role.CodeRegistry
-        ];
-        for (uint256 i = 0; i < roles.length; i++) {
-            bytes32 mch = keccak256(abi.encode("role fixture", i));
-            _publish(mch, roles[i]);
-            assertEq(uint8(registry.record(mch).role), uint8(roles[i]));
+        // Enumerated by wire value up to the enum's own bound rather than from a
+        // hand-written list, so a `Role` added later is covered the moment it
+        // exists. A fixed-size literal was what let `DiscoveryRegistry` go
+        // uncovered here while this test still passed.
+        uint8 roleCount = uint8(type(Rub3CodeRegistry.Role).max) + 1;
+        assertEq(roleCount, 5, "a new Role needs its wire number settled in code_registry_e2e too");
+
+        for (uint8 raw = 0; raw < roleCount; raw++) {
+            Rub3CodeRegistry.Role role = Rub3CodeRegistry.Role(raw);
+            bytes32 mch = keccak256(abi.encode("role fixture", raw));
+            _publish(mch, role);
+            assertEq(uint8(registry.record(mch).role), raw);
         }
     }
 
