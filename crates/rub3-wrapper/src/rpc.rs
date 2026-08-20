@@ -1011,10 +1011,8 @@ fn poll_for_mint(
 
     block_on(async move {
         let provider = build_provider(rpc_url)?;
-        // `from` and `to` are pinned in the filter, so the node does the
-        // matching. The topic count is still checked below: ERC-20 shares this
-        // topic0 and differs only in arity, and a licence contract that also
-        // moved a token would otherwise hand back a transfer as a mint.
+        // The emitter, the mint and the recipient are all pinned, so the node
+        // does the matching.
         let filter = Filter::new()
             .address(contract)
             .from_block(from_block)
@@ -1027,8 +1025,23 @@ fn poll_for_mint(
             .await
             .map_err(RpcError::transport)?;
 
+        let recipient_topic = recipient.into_word();
+
+        // And every term of it is checked again on what comes back, because the
+        // hash this returns is the one a licence is claimed against. An endpoint
+        // that honours `address` and degrades on `topics`, which is a real
+        // shape under rate limiting, would otherwise answer with any transfer
+        // this contract emitted: a resale, or a stranger's mint. The arity is
+        // part of that check rather than beside it, since ERC-20 shares this
+        // topic0 and differs only in how many topics it carries.
         for log in logs {
-            if log.topics().len() != 4 {
+            let topics = log.topics();
+            if log.address() != contract
+                || topics.len() != 4
+                || topics[0] != ERC721_TRANSFER_SIG
+                || topics[1] != B256::ZERO
+                || topics[2] != recipient_topic
+            {
                 continue;
             }
             if let Some(hash) = log.transaction_hash {
@@ -1133,8 +1146,8 @@ fn poll_for_activate(
 
         let mut found = None;
 
-        // The node did the matching, and it is checked again here for the same
-        // reason `poll_for_mint` rechecks its own: what comes back decides
+        // Checked again on the way back, term for term, for the same reason
+        // `poll_for_mint` rechecks its own filter: what comes back decides
         // which transaction a session is issued against, and a filter honoured
         // loosely would hand this screen somebody else's activation.
         for log in logs {
@@ -2700,6 +2713,11 @@ mod watch_rpc_tests {
     const ACTIVATE_TX: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
     const OTHER_TX: &str = "0x3333333333333333333333333333333333333333333333333333333333333333";
     const TOKEN_ID: u64 = 137;
+    /// Somebody who is not the buyer this screen belongs to.
+    const STRANGER: &str = "0x00000000000000000000000000000000000Beef0";
+    /// A contract that is not the licence this screen belongs to.
+    const OTHER_CONTRACT: &str = "0x000000000000000000000000000000000000BEEF";
+    const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
     fn contract() -> Address {
         CONTRACT.parse().expect("test contract address")
@@ -2729,14 +2747,31 @@ mod watch_rpc_tests {
 
     /// One ERC-721 mint log, as a node returns it.
     fn mint_log(to: &str, tx: &str) -> serde_json::Value {
-        serde_json::json!({
-            "address": CONTRACT.to_lowercase(),
-            "topics": [
+        transfer_log(CONTRACT, ZERO_ADDRESS, to, tx)
+    }
+
+    /// One ERC-721 `Transfer`, as `emitter` emitted it. A mint is the case
+    /// where `from` is the zero address; every other `from` is a transfer of a
+    /// token that already existed.
+    fn transfer_log(emitter: &str, from: &str, to: &str, tx: &str) -> serde_json::Value {
+        event_log(
+            emitter,
+            &[
                 format!("0x{}", hex::encode(ERC721_TRANSFER_SIG.as_slice())),
-                format!("0x{:0>64}", ""),
+                address_topic(from),
                 address_topic(to),
-                format!("0x{:064x}", TOKEN_ID),
+                format!("0x{TOKEN_ID:064x}"),
             ],
+            tx,
+        )
+    }
+
+    /// One log carrying `topics`, with the block fields every one of these
+    /// shares.
+    fn event_log(emitter: &str, topics: &[String], tx: &str) -> serde_json::Value {
+        serde_json::json!({
+            "address": emitter.to_lowercase(),
+            "topics": topics,
             "data": "0x",
             "blockNumber": "0x2a",
             "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000042",
@@ -2817,6 +2852,75 @@ mod watch_rpc_tests {
             Some(address_topic(BUYER)),
             "topic2 must pin the recipient, or another buyer's mint would win: {filter}",
         );
+    }
+
+    /// A node that answers the address filter and degrades on the topics is a
+    /// real shape under rate limiting, and everything below is a log the
+    /// licence contract could genuinely have emitted in the range. None of them
+    /// is this screen's mint, and reading one as such would hand the purchase
+    /// poller a stranger's transaction: it went to the right contract, so the
+    /// poller accepts it, and then finds no mint to this wallet in it and drops
+    /// the person on an error screen instead of the manual paste that works.
+    #[test]
+    fn only_this_wallets_mint_from_this_contract_is_a_mint() {
+        for (what, log) in [
+            (
+                "a resale of an existing token to this wallet",
+                transfer_log(CONTRACT, STRANGER, BUYER, OTHER_TX),
+            ),
+            (
+                "another wallet's mint",
+                transfer_log(CONTRACT, ZERO_ADDRESS, STRANGER, OTHER_TX),
+            ),
+            (
+                "a mint from another contract",
+                transfer_log(OTHER_CONTRACT, ZERO_ADDRESS, BUYER, OTHER_TX),
+            ),
+            (
+                "a four-topic event that is not a Transfer at all",
+                event_log(
+                    CONTRACT,
+                    &[
+                        format!("0x{:064x}", 9),
+                        address_topic(ZERO_ADDRESS),
+                        address_topic(BUYER),
+                        format!("0x{TOKEN_ID:064x}"),
+                    ],
+                    OTHER_TX,
+                ),
+            ),
+        ] {
+            let node = StubNode::routed(move |method, _params| match method {
+                "eth_getLogs" => serde_json::json!([log.clone()]),
+                _ => serde_json::json!(null),
+            });
+
+            let err = watch_for_mint(&node.url, contract(), buyer(), 40, brief())
+                .expect_err("only this wallet's mint resolves");
+            assert_eq!(
+                end_of(&err),
+                WatchEnd::Timeout,
+                "{what} must not be read as this screen's mint",
+            );
+        }
+    }
+
+    /// And the mint is still found when a loose answer carries it alongside
+    /// them, rather than the first thing in the list winning.
+    #[test]
+    fn the_mint_is_found_among_unrelated_transfers() {
+        let node = StubNode::routed(|method, _params| match method {
+            "eth_getLogs" => serde_json::json!([
+                transfer_log(CONTRACT, STRANGER, BUYER, OTHER_TX),
+                transfer_log(CONTRACT, ZERO_ADDRESS, STRANGER, OTHER_TX),
+                mint_log(BUYER, MINT_TX),
+            ]),
+            _ => serde_json::json!(null),
+        });
+
+        let hash = watch_for_mint(&node.url, contract(), buyer(), 40, brief())
+            .expect("the mint must be found beside unrelated traffic");
+        assert_eq!(hash, MINT_TX);
     }
 
     /// ERC-20 shares topic0 with ERC-721 and differs only in arity, so a

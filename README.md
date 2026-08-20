@@ -79,8 +79,9 @@ rub3/
 │       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner, chainId, getCode) via alloy
 │       │   ├── attest.rs             # Pre-purchase contract attestation: masked code hash vs the pinned canonical table, then vs Rub3CodeRegistry on a miss (feature `onchain-read`, tier 2+)
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC message handling (feature `webview`)
-│       │   ├── webview/session_flow.rs # Test-only: the §1.8 activation flows driven at the IPC seam, three of them anvil-gated (`#[cfg(test)]`, never shipped)
-│       │   ├── webview/session_flow/onchain.rs # Test-only: the anvil harness behind those three (spawn/deploy/mine helpers, port 8551)
+│       │   ├── webview/session_flow.rs # Test-only: the §1.8 activation flows driven at the IPC seam, five of them anvil-gated (`#[cfg(test)]`, never shipped)
+│       │   ├── webview/session_flow/onchain.rs # Test-only: the anvil harness behind those five (spawn/deploy/mine helpers, port 8551)
+│       │   ├── webview/session_flow/auto_detect.rs # Test-only: the §5.1a auto-detect front door at the same seam, driven against a stub node
 │       │   ├── supervisor.rs         # Child process lifecycle, SIGTERM forwarding, `RUB3_AGENT_*` stripped from the child, SDK channel lifetime
 │       │   ├── sdk.rs                # Wrapper half of the SDK channel: local socket / named pipe serving heartbeat + session (feature `sdk`)
 │       │   ├── session.rs            # Session schema, message hash, verify_local, is_expired
