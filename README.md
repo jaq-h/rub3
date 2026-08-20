@@ -217,12 +217,16 @@ cargo run -p rub3-cli -- pack \
 
 The application is embedded with `include_bytes!` and extracted on first launch
 to `{data_dir}/rub3/apps/{app_id}/{sha256}/{name}`, after activation succeeds and
-never before it. A packed binary carries its own application and refuses
-`--binary`; `rub3-wrapper --version` answers which licence it gates on, on which
-chain, through which factory, at which tier and through which front doors,
-without a network call. The endpoint it names is reduced to scheme, host and
-port, the same rule the RPC error surface holds to, since a provider key lives
-in the userinfo, the path or the query.
+never before it. `RUB3_APP_DIR` replaces `{data_dir}/rub3/apps` when it is set,
+which is what a container with a mounted volume wants. The directory is keyed by
+the payload's sha-256, so a new version of the application extracts beside the
+old one rather than over a copy another process may be running. A packed binary
+carries its own application and refuses `--binary`; `rub3-wrapper --version`
+answers which licence it gates on, on which chain, through which factory, at
+which tier and through which front doors, without a network call. The endpoint
+it names is reduced to scheme, host and port, the same rule the RPC error
+surface holds to, since a provider key lives in the userinfo, the path or the
+query.
 
 **`pack` reads the canonical `Rub3Factory` out of
 [contracts/deployments.json](contracts/deployments.json) and bakes it in beside
