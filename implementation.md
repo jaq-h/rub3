@@ -1061,7 +1061,7 @@ Goal: the payment flows only rub3 can host.
 
 The interactive path stays fully supported - manual tx-hash paste is the floor today and remains reachable forever. Polish lands after the agent path.
 
-### 5.1 - Frictionless tx confirmation `[not started]`
+### 5.1 - Frictionless tx confirmation `[partial]`
 
 Demoted from Phase 1, where it was specified as §1.10 before the agent-first revision; the spec below applies unchanged when picked up. The manual-paste floor already works and stays reachable forever, so richer confirmation modes are human-surface polish rather than a gap.
 
@@ -1069,20 +1069,20 @@ The purchase (§1.7) and activate (§1.8) flows currently ask the user to paste 
 
 **Three modes, in order of preference:**
 
-| Mode | Project ID | JS bundle | Offline tolerant | Relies on |
-|---|---|---|---|---|
-| `wallet-connect` | required (dev-supplied) | ~255 KB vendored | no | Reown relay + chain RPC |
-| `auto-detect` | none | none | no | chain RPC only |
-| `manual` (§1.7, §1.8) | none | none | yes (paste later) | user copy/paste |
+| Mode | Status | Project ID | JS bundle | Offline tolerant | Relies on |
+|---|---|---|---|---|---|
+| `wallet-connect` | `[not started]` (§5.1b) | required (dev-supplied) | ~255 KB vendored | no | Reown relay + chain RPC |
+| `auto-detect` | `[complete]` (§5.1a) | none | none | no | chain RPC only |
+| `manual` (§1.7, §1.8) | `[complete]` | none | none | yes (paste later) | user copy/paste |
 
-The three modes surface as three tabs on the cooldown / purchase screens. The default tab at render time is the highest-capability one available for the current build:
-- WalletConnect tab visible when the `wallet-connect` feature is compiled in **and** the developer supplied a non-placeholder `wc_project_id`
-- Auto-detect tab visible when `onchain-write` is on (always true for tier 3+, which is the only tier that reaches these screens)
-- Manual tab always visible
+The three modes surface as three tabs on the cooldown / purchase screens. Two of the three are built, so a tier-3 build shows a two-tab strip today. The default tab at render time is the highest-capability one available for the current build:
+- WalletConnect tab visible when the `wallet-connect` feature is compiled in **and** the developer supplied a non-placeholder `wc_project_id`. Neither exists yet: no tab, no vendored bundle, no project id anywhere in the tree.
+- Auto-detect tab visible when `onchain-write` is on (always true for tier 3+, which is the only tier that reaches these screens). The screen payload carries `autoWatchSecs` only where a watch can run, and the page reads its presence as the tab's availability test - the same mechanism the WalletConnect tab will use for `wcProjectId`.
+- Manual tab always visible. The strip itself is hidden when only one mode is available, because a strip offering no choice is decoration; the manual panel is shown either way.
 
 Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate_tx_sent`) - the downstream poller/finalize path from §1.7 and §1.8 Phase B is untouched. This keeps auto-detect and WalletConnect as pure front-door improvements rather than new branches in the session pipeline.
 
-#### 5.1a - RPC auto-detect `[not started]`
+#### 5.1a - RPC auto-detect `[complete]`
 
 **Rationale.** Many embedded-app developers will never configure WalletConnect - they may not want the relay dependency, may not want to register with Reown, or may be shipping internal / CLI-adjacent tools. Auto-detect gives those deployments a one-click confirm path without adding any JS or external service.
 
@@ -1103,6 +1103,14 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 - Tabs in `#screen-purchase` and `#screen-cooldown`: `[WalletConnect] [Auto-detect] [Manual]`. The auto-detect body is a spinner + "Waiting for your wallet to broadcast the tx…" copy and a "Switch to manual" link.
 
 **Gating.** `onchain-write` (already required by §1.7 / §1.8). No new Cargo feature. Pure additive - tier 3+ builds pick it up automatically.
+
+**As built.** Three details differ from the sketch above, each because building it exposed something the sketch could not have known:
+
+- `deadline` is an `rpc::Deadline`, which carries the budget *and* an `rpc::Cancel` flag. Cancellation and expiry are the same question asked of a person and of a clock, and a watch consulting only one of them would either outlive its screen or ignore its budget. Bundling them means no call site can pass a budget and forget the flag. `Cancel` is checked in 50 ms slices between polls, so a cancelled watch stops well inside the 3 s cadence rather than leaving a request in flight.
+- The two ways a watch ends without a match are `RpcError::WatchEnded(WatchEnd::Timeout | WatchEnd::Cancelled)`. Nothing failed in either case, which is why the screen falls back rather than reporting an error, and why they are distinguishable from an endpoint that stopped answering. Beyond the budget, five consecutive retryable failures also end a watch: fifteen seconds of silence is an endpoint that will not answer, and spending the remaining budget on it only delays the paste that would have worked.
+- `watch_for_activate` picks its transaction by the `Activated(uint256 indexed tokenId, ...)` log rather than by `from == wallet`. The specified signature carries no wallet, and the token id it does carry is the sharper discriminator: it names the token this screen is waiting on rather than the account that paid for the gas, and it survives an activation relayed by someone else. `to == contract` is kept as the prefilter, so at most a handful of receipts in the block are fetched.
+
+**Where it is tested.** `rpc::watch_loop_tests` drives the loop with the network taken out (budget, cancellation, the retry threshold); `rpc::watch_rpc_tests` drives both watchers against a mocked node (the filter that goes out, the decoding that comes back); `webview::session_flow::auto_detect` proves at the IPC seam that a found hash and a pasted hash produce call-for-call the same flow, and that a watch stops when its screen does; and two `#[ignore]`d arms in `webview::session_flow::onchain` run both watchers against a live anvil.
 
 #### 5.1b - WalletConnect v2 `[not started]`
 

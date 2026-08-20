@@ -183,6 +183,116 @@
        screen and must not inherit the 8px gap that separates stacked buttons. */
     #btn-b-retry.hidden + #btn-b-cancel { margin-top: 0; }
 
+    /* ── Confirmation modes (§5.1) ──────────────────────────────────────
+       The purchase and cooldown screens both end in the same question: how
+       does the transaction hash get back to the wrapper? Each answer is a
+       tab, and the strip below is generic so §5.1b's WalletConnect tab
+       slots in as one more button and one more panel.
+
+       Manual is never hidden. A richer mode is an improvement on the floor,
+       never a replacement for it: someone whose RPC endpoint is unreachable
+       still has to be able to finish. */
+    /* A little more air above the strip than between the boxes it follows:
+       everything above is what to send, everything below is how it comes back,
+       and the break between the two should be visible before it is read. */
+    .modes { margin-top: 6px; margin-bottom: 8px; }
+
+    .tabs {
+      display: flex;
+      gap: 3px;
+      background: #131313;
+      border: 1px solid #262626;
+      border-radius: 8px;
+      padding: 3px;
+      margin-bottom: 16px;
+    }
+    /* Class beats the bare `button + button` rule, so tabs sit side by side
+       rather than inheriting the stacked-button gap. */
+    .tabs button {
+      flex: 1 1 0;
+      min-width: 0;
+      width: auto;
+      margin-top: 0;
+      background: transparent;
+      color: #8a8a8a;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 7px 8px;
+      border-radius: 5px;
+      transition: background 0.15s, color 0.15s;
+    }
+    .tabs button:hover { color: #d4d4d4; }
+    .tabs button:focus-visible,
+    .linkish:focus-visible {
+      outline: 2px solid #3b6fd4;
+      outline-offset: 1px;
+    }
+    .tabs button[aria-selected="true"] {
+      background: #242424;
+      color: #ededed;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    }
+
+    /* The auto-detect panel. Deliberately quiet: there is nothing to do here,
+       and the one thing the person might want - to stop waiting and paste the
+       hash themselves - is the only control on it. */
+    .watch { text-align: center; padding: 4px 0 2px; }
+    .watch .spinner { margin-bottom: 16px; }
+    .watch-head { font-size: 13px; color: #d4d4d4; line-height: 1.45; }
+    .watch-sub {
+      font-size: 12px;
+      color: #6b6b6b;
+      line-height: 1.55;
+      margin: 8px auto 0;
+      max-width: 300px;
+    }
+
+    /* Drains over exactly the budget the wrapper reports, so the bar running
+       out and the watch giving up are the same moment rather than two. */
+    .watch-bar {
+      height: 2px;
+      width: 180px;
+      margin: 18px auto 12px;
+      background: #242424;
+      border-radius: 1px;
+      overflow: hidden;
+    }
+    .watch-bar i {
+      display: block;
+      height: 100%;
+      background: #2563eb;
+      transform-origin: left center;
+      transform: scaleX(1);
+    }
+    @keyframes drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+
+    .linkish {
+      display: block;
+      width: auto;
+      margin: 0 auto;
+      padding: 5px 8px;
+      background: none;
+      color: #6f93d8;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .linkish:hover { color: #93b2ef; text-decoration: underline; }
+
+    /* What the manual tab carries when auto-detect gave up. Blue-grey rather
+       than the error red or the advisory amber: nothing failed and nothing is
+       being warned about - the wrapper stopped looking and is handing the job
+       back. */
+    .tab-hint {
+      background: #15202b;
+      border: 1px solid #22384c;
+      border-radius: 6px;
+      padding: 11px 13px;
+      margin-bottom: 14px;
+      color: #9fb6c9;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
     .hidden { display: none !important; }
   </style>
 </head>
@@ -263,13 +373,37 @@
         <div class="tv" id="p-calldata" style="word-break:break-all;font-size:11px">-</div>
       </div>
     </div>
-    <div class="field">
-      <label>Transaction Hash <span style="color:#444;font-size:10px;text-transform:none">(paste after sending)</span></label>
-      <input id="p-tx-input" type="text" placeholder="0x…" autocomplete="off" spellcheck="false" />
-      <div class="error" id="p-error"></div>
+
+    <!-- Confirmation modes (§5.1). To add §5.1b's WalletConnect tab, insert
+         `<button type="button" data-tab="wc">WalletConnect</button>` ahead of
+         the Auto-detect one, a matching `[data-tab-body="wc"]` panel, and
+         'wc' at the front of TAB_ORDER. Nothing else changes. -->
+    <div class="modes" data-tabs>
+      <div class="tabs" role="tablist" aria-label="How to confirm the purchase">
+        <button type="button" role="tab" data-tab="auto"   aria-selected="true">Auto-detect</button>
+        <button type="button" role="tab" data-tab="manual" aria-selected="false">Manual</button>
+      </div>
+
+      <div class="watch" data-tab-body="auto">
+        <div class="spinner"></div>
+        <p class="watch-head">Waiting for your wallet to broadcast the tx…</p>
+        <p class="watch-sub" id="p-watch-sub">Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.</p>
+        <div class="watch-bar"><i></i></div>
+        <button type="button" class="linkish" data-switch-tab="manual">Switch to manual</button>
+      </div>
+
+      <div data-tab-body="manual" class="hidden">
+        <p class="tab-hint hidden" id="p-hint"></p>
+        <div class="field">
+          <label>Transaction Hash <span style="color:#444;font-size:10px;text-transform:none">(paste after sending)</span></label>
+          <input id="p-tx-input" type="text" placeholder="0x…" autocomplete="off" spellcheck="false" />
+          <div class="error" id="p-error"></div>
+        </div>
+        <button class="btn-primary" id="btn-p-submit">Confirm Purchase</button>
+      </div>
     </div>
-    <button class="btn-primary" id="btn-p-submit">Confirm Purchase</button>
-    <button class="btn-ghost"   id="btn-p-cancel">Cancel</button>
+
+    <button class="btn-ghost" id="btn-p-cancel">Cancel</button>
   </div>
 
   <!-- ── Screen: purchase blocked (contract code did not verify) ── -->
@@ -334,13 +468,35 @@
         <div class="tv" id="cd-calldata" style="word-break:break-all;font-size:11px">-</div>
       </div>
     </div>
-    <div class="field">
-      <label>Transaction Hash <span style="color:#444;font-size:10px;text-transform:none">(paste after sending)</span></label>
-      <input id="cd-tx-input" type="text" placeholder="0x…" autocomplete="off" spellcheck="false" />
-      <div class="error" id="cd-error"></div>
+
+    <!-- Confirmation modes (§5.1) - same strip, same rules as the purchase
+         screen above. -->
+    <div class="modes" data-tabs>
+      <div class="tabs" role="tablist" aria-label="How to confirm the activation">
+        <button type="button" role="tab" data-tab="auto"   aria-selected="true">Auto-detect</button>
+        <button type="button" role="tab" data-tab="manual" aria-selected="false">Manual</button>
+      </div>
+
+      <div class="watch" data-tab-body="auto">
+        <div class="spinner"></div>
+        <p class="watch-head">Waiting for your wallet to broadcast the tx…</p>
+        <p class="watch-sub" id="cd-watch-sub">Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.</p>
+        <div class="watch-bar"><i></i></div>
+        <button type="button" class="linkish" data-switch-tab="manual">Switch to manual</button>
+      </div>
+
+      <div data-tab-body="manual" class="hidden">
+        <p class="tab-hint hidden" id="cd-hint"></p>
+        <div class="field">
+          <label>Transaction Hash <span style="color:#444;font-size:10px;text-transform:none">(paste after sending)</span></label>
+          <input id="cd-tx-input" type="text" placeholder="0x…" autocomplete="off" spellcheck="false" />
+          <div class="error" id="cd-error"></div>
+        </div>
+        <button class="btn-primary" id="btn-cd-submit">Confirm Transaction</button>
+      </div>
     </div>
-    <button class="btn-primary" id="btn-cd-submit">Confirm Transaction</button>
-    <button class="btn-ghost"   id="btn-cd-cancel">Cancel</button>
+
+    <button class="btn-ghost" id="btn-cd-cancel">Cancel</button>
   </div>
 
   <!-- ── Screen: sign-session (tier 3) ───────────────────────────── -->
@@ -396,7 +552,15 @@
 
   const SCREENS = ['connect', 'token-select', 'purchase', 'blocked', 'activate', 'cooldown', 'sign-session', 'processing'];
 
+  let currentScreen = null;
+
   function show(name) {
+    // A screen change is one of the two ways an auto-detect watch ends (the
+    // other is the user picking a different tab). Leaving is handled here
+    // rather than at each call site so that no future screen transition can
+    // forget it and strand a thread polling an endpoint for two minutes.
+    if (currentScreen && currentScreen !== name) leaveScreen(currentScreen);
+    currentScreen = name;
     SCREENS.forEach(s => {
       document.getElementById('screen-' + s).classList.toggle('hidden', s !== name);
     });
@@ -435,6 +599,150 @@
     const fracStr = frac.toString().padStart(18, '0').replace(/0+$/, '').slice(0, 4);
     return whole.toString() + '.' + fracStr;
   }
+
+  // ── Confirmation modes (§5.1) ─────────────────────────────────────────────
+  //
+  // The purchase and cooldown screens both end in the same question: how does
+  // the transaction hash get back to the wrapper?
+  //
+  //   auto    §5.1a - the wrapper watches the chain for it. No JS bundle, no
+  //                   external service, chain RPC only. Offered when the
+  //                   screen payload carries `autoWatchSecs`, which only a
+  //                   build that can read the chain sends.
+  //   manual  §1.7, §1.8 - the user pastes it. Always offered, never hidden,
+  //                   and the floor every other mode falls back to.
+  //
+  // §5.1b's WalletConnect tab joins by adding a button, a panel and one entry
+  // in TAB_ORDER; the machinery below is driven entirely by those attributes.
+  // Its availability test would be the presence of `wcProjectId` in the same
+  // payload, exactly as `autoWatchSecs` works here.
+
+  const TAB_SCREENS = ['purchase', 'cooldown'];
+
+  // Best mode first. The default tab is the first one available.
+  const TAB_ORDER = ['auto', 'manual'];
+
+  // Per screen: the auto-detect budget the wrapper reported (null when this
+  // build cannot watch), and the tab currently on screen.
+  const autoWatchSecs = { purchase: null, cooldown: null };
+  const activeTab     = { purchase: null, cooldown: null };
+
+  function screenEl(screen) {
+    return document.getElementById('screen-' + screen);
+  }
+
+  function tabAvailable(screen, name) {
+    return name === 'auto' ? autoWatchSecs[screen] !== null : true;
+  }
+
+  // Called by each onShow… handler once its screen is populated: decides which
+  // tabs this build offers and lands on the best of them.
+  function resetTabs(screen, secs) {
+    autoWatchSecs[screen] = (typeof secs === 'number' && secs > 0) ? secs : null;
+
+    const el = screenEl(screen);
+    const offered = TAB_ORDER.filter(name => tabAvailable(screen, name));
+    TAB_ORDER.forEach(name => {
+      const btn = el.querySelector('[data-tab="' + name + '"]');
+      if (btn) btn.classList.toggle('hidden', offered.indexOf(name) === -1);
+    });
+    // A strip with one option is not a choice, it is decoration. The panel it
+    // would have selected is shown either way, so only the chrome goes.
+    el.querySelector('.tabs').classList.toggle('hidden', offered.length < 2);
+    setTabHint(screen, '');
+
+    // Cleared first so a re-shown screen restarts its watch rather than
+    // deciding it is already on the right tab and doing nothing.
+    activeTab[screen] = null;
+    selectTab(screen, offered[0] || 'manual');
+  }
+
+  function selectTab(screen, name) {
+    if (activeTab[screen] === name) return;
+    const previous = activeTab[screen];
+    activeTab[screen] = name;
+
+    const el = screenEl(screen);
+    el.querySelectorAll('[data-tab]').forEach(btn =>
+      btn.setAttribute('aria-selected', String(btn.dataset.tab === name)));
+    el.querySelectorAll('[data-tab-body]').forEach(body =>
+      body.classList.toggle('hidden', body.dataset.tabBody !== name));
+
+    if (previous === 'auto') post({ type: 'auto_watch_cancel' });
+    if (name === 'auto') startAutoWatch(screen);
+  }
+
+  function leaveScreen(screen) {
+    if (activeTab[screen] === 'auto') {
+      post({ type: 'auto_watch_cancel' });
+      activeTab[screen] = null;
+    }
+  }
+
+  function startAutoWatch(screen) {
+    const ctx = screen === 'purchase' ? pendingPurchaseCtx : pendingSessionCtx;
+    if (!ctx) return;
+
+    restartDrain(screen);
+    post(screen === 'purchase'
+      ? { type: 'auto_watch_start', kind: 'mint',     owner_address: ctx.ownerAddress, token_id: null }
+      : { type: 'auto_watch_start', kind: 'activate', owner_address: ctx.ownerAddress, token_id: ctx.tokenId });
+  }
+
+  // Runs the progress bar down over the wrapper's own budget, so the bar
+  // emptying and the watch giving up are one moment rather than two.
+  function restartDrain(screen) {
+    const bar  = screenEl(screen).querySelector('.watch-bar > i');
+    const secs = autoWatchSecs[screen];
+    if (!bar || !secs) return;
+    bar.style.animation = 'none';
+    void bar.offsetWidth;                       // reflow, so the restart takes
+    bar.style.animation = 'drain ' + secs + 's linear forwards';
+  }
+
+  function setTabHint(screen, text) {
+    const el = document.getElementById(screen === 'purchase' ? 'p-hint' : 'cd-hint');
+    el.textContent = text || '';
+    el.classList.toggle('hidden', !text);
+  }
+
+  TAB_SCREENS.forEach(screen => {
+    const el = screenEl(screen);
+
+    // Pair each tab with its panel here rather than by hand in the markup:
+    // the relationship is what `data-tab` / `data-tab-body` already say, and
+    // four hand-written id pairs are four chances to mismatch one.
+    el.querySelectorAll('[data-tab]').forEach(btn => {
+      const panel = el.querySelector('[data-tab-body="' + btn.dataset.tab + '"]');
+      if (!panel) return;
+      btn.id = screen + '-tab-' + btn.dataset.tab;
+      panel.id = screen + '-panel-' + btn.dataset.tab;
+      btn.setAttribute('aria-controls', panel.id);
+      panel.setAttribute('role', 'tabpanel');
+      panel.setAttribute('aria-labelledby', btn.id);
+    });
+
+    el.addEventListener('click', e => {
+      const tab = e.target.closest('[data-tab]');
+      if (tab) { selectTab(screen, tab.dataset.tab); return; }
+      const link = e.target.closest('[data-switch-tab]');
+      if (link) selectTab(screen, link.dataset.switchTab);
+    });
+
+    // A tablist is steered with the arrow keys. Having claimed the role, the
+    // strip has to answer to it.
+    el.querySelector('.tabs').addEventListener('keydown', e => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const offered = TAB_ORDER.filter(name => tabAvailable(screen, name));
+      const at = offered.indexOf(activeTab[screen]);
+      if (at === -1) return;
+      e.preventDefault();
+      const step = e.key === 'ArrowRight' ? 1 : -1;
+      const next = offered[(at + step + offered.length) % offered.length];
+      selectTab(screen, next);
+      el.querySelector('[data-tab="' + next + '"]').focus();
+    });
+  });
 
   // ── Rust → JS API ─────────────────────────────────────────────────────────
 
@@ -518,6 +826,9 @@
       document.getElementById('p-tx-input').value = '';
       clearError('p-error');
 
+      // Before show(): resetTabs starts the auto-detect watch, and the screen
+      // it belongs to has to be the one the next leaveScreen() sees.
+      resetTabs('purchase', data.autoWatchSecs);
       show('purchase');
     },
 
@@ -576,7 +887,8 @@
 
       const waitBox       = document.getElementById('cd-wait');
       const blocksDisplay = document.getElementById('cd-blocks-remaining');
-      if (!data.ready && data.blocksRemaining > 0) {
+      const cooling       = !data.ready && data.blocksRemaining > 0;
+      if (cooling) {
         waitBox.classList.remove('hidden');
         blocksDisplay.textContent =
           data.blocksRemaining + ' block' + (data.blocksRemaining === 1 ? '' : 's')
@@ -585,6 +897,15 @@
         waitBox.classList.add('hidden');
       }
 
+      // Inside the cooldown the contract will refuse the tx, so "send it and
+      // we'll spot it" would be telling someone to do something that cannot
+      // work yet. The watch still runs - it costs nothing and the window is
+      // usually shorter than the budget - but the copy says what to wait for.
+      document.getElementById('cd-watch-sub').textContent = cooling
+        ? 'The contract will accept the transaction once the cooldown above ends. Send it then; we are watching the chain and will pick it up on our own.'
+        : 'Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.';
+
+      resetTabs('cooldown', data.autoWatchSecs);
       show('cooldown');
     },
 
@@ -630,6 +951,19 @@
       clearError('ss-error');
 
       show('sign-session');
+    },
+
+    // Auto-detect gave up (§5.1a): the budget ran out, or the endpoint stopped
+    // answering. Not an error screen - the transaction may well be on its way -
+    // so the screen stays where it is and only the tab changes, with the manual
+    // box already explaining itself and focused for the paste.
+    // data: { kind: 'mint' | 'activate', reason: 'timeout' | 'rpc', detail }
+    onAutoWatchEnded(data) {
+      const screen = data.kind === 'mint' ? 'purchase' : 'cooldown';
+      setTabHint(screen, data.detail);
+      selectTab(screen, 'manual');
+      const input = document.getElementById(screen === 'purchase' ? 'p-tx-input' : 'cd-tx-input');
+      if (input) input.focus();
     },
 
     // Generic processing indicator (spawned threads use this while polling).

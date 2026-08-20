@@ -854,3 +854,151 @@ fn an_expired_session_is_refused_and_a_fresh_activation_replaces_it_e2e() {
         "the replacement session must be the one served",
     );
 }
+
+// ── Auto-detect against a live chain (§5.1a) ──────────────────────────────────
+//
+// `auto_detect.rs` proves the wiring against a stub: that a found hash drives
+// the same flow a pasted one does, and that a watch stops when its screen does.
+// What a stub cannot prove is that the two watchers ask a real node the right
+// question - a filter that pins the wrong topic, or an `Activated` signature
+// that has drifted from the deployed contract, answers a stub exactly as well
+// as it answers nothing. That is what these two are for.
+//
+// Still nothing here goes near `show_purchase` or its attestation gate: the
+// mint arm posts `auto_watch_start` the way the page does once that screen is
+// already up, which is where §1.7 hands over.
+
+/// How long to give the watch thread to read the head block before the wallet
+/// broadcasts.
+///
+/// The watch starts from whatever `eth_blockNumber` says when its thread runs,
+/// and only counts what lands after that. A local read takes microseconds, so
+/// this is a wide margin around a race that would otherwise be silent: the
+/// watch would sit out its whole budget looking past a transaction already
+/// mined, and the test would fail as a timeout with no hint why.
+const WATCH_STARTUP_GRACE: Duration = Duration::from_millis(1000);
+
+/// Auto-detect finds the `activate()` the wallet broadcast, and the flow
+/// continues exactly as a pasted hash would have continued.
+///
+/// The chain read under test is `watch_for_activate`: `lastActivationBlock`
+/// moving past the head the screen opened at, then the block scanned for the
+/// transaction that moved it. The assertion that it found the *right* one is
+/// the hash comparison - a scan that picked any transaction in the block would
+/// pass a weaker check and produce a session bound to the wrong activation.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn auto_detect_finds_the_activation_and_the_session_completes_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let holder = Holder::set_up();
+    let window = holder.window(SESSION_TTL_SECS);
+
+    let cooldown = holder.connect(&window);
+    assert_eq!(cooldown["ready"], true);
+    assert_eq!(
+        cooldown["autoWatchSecs"],
+        crate::rpc::WATCH_BUDGET.as_secs(),
+        "a tier-3 build must offer the Auto-detect tab, and say for how long",
+    );
+
+    // The page's Auto-detect tab, which is the default, starts the watch as
+    // soon as the screen renders - before the wallet has done anything.
+    window.post(serde_json::json!({
+        "type":          "auto_watch_start",
+        "kind":          "activate",
+        "owner_address": holder.wallet.checksummed(),
+        "token_id":      holder.token_id,
+    }));
+    std::thread::sleep(WATCH_STARTUP_GRACE);
+
+    let calldata = cooldown["calldata"].as_str().expect("calldata is a string");
+    let tx_hash = wallet_sends(&holder.wallet, &holder.contract, calldata)
+        .expect("the chain should accept the screen's calldata");
+
+    // No paste. The same two calls the manual path produces, in the same order.
+    window.wait_for("onProcessing");
+    let confirmed = window.wait_for("onTxConfirmed");
+    assert_eq!(
+        confirmed["txHash"], tx_hash,
+        "the watch must resolve to the wallet's own activation, not merely to \
+         something in the same block",
+    );
+    assert_eq!(confirmed["tokenId"], holder.token_id);
+    assert_eq!(confirmed["sessionId"], 1);
+    assert_eq!(
+        confirmed["ownerAddress"], holder.wallet.address,
+        "the preimage still commits to the normalised address",
+    );
+
+    // And the finalize path is untouched: the same signature over the same
+    // preimage produces the same result.
+    holder.sign(&window, &confirmed);
+    let session = match window.result() {
+        ActivationResult::SessionSuccess { session } => session,
+        other => panic!("expected SessionSuccess, got {}", describe(&other)),
+    };
+    assert_eq!(session.activation_tx.as_deref(), Some(tx_hash.as_str()));
+    assert_eq!(session.token_id, holder.token_id);
+    crate::session::verify_local(&session).expect("the issued session must verify");
+}
+
+/// Auto-detect finds the mint a `purchase()` produced, and the purchase poller
+/// carries it into the activation flow.
+///
+/// The chain read under test is `watch_for_mint`: the `Transfer(0x0, wallet, *)`
+/// filter against a real node's `eth_getLogs`. A wallet with no licence buys one
+/// the way §1.7's screen asks it to, and the token id the flow arrives at has to
+/// be the one the chain actually minted.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn auto_detect_finds_the_mint_and_the_flow_continues_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let contract = deploy_access();
+    let buyer = Wallet::new();
+    fund(&buyer.address, "1ether");
+
+    let session_dir = tempfile::tempdir().expect("tempdir");
+    std::env::set_var("RUB3_SESSION_DIR", session_dir.path());
+
+    let window = Window::open(APP_ID, &contract, CHAIN_ID, &rpc_url(), SESSION_TTL_SECS);
+    window.post(serde_json::json!({
+        "type":          "auto_watch_start",
+        "kind":          "mint",
+        "owner_address": buyer.checksummed(),
+        "token_id":      serde_json::Value::Null,
+    }));
+    std::thread::sleep(WATCH_STARTUP_GRACE);
+
+    let recipient: Address = buyer.address.parse().expect("buyer address should parse");
+    let calldata = crate::rpc::encode_purchase_calldata(recipient);
+    let tx_hash = wallet_sends(&buyer, &contract, &calldata)
+        .expect("the chain should accept a purchase from a funded wallet");
+
+    window.wait_for("onProcessing");
+    let cooldown = window.wait_for("onShowCooldown");
+
+    let minted = crate::rpc::mint_token_id(
+        &rpc_url(),
+        &tx_hash,
+        contract.parse().expect("contract address should parse"),
+        recipient,
+    )
+    .expect("the purchase should have minted a token");
+    assert_eq!(
+        cooldown["tokenId"], minted,
+        "the flow must arrive at the token the chain actually minted",
+    );
+    assert_eq!(cooldown["ownerAddress"], buyer.checksummed());
+
+    std::env::remove_var("RUB3_SESSION_DIR");
+}

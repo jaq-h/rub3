@@ -82,6 +82,22 @@ enum IpcMessage {
         tx_hash: String,
         owner_address: String,
     },
+    /// Auto-detect (§5.1a): start watching the chain for the transaction the
+    /// screen just asked the user to send, so its hash arrives without a
+    /// paste. Answers into the same handler `activate_tx_sent` and
+    /// `purchase_tx_sent` answer into.
+    #[cfg(feature = "onchain-write")]
+    AutoWatchStart {
+        kind: AutoWatchKind,
+        owner_address: String,
+        /// The token being activated. Absent for a mint, which has no token id
+        /// until the purchase lands.
+        token_id: Option<u64>,
+    },
+    /// Auto-detect: stop the running watch. Sent when the user switches to
+    /// another confirmation tab or leaves the screen.
+    #[cfg(feature = "onchain-write")]
+    AutoWatchCancel,
     /// Tier-3 path: user signed the session message. All fields from the
     /// tx-confirmation step are echoed back so the wrapper can assemble the
     /// Session without holding in-process state between IPC calls.
@@ -104,6 +120,66 @@ enum IpcMessage {
     Error {
         message: String,
     },
+}
+
+/// Which transaction an auto-detect watch is waiting for.
+///
+/// The two screens that can ask for one, named by what they are waiting to
+/// see rather than by the screen they belong to: §5.1b's WalletConnect tab
+/// will send the same two kinds from the same two screens.
+#[cfg(feature = "onchain-write")]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AutoWatchKind {
+    /// The purchase screen: the ERC-721 mint a `purchase()` produces.
+    Mint,
+    /// The cooldown screen: the `activate(tokenId)` that opens a session.
+    Activate,
+}
+
+#[cfg(feature = "onchain-write")]
+impl AutoWatchKind {
+    /// The spelling the page uses, and the one §5.1a names.
+    fn as_str(self) -> &'static str {
+        match self {
+            AutoWatchKind::Mint => "mint",
+            AutoWatchKind::Activate => "activate",
+        }
+    }
+}
+
+/// The one auto-detect watch a window may have running, and the handle that
+/// stops it.
+///
+/// Shared rather than owned because every party that can end a watch holds a
+/// different clone of [`IpcState`]: the thread running the watch, the IPC
+/// handler that will cancel it when the page moves, and the event loop that
+/// closes the window. A watch that only its own thread could end would go on
+/// polling an endpoint for the rest of its budget after the screen that wanted
+/// the answer is gone.
+#[cfg(feature = "onchain-write")]
+#[derive(Clone, Default)]
+struct AutoWatch(std::sync::Arc<std::sync::Mutex<Option<crate::rpc::Cancel>>>);
+
+#[cfg(feature = "onchain-write")]
+impl AutoWatch {
+    /// Stops whatever is running and hands back the handle for its replacement.
+    fn restart(&self) -> crate::rpc::Cancel {
+        let next = crate::rpc::Cancel::new();
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = slot.replace(next.clone()) {
+            previous.cancel();
+        }
+        next
+    }
+
+    /// Stops whatever is running. Idempotent, and a no-op when nothing is.
+    fn stop(&self) {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(running) = slot.take() {
+            running.cancel();
+        }
+    }
 }
 
 // ── Internal channel ──────────────────────────────────────────────────────────
@@ -135,6 +211,12 @@ pub fn run_activation_window(ctx: ActivationContext) -> ActivationResult {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
     let (result_tx, result_rx) = mpsc::channel::<ActivationResult>();
 
+    // Held here as well as inside the IPC state so the watch ends when the
+    // window does: `run_return` gives control back with the view already gone,
+    // and a watch still polling at that point is polling for nobody.
+    #[cfg(feature = "onchain-write")]
+    let auto_watch = AutoWatch::default();
+
     let ipc_state = IpcState {
         app_id: ctx.app_id.clone(),
         contract: ctx.contract.clone(),
@@ -144,6 +226,8 @@ pub fn run_activation_window(ctx: ActivationContext) -> ActivationResult {
         session_ttl_secs: ctx.session_ttl_secs,
         cmd_tx: cmd_tx.clone(),
         result_tx: result_tx.clone(),
+        #[cfg(feature = "onchain-write")]
+        auto_watch: auto_watch.clone(),
     };
 
     let webview = WebViewBuilder::new(&window)
@@ -184,6 +268,9 @@ pub fn run_activation_window(ctx: ActivationContext) -> ActivationResult {
         }
     });
 
+    #[cfg(feature = "onchain-write")]
+    auto_watch.stop();
+
     result_rx.recv().unwrap_or(ActivationResult::Cancelled)
 }
 
@@ -206,6 +293,9 @@ struct IpcState {
     session_ttl_secs: i64,
     cmd_tx: mpsc::Sender<Cmd>,
     result_tx: mpsc::Sender<ActivationResult>,
+    /// The auto-detect watch this window has running, if any (§5.1a).
+    #[cfg(feature = "onchain-write")]
+    auto_watch: AutoWatch,
 }
 
 impl IpcState {
@@ -217,6 +307,15 @@ impl IpcState {
                 return;
             }
         };
+
+        // Every inbound message means the page moved on: a tab changed, a
+        // screen changed, or the flow ended. An auto-detect watch belongs to
+        // the screen that started it, so it stops here and `AutoWatchStart`
+        // below is the only thing that ever starts another. Doing it once, in
+        // front of the match, makes "a watch never outlives its screen" a
+        // property of this seam rather than a rule every arm has to remember.
+        #[cfg(feature = "onchain-write")]
+        self.auto_watch.stop();
 
         match msg {
             IpcMessage::Ready => {
@@ -328,6 +427,21 @@ impl IpcState {
                 self.spawn_purchase_poller(tx_hash, owner_address);
             }
 
+            #[cfg(feature = "onchain-write")]
+            IpcMessage::AutoWatchStart {
+                kind,
+                owner_address,
+                token_id,
+            } => {
+                self.spawn_auto_watch(kind, owner_address, token_id);
+            }
+
+            // The stop above did the work; this arm exists so that saying so
+            // is a message the page can send rather than a side effect it has
+            // to trigger by accident.
+            #[cfg(feature = "onchain-write")]
+            IpcMessage::AutoWatchCancel => {}
+
             #[cfg(feature = "cooldown")]
             IpcMessage::SessionSigned {
                 signature,
@@ -420,7 +534,8 @@ impl IpcState {
 
         let calldata = crate::rpc::encode_activate_calldata(token_id);
 
-        let payload = serde_json::json!({
+        #[cfg_attr(not(feature = "onchain-write"), allow(unused_mut))]
+        let mut payload = serde_json::json!({
             "tokenId":         token_id,
             "ownerAddress":    address,
             "contractAddress": self.contract,
@@ -429,6 +544,14 @@ impl IpcState {
             "blocksRemaining": blocks_remaining,
             "calldata":        calldata,
         });
+        // Present only where a watch can actually run, because its presence is
+        // what puts the Auto-detect tab on the screen (§5.1). Same mechanism
+        // §5.1b's `wc_project_id` will use, so the page keeps one rule for
+        // which tabs exist rather than one per mode.
+        #[cfg(feature = "onchain-write")]
+        {
+            payload["autoWatchSecs"] = crate::rpc::WATCH_BUDGET.as_secs().into();
+        }
         self.eval(format!("window.rub3.onShowCooldown({})", payload));
     }
 
@@ -535,8 +658,128 @@ impl IpcState {
             "nextTokenId":     next_id,
             "calldata":        calldata,
             "advisory":        advisory,
+            "autoWatchSecs":   crate::rpc::WATCH_BUDGET.as_secs(),
         });
         self.eval(format!("window.rub3.onShowPurchase({})", payload));
+    }
+
+    /// Start an auto-detect watch for the transaction the current screen just
+    /// asked the user to send (§5.1a).
+    ///
+    /// The thread it spawns does one thing the manual path does not: it finds
+    /// the transaction hash. Everything after the hash is the manual path,
+    /// reached by calling the very same method the pasted hash reaches, which
+    /// is what keeps this a front door and not a second branch of the session
+    /// pipeline. If a parallel finalize path ever appears below this line,
+    /// something has gone wrong.
+    #[cfg(feature = "onchain-write")]
+    fn spawn_auto_watch(&self, kind: AutoWatchKind, owner_address: String, token_id: Option<u64>) {
+        let cancel = self.auto_watch.restart();
+        let state = self.clone();
+
+        std::thread::spawn(move || {
+            let contract_addr: alloy::primitives::Address = match state.contract.parse() {
+                Ok(a) => a,
+                Err(_) => {
+                    state.eval_err("contract address is malformed");
+                    return;
+                }
+            };
+            let owner_addr: alloy::primitives::Address = match owner_address.parse() {
+                Ok(a) => a,
+                Err(_) => {
+                    state.eval_err("owner address is malformed");
+                    return;
+                }
+            };
+
+            // The block the screen was opened at. Read here rather than sent by
+            // the page, which cannot see the chain: a watch starting from a
+            // number the page guessed would either miss the transaction or
+            // match one sent before the screen existed.
+            let from_block = match crate::rpc::get_block_number(&state.rpc_url) {
+                Ok(b) => b,
+                Err(e) => {
+                    state.auto_watch_ended(kind, &e);
+                    return;
+                }
+            };
+
+            let deadline =
+                crate::rpc::Deadline::after(crate::rpc::WATCH_BUDGET).cancelled_by(cancel);
+
+            match kind {
+                AutoWatchKind::Mint => {
+                    match crate::rpc::watch_for_mint(
+                        &state.rpc_url,
+                        contract_addr,
+                        owner_addr,
+                        from_block,
+                        deadline,
+                    ) {
+                        Ok(tx_hash) => state.spawn_purchase_poller(tx_hash, owner_address),
+                        Err(e) => state.auto_watch_ended(kind, &e),
+                    }
+                }
+
+                #[cfg(feature = "cooldown")]
+                AutoWatchKind::Activate => {
+                    let Some(id) = token_id else {
+                        state.eval_err("auto-detect asked to watch an activation with no token");
+                        return;
+                    };
+                    match crate::rpc::watch_for_activate(
+                        &state.rpc_url,
+                        contract_addr,
+                        id,
+                        from_block,
+                        deadline,
+                    ) {
+                        Ok(tx_hash) => state.spawn_tx_poller(tx_hash, id, owner_address),
+                        Err(e) => state.auto_watch_ended(kind, &e),
+                    }
+                }
+
+                // No activation step is compiled in, so there is nothing to
+                // watch for. Unreachable from the shipped bundles - every one
+                // that has `onchain-write` has `cooldown` too - and kept
+                // because the two flags are independently selectable.
+                #[cfg(not(feature = "cooldown"))]
+                AutoWatchKind::Activate => {
+                    let _ = token_id;
+                    state.eval_err("this build has no activation step to watch for");
+                }
+            }
+        });
+    }
+
+    /// Tell the page that auto-detect gave up, so it can fall back to the
+    /// manual paste with something useful already said.
+    ///
+    /// A cancelled watch is silent: cancellation means the page asked for this
+    /// to stop, so it is already showing something else and a message now would
+    /// land on the wrong screen.
+    #[cfg(feature = "onchain-write")]
+    fn auto_watch_ended(&self, kind: AutoWatchKind, e: &crate::rpc::RpcError) {
+        use crate::rpc::{RpcError, WatchEnd};
+
+        if matches!(e, RpcError::WatchEnded(WatchEnd::Cancelled)) {
+            return;
+        }
+        eprintln!(
+            "rub3: auto-detect stopped watching for a {}: {e}",
+            kind.as_str()
+        );
+
+        let timed_out = matches!(e, RpcError::WatchEnded(WatchEnd::Timeout));
+        self.eval(format!(
+            "window.rub3.onAutoWatchEnded({})",
+            serde_json::json!({
+                "kind":   kind.as_str(),
+                "reason": if timed_out { "timeout" } else { "rpc" },
+                "detail": auto_watch_detail(kind, timed_out),
+            })
+        ));
     }
 
     /// Spawn a background thread that polls for the purchase() tx receipt.
@@ -750,6 +993,54 @@ impl IpcState {
     }
 }
 
+// ── When auto-detect gives up, in a person's words ───────────────────────────
+
+/// The sentence the manual tab carries when an auto-detect watch ends without
+/// a transaction.
+///
+/// Not an error message, because in the likeliest case nothing failed: the
+/// person has sent the transaction, the chain is slow, and the wrapper stopped
+/// looking first. So it says what was watched for and what to do with the box
+/// that is now in front of them, and never suggests the transaction is lost or
+/// that it should be sent twice. Sending twice would buy a second licence.
+#[cfg(feature = "onchain-write")]
+fn auto_watch_detail(kind: AutoWatchKind, timed_out: bool) -> String {
+    let subject = match kind {
+        AutoWatchKind::Mint => "purchase",
+        AutoWatchKind::Activate => "activation",
+    };
+    if timed_out {
+        format!(
+            "We watched the chain for {} and did not see your {subject} transaction. \
+             If you have already sent it, paste its hash below. If you have not, send it \
+             now and paste the hash here - do not send it twice.",
+            spoken_duration(crate::rpc::WATCH_BUDGET)
+        )
+    } else {
+        format!(
+            "We could not reach the network to watch for your {subject} transaction. \
+             Send it from your wallet and paste its hash below."
+        )
+    }
+}
+
+/// A duration as someone would say it out loud: "two minutes", not "120s".
+///
+/// Whole minutes only, because that is the only shape the budget takes and a
+/// half-spelled "2 minutes 30" would read worse than the seconds it replaced.
+#[cfg(feature = "onchain-write")]
+fn spoken_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs == 0 || !secs.is_multiple_of(60) {
+        return format!("{secs} seconds");
+    }
+    match secs / 60 {
+        1 => "a minute".to_string(),
+        2 => "two minutes".to_string(),
+        n => format!("{n} minutes"),
+    }
+}
+
 // ── The deprecation advisory, in a person's words ────────────────────────────
 
 /// What the window says beside a purchase the code registry no longer
@@ -892,6 +1183,14 @@ fn refusal_notice(contract: &str, error: &crate::attest::GateError) -> RefusalNo
                     "The contract is named by an ENS name, which this app cannot resolve, so \
                      its code was never requested."
                         .to_string()
+                }
+                // Attestation fetches the code with a single `eth_getCode` and
+                // never watches, so this cannot arrive here. Spelled out all
+                // the same rather than folded into a wildcard: this match is
+                // what forces a sentence for every way the fetch can fail, and
+                // a wildcard would absorb the next variant without one.
+                RpcError::WatchEnded(_) => {
+                    "The request for the contract's code did not complete.".to_string()
                 }
             },
             retryable: e.is_retryable(),
@@ -1064,6 +1363,7 @@ mod tests {
                 session_ttl_secs: 3600,
                 cmd_tx,
                 result_tx,
+                auto_watch: AutoWatch::default(),
             },
             cmd_rx,
         )
@@ -1103,6 +1403,84 @@ mod tests {
 
     fn contract() -> alloy::primitives::Address {
         CONTRACT.parse().expect("test contract address")
+    }
+
+    // ── The auto-detect protocol (§5.1a) ─────────────────────────────────────
+
+    /// The page and the handler agree on the auto-detect messages.
+    ///
+    /// This is the one seam `session_flow`'s tests deliberately stop short of:
+    /// they drive `IpcState` directly, so a message the page spells differently
+    /// from the enum passes every one of them and fails only in front of a
+    /// person. Both halves are asserted, because a rename on either side is
+    /// silent - serde answers an unknown tag by logging "malformed IPC message"
+    /// and returning, and a `window.rub3` method the page never defined throws
+    /// inside the view where no test is looking.
+    ///
+    /// Whitespace is stripped before matching, so reformatting the page cannot
+    /// turn this red on its own.
+    #[test]
+    fn the_page_and_the_handler_agree_on_the_auto_detect_protocol() {
+        let page: String = ACTIVATION_HTML
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+
+        // Inbound: what the page posts, the handler must accept - including
+        // the `token_id: null` a mint carries, which has no token yet.
+        for message in [
+            serde_json::json!({
+                "type": "auto_watch_start",
+                "kind": "mint",
+                "owner_address": BUYER,
+                "token_id": serde_json::Value::Null,
+            }),
+            serde_json::json!({
+                "type": "auto_watch_start",
+                "kind": "activate",
+                "owner_address": BUYER,
+                "token_id": 7,
+            }),
+            serde_json::json!({ "type": "auto_watch_cancel" }),
+        ] {
+            serde_json::from_str::<IpcMessage>(&message.to_string())
+                .unwrap_or_else(|e| panic!("the handler must accept {message} ({e})"));
+        }
+
+        // And the page must be the thing that posts them, spelled that way.
+        for literal in [
+            "type:'auto_watch_start'",
+            "type:'auto_watch_cancel'",
+            "kind:'mint'",
+            "kind:'activate'",
+            "owner_address:",
+            "token_id:",
+        ] {
+            assert!(
+                page.contains(literal),
+                "the page no longer posts {literal:?}; the handler still expects it",
+            );
+        }
+
+        // Outbound: the one call the handler makes, and the payload keys it
+        // fills in, must be what the page reads.
+        assert!(
+            page.contains("onAutoWatchEnded(data){"),
+            "the handler calls window.rub3.onAutoWatchEnded, which the page must define",
+        );
+        for key in ["data.kind", "data.detail"] {
+            assert!(
+                page.contains(key),
+                "the fallback payload carries {key}, which the page must read",
+            );
+        }
+
+        // The budget the screens report is what the page animates against, so
+        // the bar running out and the watch giving up are one moment.
+        assert!(
+            page.contains("data.autoWatchSecs"),
+            "the page must read the budget the screen payloads carry",
+        );
     }
 
     // ── The gate ─────────────────────────────────────────────────────────────

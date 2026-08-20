@@ -39,6 +39,12 @@ sol! {
         function cooldownBlocks() external view returns (uint256 blocks);
         function activeSessionId(uint256 tokenId) external view returns (uint256 sessionId);
 
+        /// Emitted by `activate(tokenId)`. Declared here for its topic0 alone:
+        /// `watch_for_activate` uses it to tell which transaction in a block
+        /// was the activation it is waiting for, and taking the hash from the
+        /// ABI is what stops a hand-copied constant drifting from the contract.
+        event Activated(uint256 indexed tokenId, address indexed owner, uint256 sessionId);
+
         function identityModel() external view returns (uint8 model);
         function tbaImplementation() external view returns (address impl);
 
@@ -123,6 +129,33 @@ pub enum RpcError {
     InvalidInput(String),
     /// ENS resolution is not yet implemented (Phase 1.6).
     EnsNotSupported,
+    /// A watch (§5.1a) stopped without seeing what it was waiting for. The
+    /// node never failed: it answered, and the answer was "not yet".
+    WatchEnded(WatchEnd),
+}
+
+/// Why a watch stopped without a match.
+///
+/// Separate from every other [`RpcError`] because nothing went wrong. The
+/// transaction may still land a second later, which is exactly why the screen
+/// that started the watch falls back to the manual paste rather than reporting
+/// a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchEnd {
+    /// The budget ran out.
+    Timeout,
+    /// The screen that started the watch asked it to stop: the user switched
+    /// to another tab, moved on, or closed the window.
+    Cancelled,
+}
+
+impl std::fmt::Display for WatchEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WatchEnd::Timeout => f.write_str("the watch ran out of time"),
+            WatchEnd::Cancelled => f.write_str("the watch was cancelled"),
+        }
+    }
 }
 
 impl RpcError {
@@ -168,8 +201,13 @@ impl RpcError {
     /// argument and an unimplemented feature are all settled answers.
     pub fn is_retryable(&self) -> bool {
         match self {
-            RpcError::Transport(_) => true,
-            RpcError::Contract(_) | RpcError::InvalidInput(_) | RpcError::EnsNotSupported => false,
+            // A watch that ran out of time asked a question the chain had not
+            // answered yet; asking again is the whole remedy.
+            RpcError::Transport(_) | RpcError::WatchEnded(WatchEnd::Timeout) => true,
+            RpcError::Contract(_)
+            | RpcError::InvalidInput(_)
+            | RpcError::EnsNotSupported
+            | RpcError::WatchEnded(WatchEnd::Cancelled) => false,
         }
     }
 
@@ -309,6 +347,7 @@ impl std::fmt::Display for RpcError {
             RpcError::EnsNotSupported => {
                 write!(f, "ENS resolution not yet supported (planned Phase 1.6)")
             }
+            RpcError::WatchEnded(end) => write!(f, "{end}"),
         }
     }
 }
@@ -756,6 +795,356 @@ pub fn next_token_id(rpc_url: &str, contract: Address) -> Result<u64, RpcError> 
 pub fn encode_purchase_calldata(recipient: Address) -> String {
     let call = IRub3License::purchaseCall { recipient };
     format!("0x{}", hex::encode(call.abi_encode()))
+}
+
+// ── Auto-detect watchers (§5.1a) ──────────────────────────────────────────────
+//
+// The manual path asks a person to paste a transaction hash back into the
+// window after sending from their wallet. These two functions do that step for
+// them: they watch the chain for the transaction the screen just asked for and
+// return its hash, which is fed to the very same handler the paste feeds. The
+// only thing that changes is where the hash comes from, which is why nothing
+// downstream of the hash exists twice.
+//
+// Chain RPC only. No JS bundle, no relay, no project id, no external service -
+// tier 3 already has an endpoint, and that endpoint is the whole dependency.
+
+/// How long a watch sleeps between polls.
+///
+/// Matches the receipt poller's cadence ([`RECEIPT_POLL_INTERVAL_SECS`]): a
+/// watch and a receipt wait sit back to back in the same flow, and two
+/// different rhythms in one wait would only make the window feel arrhythmic.
+#[cfg(feature = "onchain-write")]
+pub const WATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The default total budget for a watch.
+///
+/// Longer than the receipt wait's 30s because the clock starts before the user
+/// has done anything: they are still finding the transaction in their wallet,
+/// reading it and approving it while this runs. The budget is a parameter, so a
+/// caller that knows better may say so; this is what the window uses.
+#[cfg(feature = "onchain-write")]
+pub const WATCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How many polls in a row may fail before a watch gives up.
+///
+/// A watch is long, and a single 502 or rate-limit inside it says nothing, so
+/// failures are absorbed and retried. A sustained run of them is different: it
+/// is an endpoint that is not going to answer, and spending the rest of the
+/// budget on it only delays the manual paste that will actually work. Five
+/// polls is fifteen seconds of silence, which no transient blip reaches.
+#[cfg(feature = "onchain-write")]
+const WATCH_MAX_CONSECUTIVE_ERRORS: u32 = 5;
+
+/// A flag a watch checks between polls, so the screen that started it can stop
+/// it.
+///
+/// Cheap to clone and cheap to raise, because both halves are held across a
+/// thread boundary: the watch owns one clone and polls it, the IPC handler
+/// owns the other and raises it. A watch that could only end on its own budget
+/// would go on hammering an endpoint for two minutes after the screen that
+/// wanted the answer is gone, which is a defect and not a cosmetic one.
+#[cfg(feature = "onchain-write")]
+#[derive(Clone, Default)]
+pub struct Cancel(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(feature = "onchain-write")]
+impl Cancel {
+    pub fn new() -> Cancel {
+        Cancel::default()
+    }
+
+    /// Asks every watch holding a clone of this handle to stop. Idempotent.
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// When a watch must stop: a wall-clock budget, and the flag that can end it
+/// sooner.
+///
+/// The two travel together deliberately. They are the same question - "should
+/// this still be running?" - asked of a clock and of a person, and a watch that
+/// consulted only one of them would either outlive its screen or ignore its
+/// budget. Bundling them also means a call site cannot pass a budget and forget
+/// the cancellation.
+#[cfg(feature = "onchain-write")]
+#[derive(Clone)]
+pub struct Deadline {
+    at: std::time::Instant,
+    cancel: Cancel,
+}
+
+#[cfg(feature = "onchain-write")]
+impl Deadline {
+    /// A budget of `budget` from now, which nothing can cut short.
+    pub fn after(budget: std::time::Duration) -> Deadline {
+        Deadline {
+            at: std::time::Instant::now() + budget,
+            cancel: Cancel::new(),
+        }
+    }
+
+    /// The same budget, endable early through `cancel`.
+    pub fn cancelled_by(self, cancel: Cancel) -> Deadline {
+        Deadline { cancel, ..self }
+    }
+
+    /// Why the watch must stop right now, or `None` while it may continue.
+    fn reached(&self) -> Option<WatchEnd> {
+        if self.cancel.is_cancelled() {
+            Some(WatchEnd::Cancelled)
+        } else if std::time::Instant::now() >= self.at {
+            Some(WatchEnd::Timeout)
+        } else {
+            None
+        }
+    }
+
+    /// Sleeps up to `interval`, waking early if the deadline is reached.
+    ///
+    /// Sliced rather than slept in one go: a cancellation that took a full poll
+    /// interval to be noticed would leave a request in flight against an
+    /// endpoint nobody is waiting on, and the whole point of the flag is that
+    /// the watch stops when the screen does.
+    fn sleep(&self, interval: std::time::Duration) -> Option<WatchEnd> {
+        const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
+
+        let until = std::time::Instant::now() + interval;
+        loop {
+            if let Some(end) = self.reached() {
+                return Some(end);
+            }
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            std::thread::sleep(left.min(SLICE));
+        }
+    }
+}
+
+/// Polls `poll` on `interval` until it yields a hash, the deadline is reached,
+/// or the endpoint stops answering.
+///
+/// The loop behind both watchers, with the query passed in so the retry, the
+/// timeout and the cancellation can all be exercised without a node - the same
+/// arrangement [`poll_for_receipt`] uses, and for the same reason.
+///
+/// A retryable failure never ends the watch on its own: the budget is long, and
+/// one bad response inside it is noise. [`WATCH_MAX_CONSECUTIVE_ERRORS`] in a
+/// row is not noise, and is reported as the failure it is rather than as a
+/// timeout, so the screen can say which of the two happened.
+#[cfg(feature = "onchain-write")]
+fn watch<F>(
+    mut poll: F,
+    deadline: &Deadline,
+    interval: std::time::Duration,
+) -> Result<String, RpcError>
+where
+    F: FnMut() -> Result<Option<String>, RpcError>,
+{
+    let mut consecutive_errors = 0u32;
+    loop {
+        if let Some(end) = deadline.reached() {
+            return Err(RpcError::WatchEnded(end));
+        }
+
+        match poll() {
+            Ok(Some(hash)) => return Ok(hash),
+            // The node answered, so whatever failed before it was transient.
+            Ok(None) => consecutive_errors = 0,
+            Err(e) if !e.is_retryable() => return Err(e),
+            Err(e) => {
+                consecutive_errors += 1;
+                if consecutive_errors >= WATCH_MAX_CONSECUTIVE_ERRORS {
+                    return Err(e);
+                }
+            }
+        }
+
+        if let Some(end) = deadline.sleep(interval) {
+            return Err(RpcError::WatchEnded(end));
+        }
+    }
+}
+
+/// Watches for the ERC-721 mint that a `purchase()` sent from the user's wallet
+/// produces, and returns its transaction hash.
+///
+/// Polls `eth_getLogs` for `Transfer(0x0, recipient, *)` emitted by `contract`,
+/// from `from_block` - the block the screen was opened at - to the head. First
+/// match wins: a wallet that owns nothing is buying one licence, and the hash
+/// goes to the same handler a pasted hash goes to.
+///
+/// Ends with [`RpcError::WatchEnded`] when the budget runs out or the screen
+/// cancels; neither means the purchase failed, only that this way of learning
+/// about it did.
+#[cfg(feature = "onchain-write")]
+pub fn watch_for_mint(
+    rpc_url: &str,
+    contract: Address,
+    recipient: Address,
+    from_block: u64,
+    deadline: Deadline,
+) -> Result<String, RpcError> {
+    watch(
+        || poll_for_mint(rpc_url, contract, recipient, from_block),
+        &deadline,
+        WATCH_POLL_INTERVAL,
+    )
+}
+
+/// One `eth_getLogs`. `Ok(None)` means no mint yet.
+#[cfg(feature = "onchain-write")]
+fn poll_for_mint(
+    rpc_url: &str,
+    contract: Address,
+    recipient: Address,
+    from_block: u64,
+) -> Result<Option<String>, RpcError> {
+    use alloy::rpc::types::Filter;
+
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        // `from` and `to` are pinned in the filter, so the node does the
+        // matching. The topic count is still checked below: ERC-20 shares this
+        // topic0 and differs only in arity, and a licence contract that also
+        // moved a token would otherwise hand back a transfer as a mint.
+        let filter = Filter::new()
+            .address(contract)
+            .from_block(from_block)
+            .event_signature(ERC721_TRANSFER_SIG)
+            .topic1(B256::ZERO)
+            .topic2(recipient.into_word());
+
+        let logs = provider
+            .get_logs(&filter)
+            .await
+            .map_err(RpcError::transport)?;
+
+        for log in logs {
+            if log.topics().len() != 4 {
+                continue;
+            }
+            if let Some(hash) = log.transaction_hash {
+                return Ok(Some(format!("0x{}", hex::encode(hash.as_slice()))));
+            }
+        }
+        Ok(None)
+    })
+}
+
+/// Watches for the `activate(tokenId)` the user sent from their wallet, and
+/// returns its transaction hash.
+///
+/// Polls `lastActivationBlock(tokenId)`. While it sits at or below
+/// `from_block`, which is the head when the screen was opened, nothing has
+/// happened; the moment it passes, the activation is in that block and the
+/// block is fetched to find which transaction it was.
+///
+/// **Which transaction, and why not the sender.** §5.1a describes picking the
+/// receipt whose `to` is the contract and whose `from` is the wallet, but the
+/// signature it specifies carries no wallet, and the token id it does carry is
+/// the sharper discriminator anyway: `Activated` indexes it, so the log names
+/// the token this screen is waiting on rather than merely the account that paid
+/// for the gas. That also survives an activation relayed by someone else, which
+/// a `from` comparison would read as a stranger's transaction and miss.
+/// `to == contract` is kept as the cheap prefilter it was, so at most a handful
+/// of receipts in the block are ever fetched.
+#[cfg(feature = "onchain-write")]
+pub fn watch_for_activate(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+    from_block: u64,
+    deadline: Deadline,
+) -> Result<String, RpcError> {
+    watch(
+        || poll_for_activate(rpc_url, contract, token_id, from_block),
+        &deadline,
+        WATCH_POLL_INTERVAL,
+    )
+}
+
+/// One `lastActivationBlock` read, plus the block scan when it has moved.
+/// `Ok(None)` means no activation yet, or one whose transaction could not be
+/// pinned down - a reorg between the two reads, which the next poll resolves.
+#[cfg(feature = "onchain-write")]
+fn poll_for_activate(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+    from_block: u64,
+) -> Result<Option<String>, RpcError> {
+    use alloy::rpc::types::BlockTransactionsKind;
+    use alloy::sol_types::SolEvent;
+
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, &provider);
+
+        // Classified rather than blanket-labelled a contract error, unlike
+        // `last_activation_block` beside it. Inside a watch the distinction is
+        // load-bearing: a rate limit or a 502 has to be absorbed and retried,
+        // and reading one as a revert would end the watch on the first hiccup
+        // and send the user to the manual tab for nothing.
+        let last = instance
+            .lastActivationBlock(U256::from(token_id))
+            .call()
+            .await
+            .map_err(|e| classify_call_error(&e))?
+            .to::<u64>();
+        if last <= from_block {
+            return Ok(None);
+        }
+
+        let block = match provider
+            .get_block_by_number(last.into())
+            .kind(BlockTransactionsKind::Hashes)
+            .await
+            .map_err(RpcError::transport)?
+        {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+
+        let token_topic: B256 = U256::from(token_id).into();
+        let mut found = None;
+
+        for tx_hash in block.transactions.hashes() {
+            let receipt = match provider
+                .get_transaction_receipt(tx_hash)
+                .await
+                .map_err(RpcError::transport)?
+            {
+                Some(r) => r,
+                None => continue,
+            };
+            if receipt.to != Some(contract) || !receipt.status() {
+                continue;
+            }
+            let activated = receipt.inner.logs().iter().any(|log| {
+                let topics = log.topics();
+                log.address() == contract
+                    && topics.len() == 3
+                    && topics[0] == IRub3License::Activated::SIGNATURE_HASH
+                    && topics[1] == token_topic
+            });
+            // Last one wins: if a block somehow holds two activations of this
+            // token, the one that left `lastActivationBlock` where it is now is
+            // the later of them.
+            if activated {
+                found = Some(format!("0x{}", hex::encode(tx_hash.as_slice())));
+            }
+        }
+
+        Ok(found)
+    })
 }
 
 // ── The code registry (§2.9) ──────────────────────────────────────────────────
@@ -2041,5 +2430,657 @@ mod stub_node_tests {
             err.is_transport(),
             "a rate limit must read as transport: {err}"
         );
+    }
+}
+
+// ── Auto-detect watch tests (§5.1a) ───────────────────────────────────────────
+
+/// The watch loop, its budget, and its cancellation, driven without a node.
+///
+/// The loop is the part that has to be right whatever the chain is doing: it
+/// decides how long a person waits, when a bad endpoint stops being retried,
+/// and whether a thread stops when the screen that started it does. Injecting
+/// the poll is what makes all three assertable in milliseconds - the same
+/// arrangement `poll_for_receipt` has, and for the same reason.
+#[cfg(all(test, feature = "onchain-write"))]
+mod watch_loop_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
+
+    const TICK: Duration = Duration::from_millis(20);
+    const HASH: &str = "0xfeed";
+
+    /// A budget long enough that only the assertion under test can end a watch.
+    fn generous() -> Deadline {
+        Deadline::after(Duration::from_secs(30))
+    }
+
+    fn end_of(e: &RpcError) -> WatchEnd {
+        match e {
+            RpcError::WatchEnded(end) => *end,
+            other => panic!("expected the watch to end, got {other}"),
+        }
+    }
+
+    #[test]
+    fn a_match_on_the_first_poll_is_returned_at_once() {
+        let hash = watch(|| Ok(Some(HASH.to_string())), &generous(), TICK)
+            .expect("a match must be returned");
+        assert_eq!(hash, HASH);
+    }
+
+    /// The normal shape of a watch: the transaction is not there, and then it
+    /// is. Nothing about the earlier empty answers may change the result.
+    #[test]
+    fn a_match_after_several_empty_polls_is_still_returned() {
+        let polls = AtomicU32::new(0);
+        let hash = watch(
+            || {
+                if polls.fetch_add(1, Ordering::Relaxed) < 3 {
+                    Ok(None)
+                } else {
+                    Ok(Some(HASH.to_string()))
+                }
+            },
+            &generous(),
+            TICK,
+        )
+        .expect("a match must be returned");
+        assert_eq!(hash, HASH);
+        assert_eq!(polls.load(Ordering::Relaxed), 4);
+    }
+
+    /// The budget runs out and the transaction never appeared. This is the
+    /// common ending, not a failure: the window falls back to the manual paste
+    /// and says so, which is why it must be distinguishable from an endpoint
+    /// that stopped answering.
+    #[test]
+    fn an_exhausted_budget_ends_the_watch_as_a_timeout() {
+        let deadline = Deadline::after(Duration::from_millis(120));
+        let err = watch(|| Ok(None), &deadline, TICK).expect_err("the budget must run out");
+        assert_eq!(end_of(&err), WatchEnd::Timeout);
+        assert!(
+            err.is_retryable(),
+            "a timeout says the chain had not answered yet, which is worth asking again",
+        );
+    }
+
+    /// A cancelled watch stops, and stops promptly.
+    ///
+    /// Promptness is the assertion that matters. A watch that only noticed
+    /// cancellation at the end of its poll interval would leave a request in
+    /// flight against an endpoint nobody is waiting on, and the interval in
+    /// production is three seconds.
+    #[test]
+    fn a_cancelled_watch_stops_inside_one_poll_interval() {
+        let cancel = Cancel::new();
+        let deadline = Deadline::after(Duration::from_secs(30)).cancelled_by(cancel.clone());
+
+        let polls = AtomicU32::new(0);
+        let started = Instant::now();
+        let interval = Duration::from_secs(5);
+        let err = watch(
+            || {
+                // Cancelled from inside the first sleep, which is where a real
+                // one arrives: the IPC handler raises the flag while the watch
+                // is parked between polls.
+                if polls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    let flag = cancel.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(50));
+                        flag.cancel();
+                    });
+                }
+                Ok(None)
+            },
+            &deadline,
+            interval,
+        )
+        .expect_err("a cancelled watch must not return a hash");
+
+        assert_eq!(end_of(&err), WatchEnd::Cancelled);
+        assert!(
+            started.elapsed() < interval,
+            "cancellation waited out the poll interval ({:?})",
+            started.elapsed(),
+        );
+        assert!(
+            !err.is_retryable(),
+            "cancellation is a decision, not a condition to retry",
+        );
+        assert_eq!(
+            polls.load(Ordering::Relaxed),
+            1,
+            "a cancelled watch must not poll again",
+        );
+    }
+
+    /// One bad response inside a two-minute watch is noise. It must not end
+    /// the watch, and it must not be reported once the chain answers again.
+    #[test]
+    fn a_transient_failure_is_absorbed_and_the_watch_goes_on() {
+        let polls = AtomicU32::new(0);
+        let hash = watch(
+            || match polls.fetch_add(1, Ordering::Relaxed) {
+                0 | 2 => Err(RpcError::Transport("502 bad gateway".into())),
+                1 => Ok(None),
+                _ => Ok(Some(HASH.to_string())),
+            },
+            &generous(),
+            TICK,
+        )
+        .expect("transient failures must not end the watch");
+        assert_eq!(hash, HASH);
+    }
+
+    /// A sustained run of failures is not noise: it is an endpoint that will
+    /// not answer, and spending the rest of the budget on it only delays the
+    /// manual paste that would have worked.
+    #[test]
+    fn a_dead_endpoint_ends_the_watch_before_the_budget_does() {
+        let polls = AtomicU32::new(0);
+        // Long enough that reaching it would take a thousand ticks: if this
+        // test ends on the budget rather than on the error count, it hangs
+        // rather than passing by accident.
+        let deadline = Deadline::after(Duration::from_secs(30));
+        let err = watch(
+            || {
+                polls.fetch_add(1, Ordering::Relaxed);
+                Err(RpcError::Transport("connection refused".into()))
+            },
+            &deadline,
+            TICK,
+        )
+        .expect_err("a dead endpoint must end the watch");
+
+        assert!(
+            matches!(err, RpcError::Transport(_)),
+            "the endpoint's own failure is what the screen reports, got {err}",
+        );
+        assert_eq!(
+            polls.load(Ordering::Relaxed),
+            WATCH_MAX_CONSECUTIVE_ERRORS,
+            "the watch must give up on the failure that crossed the threshold",
+        );
+    }
+
+    /// A run of failures broken by a single good answer starts over. Otherwise
+    /// a flaky endpoint would accumulate its way to a give-up across a whole
+    /// two minutes of otherwise working polls.
+    #[test]
+    fn a_single_good_answer_resets_the_failure_run() {
+        let polls = AtomicU32::new(0);
+        let total = WATCH_MAX_CONSECUTIVE_ERRORS * 2;
+        let hash = watch(
+            || {
+                let n = polls.fetch_add(1, Ordering::Relaxed);
+                if n >= total {
+                    Ok(Some(HASH.to_string()))
+                } else if n.is_multiple_of(2) {
+                    Err(RpcError::Transport("rate limited".into()))
+                } else {
+                    Ok(None)
+                }
+            },
+            &generous(),
+            TICK,
+        )
+        .expect("alternating failures must never reach the threshold");
+        assert_eq!(hash, HASH);
+    }
+
+    /// A malformed request will not parse on the tenth try either, so it is
+    /// reported at once rather than retried into the budget.
+    #[test]
+    fn an_unretryable_failure_ends_the_watch_immediately() {
+        let polls = AtomicU32::new(0);
+        let err = watch(
+            || {
+                polls.fetch_add(1, Ordering::Relaxed);
+                Err(RpcError::InvalidInput("not an address".into()))
+            },
+            &generous(),
+            TICK,
+        )
+        .expect_err("a settled failure must end the watch");
+        assert!(matches!(err, RpcError::InvalidInput(_)), "got {err}");
+        assert_eq!(polls.load(Ordering::Relaxed), 1);
+    }
+
+    /// A watch already cancelled before it starts never touches the network.
+    /// The window can cancel between spawning a thread and the thread running.
+    #[test]
+    fn a_watch_cancelled_before_it_starts_never_polls() {
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let deadline = Deadline::after(Duration::from_secs(30)).cancelled_by(cancel);
+
+        let polls = AtomicU32::new(0);
+        let err = watch(
+            || {
+                polls.fetch_add(1, Ordering::Relaxed);
+                Ok(None)
+            },
+            &deadline,
+            TICK,
+        )
+        .expect_err("a cancelled watch must not return a hash");
+        assert_eq!(end_of(&err), WatchEnd::Cancelled);
+        assert_eq!(polls.load(Ordering::Relaxed), 0);
+    }
+}
+
+/// The two watchers against a mocked node: what they ask for, and what they
+/// make of the answer.
+///
+/// The loop above is exercised with the network taken out; this is the other
+/// half - the filter that goes out and the decoding that comes back, which is
+/// where a wrong topic or a mis-read receipt would live.
+#[cfg(all(test, feature = "onchain-write"))]
+mod watch_rpc_tests {
+    use super::*;
+    use crate::test_support::StubNode;
+    use std::time::Duration;
+
+    const CONTRACT: &str = "0x000000000000000000000000000000000000dEaD";
+    const BUYER: &str = "0x00000000000000000000000000000000000B0B0b";
+    const MINT_TX: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const ACTIVATE_TX: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
+    const OTHER_TX: &str = "0x3333333333333333333333333333333333333333333333333333333333333333";
+    const TOKEN_ID: u64 = 137;
+
+    fn contract() -> Address {
+        CONTRACT.parse().expect("test contract address")
+    }
+
+    fn buyer() -> Address {
+        BUYER.parse().expect("test buyer address")
+    }
+
+    /// A hex topic for a 20-byte address, left-padded the way a log carries it.
+    fn address_topic(address: &str) -> String {
+        format!("0x{:0>64}", address.trim_start_matches("0x").to_lowercase())
+    }
+
+    /// A budget short enough that a test asserting "nothing was found" ends in
+    /// well under a second.
+    fn brief() -> Deadline {
+        Deadline::after(Duration::from_millis(150))
+    }
+
+    fn end_of(e: &RpcError) -> WatchEnd {
+        match e {
+            RpcError::WatchEnded(end) => *end,
+            other => panic!("expected the watch to end, got {other}"),
+        }
+    }
+
+    /// One ERC-721 mint log, as a node returns it.
+    fn mint_log(to: &str, tx: &str) -> serde_json::Value {
+        serde_json::json!({
+            "address": CONTRACT.to_lowercase(),
+            "topics": [
+                format!("0x{}", hex::encode(ERC721_TRANSFER_SIG.as_slice())),
+                format!("0x{:0>64}", ""),
+                address_topic(to),
+                format!("0x{:064x}", TOKEN_ID),
+            ],
+            "data": "0x",
+            "blockNumber": "0x2a",
+            "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000042",
+            "transactionHash": tx,
+            "transactionIndex": "0x0",
+            "logIndex": "0x0",
+            "removed": false,
+        })
+    }
+
+    // ── watch_for_mint ───────────────────────────────────────────────────────
+
+    /// The happy path, and the assertion that matters most: the hash the watch
+    /// hands back is the one the manual paste would have carried, in the same
+    /// spelling.
+    #[test]
+    fn a_matching_mint_log_yields_its_transaction_hash() {
+        let node = StubNode::routed(|method, _params| match method {
+            "eth_getLogs" => serde_json::json!([mint_log(BUYER, MINT_TX)]),
+            _ => serde_json::json!(null),
+        });
+
+        let hash = watch_for_mint(&node.url, contract(), buyer(), 40, brief())
+            .expect("a matching mint log must resolve");
+        assert_eq!(hash, MINT_TX);
+    }
+
+    /// The filter the node is asked for is the one §5.1a specifies. Asserted on
+    /// the request rather than the response because a filter that is too wide
+    /// would still pass the test above while picking up a stranger's mint.
+    #[test]
+    fn the_filter_pins_the_contract_the_mint_and_the_recipient() {
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = std::sync::Arc::clone(&seen);
+
+        let node = StubNode::routed(move |method, params| {
+            if method == "eth_getLogs" {
+                recorder
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(params[0].clone());
+            }
+            serde_json::json!([])
+        });
+
+        let err = watch_for_mint(&node.url, contract(), buyer(), 40, brief())
+            .expect_err("an empty log set means nothing has landed yet");
+        assert_eq!(end_of(&err), WatchEnd::Timeout);
+
+        let filters = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let filter = filters
+            .first()
+            .expect("the watch must have asked at least once");
+        assert_eq!(
+            filter["address"].as_str().map(str::to_lowercase),
+            Some(CONTRACT.to_lowercase()),
+            "an unpinned address would match any contract's transfers: {filter}",
+        );
+        assert_eq!(
+            filter["fromBlock"].as_str(),
+            Some("0x28"),
+            "the watch must start at the block the screen opened at: {filter}",
+        );
+        let topics = &filter["topics"];
+        assert_eq!(
+            topics[0].as_str(),
+            Some(format!("0x{}", hex::encode(ERC721_TRANSFER_SIG.as_slice())).as_str()),
+            "topic0 must be the ERC-721 Transfer signature: {filter}",
+        );
+        assert_eq!(
+            topics[1].as_str(),
+            Some("0x0000000000000000000000000000000000000000000000000000000000000000"),
+            "a mint is a transfer from the zero address: {filter}",
+        );
+        assert_eq!(
+            topics[2].as_str().map(str::to_lowercase),
+            Some(address_topic(BUYER)),
+            "topic2 must pin the recipient, or another buyer's mint would win: {filter}",
+        );
+    }
+
+    /// ERC-20 shares topic0 with ERC-721 and differs only in arity, so a
+    /// three-topic log from the same address must not be read as a mint. A node
+    /// that ignores the topic filter is exactly how this arrives in the wild.
+    #[test]
+    fn a_three_topic_transfer_is_not_a_mint() {
+        let node = StubNode::routed(|method, _params| match method {
+            "eth_getLogs" => serde_json::json!([{
+                "address": CONTRACT.to_lowercase(),
+                "topics": [
+                    format!("0x{}", hex::encode(ERC721_TRANSFER_SIG.as_slice())),
+                    format!("0x{:0>64}", ""),
+                    address_topic(BUYER),
+                ],
+                "data": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "blockNumber": "0x2a",
+                "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000042",
+                "transactionHash": OTHER_TX,
+                "transactionIndex": "0x0",
+                "logIndex": "0x0",
+                "removed": false,
+            }]),
+            _ => serde_json::json!(null),
+        });
+
+        let err = watch_for_mint(&node.url, contract(), buyer(), 40, brief())
+            .expect_err("an ERC-20 transfer is not a licence mint");
+        assert_eq!(end_of(&err), WatchEnd::Timeout);
+    }
+
+    /// A node that will not answer must surface as a failure, not as "nothing
+    /// has landed yet". The loop treats the two completely differently - one is
+    /// absorbed and retried, the other counts towards giving up - and the
+    /// screen says different things about them, so a poll that swallowed a 502
+    /// into `Ok(None)` would keep a broken endpoint spinning for the whole
+    /// budget and then blame the chain for it.
+    ///
+    /// Asserted on the poll rather than through [`watch_for_mint`], which would
+    /// have to sit out five real poll intervals to reach the same conclusion.
+    #[test]
+    fn a_refusing_node_makes_the_mint_poll_fail_rather_than_come_back_empty() {
+        let node = StubNode::serving(
+            r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32005,"message":"rate limit exceeded"}}"#,
+        );
+        let err = poll_for_mint(&node.url, contract(), buyer(), 40)
+            .expect_err("a refused request is not an empty log set");
+        assert!(err.is_retryable(), "a rate limit is worth retrying: {err}");
+    }
+
+    // ── watch_for_activate ───────────────────────────────────────────────────
+
+    /// A node whose `lastActivationBlock` sits at `last`, holding one block of
+    /// `transactions` whose receipts are `receipts`.
+    fn activation_node(
+        last: u64,
+        transactions: Vec<&'static str>,
+        receipts: serde_json::Value,
+    ) -> StubNode {
+        StubNode::routed(move |method, params| match method {
+            // The only `eth_call` this flow makes.
+            "eth_call" => serde_json::json!(format!("0x{last:064x}")),
+            "eth_getBlockByNumber" => block_header(last, &transactions),
+            "eth_getTransactionReceipt" => {
+                let wanted = params[0].as_str().unwrap_or_default();
+                receipts
+                    .get(wanted)
+                    .cloned()
+                    .unwrap_or(serde_json::json!(null))
+            }
+            _ => serde_json::json!(null),
+        })
+    }
+
+    /// A block header carrying `transactions`, with every field alloy insists
+    /// on present. Spelled out in full because a header missing one of them
+    /// fails to deserialize, and the watch reads that as a node that did not
+    /// answer - a green test that proves nothing.
+    fn block_header(number: u64, transactions: &[&'static str]) -> serde_json::Value {
+        const ZERO_HASH: &str =
+            "0x0000000000000000000000000000000000000000000000000000000000000000";
+        serde_json::json!({
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000042",
+            "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000041",
+            "sha3Uncles": ZERO_HASH,
+            "miner": "0x0000000000000000000000000000000000000000",
+            "stateRoot": ZERO_HASH,
+            "transactionsRoot": ZERO_HASH,
+            "receiptsRoot": ZERO_HASH,
+            "logsBloom": format!("0x{:0>512}", ""),
+            "difficulty": "0x0",
+            "number": format!("0x{number:x}"),
+            "gasLimit": "0x1c9c380",
+            "gasUsed": "0x5208",
+            "timestamp": "0x66000000",
+            "extraData": "0x",
+            "mixHash": ZERO_HASH,
+            "nonce": "0x0000000000000000",
+            "baseFeePerGas": "0x1",
+            "transactions": transactions,
+        })
+    }
+
+    /// One receipt carrying `logs`, as a node returns it.
+    fn receipt(tx: &str, to: &str, status: &str, logs: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "0x2",
+            "transactionHash": tx,
+            "transactionIndex": "0x0",
+            "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000042",
+            "blockNumber": "0x2a",
+            "from": BUYER.to_lowercase(),
+            "to": to,
+            "cumulativeGasUsed": "0x1",
+            "gasUsed": "0x1",
+            "effectiveGasPrice": "0x1",
+            "contractAddress": null,
+            "logs": logs,
+            "logsBloom": format!("0x{:0>512}", ""),
+            "status": status,
+        })
+    }
+
+    /// The `Activated(tokenId, owner, sessionId)` log the wrapper looks for.
+    fn activated_log(token_id: u64, tx: &str) -> serde_json::Value {
+        use alloy::sol_types::SolEvent;
+        serde_json::json!({
+            "address": CONTRACT.to_lowercase(),
+            "topics": [
+                format!("0x{}", hex::encode(IRub3License::Activated::SIGNATURE_HASH.as_slice())),
+                format!("0x{token_id:064x}"),
+                address_topic(BUYER),
+            ],
+            "data": format!("0x{:064x}", 7),
+            "blockNumber": "0x2a",
+            "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000042",
+            "transactionHash": tx,
+            "transactionIndex": "0x0",
+            "logIndex": "0x0",
+            "removed": false,
+        })
+    }
+
+    /// The happy path: the activation block moves past the one the screen
+    /// opened at, and the transaction that moved it is found in that block.
+    #[test]
+    fn an_advanced_activation_block_resolves_to_its_transaction() {
+        let node = activation_node(
+            42,
+            vec![ACTIVATE_TX],
+            serde_json::json!({
+                ACTIVATE_TX: receipt(
+                    ACTIVATE_TX,
+                    &CONTRACT.to_lowercase(),
+                    "0x1",
+                    serde_json::json!([activated_log(TOKEN_ID, ACTIVATE_TX)]),
+                ),
+            }),
+        );
+
+        let hash = watch_for_activate(&node.url, contract(), TOKEN_ID, 40, brief())
+            .expect("an advanced activation block must resolve");
+        assert_eq!(hash, ACTIVATE_TX);
+    }
+
+    /// The block the token was last activated in is where it already sat when
+    /// the screen opened - that is what a cooldown is. Reading it as a fresh
+    /// activation would hand the flow a transaction from minutes ago and issue
+    /// a session against it.
+    #[test]
+    fn an_activation_block_at_or_before_the_start_is_not_a_new_activation() {
+        for last in [39, 40] {
+            let node = activation_node(
+                last,
+                vec![ACTIVATE_TX],
+                serde_json::json!({
+                    ACTIVATE_TX: receipt(
+                        ACTIVATE_TX,
+                        &CONTRACT.to_lowercase(),
+                        "0x1",
+                        serde_json::json!([activated_log(TOKEN_ID, ACTIVATE_TX)]),
+                    ),
+                }),
+            );
+            let err = watch_for_activate(&node.url, contract(), TOKEN_ID, 40, brief())
+                .expect_err("an activation at or before the start block is the old one");
+            assert_eq!(
+                end_of(&err),
+                WatchEnd::Timeout,
+                "lastActivationBlock={last} against a start block of 40",
+            );
+        }
+    }
+
+    /// A block holding somebody else's activation of a different token must not
+    /// be mistaken for this screen's. The token id is indexed on the event,
+    /// which is what makes the distinction available at all.
+    #[test]
+    fn another_tokens_activation_in_the_same_block_is_ignored() {
+        let node = activation_node(
+            42,
+            vec![OTHER_TX],
+            serde_json::json!({
+                OTHER_TX: receipt(
+                    OTHER_TX,
+                    &CONTRACT.to_lowercase(),
+                    "0x1",
+                    serde_json::json!([activated_log(TOKEN_ID + 1, OTHER_TX)]),
+                ),
+            }),
+        );
+
+        let err = watch_for_activate(&node.url, contract(), TOKEN_ID, 40, brief())
+            .expect_err("another token's activation is not this one");
+        assert_eq!(end_of(&err), WatchEnd::Timeout);
+    }
+
+    /// A transaction that reverted did not activate anything, whatever else is
+    /// in the block.
+    #[test]
+    fn a_reverted_transaction_is_never_the_activation() {
+        let node = activation_node(
+            42,
+            vec![ACTIVATE_TX],
+            serde_json::json!({
+                ACTIVATE_TX: receipt(
+                    ACTIVATE_TX,
+                    &CONTRACT.to_lowercase(),
+                    "0x0",
+                    serde_json::json!([activated_log(TOKEN_ID, ACTIVATE_TX)]),
+                ),
+            }),
+        );
+
+        let err = watch_for_activate(&node.url, contract(), TOKEN_ID, 40, brief())
+            .expect_err("a reverted transaction activates nothing");
+        assert_eq!(end_of(&err), WatchEnd::Timeout);
+    }
+
+    /// A block with unrelated traffic in it: only the transaction that went to
+    /// the licence contract and emitted the right `Activated` is picked out.
+    #[test]
+    fn the_activation_is_found_among_unrelated_transactions() {
+        let node = activation_node(
+            42,
+            vec![OTHER_TX, ACTIVATE_TX],
+            serde_json::json!({
+                OTHER_TX: receipt(
+                    OTHER_TX,
+                    "0x000000000000000000000000000000000000beef",
+                    "0x1",
+                    serde_json::json!([]),
+                ),
+                ACTIVATE_TX: receipt(
+                    ACTIVATE_TX,
+                    &CONTRACT.to_lowercase(),
+                    "0x1",
+                    serde_json::json!([activated_log(TOKEN_ID, ACTIVATE_TX)]),
+                ),
+            }),
+        );
+
+        let hash = watch_for_activate(&node.url, contract(), TOKEN_ID, 40, brief())
+            .expect("the activation must be found beside unrelated traffic");
+        assert_eq!(hash, ACTIVATE_TX);
+    }
+
+    /// The same for the activate poll, and for the same reason.
+    #[test]
+    fn a_refusing_node_makes_the_activate_poll_fail_rather_than_come_back_empty() {
+        let node = StubNode::serving(
+            r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32005,"message":"rate limit exceeded"}}"#,
+        );
+        let err = poll_for_activate(&node.url, contract(), TOKEN_ID, 40)
+            .expect_err("a refused request is not a quiet chain");
+        assert!(err.is_retryable(), "a rate limit is worth retrying: {err}");
     }
 }
