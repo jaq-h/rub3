@@ -341,6 +341,51 @@ fn a_watch_cancelled_mid_request_reports_nothing() {
     );
 }
 
+/// A watch cancelled while its last request was in flight does not drive the
+/// flow on either.
+///
+/// The silent-on-failure case above is only half of it: the request that was in
+/// flight when the cancel landed can come back with a *hash*, and a hash is not
+/// a message the page can ignore - it starts the purchase poller, which shows
+/// the processing screen and finalizes on top of whatever the user moved to.
+/// The screen asked for this watch to stop; a watch that stops must stop in both
+/// directions.
+///
+/// The node answers the poll slowly so the cancel reliably lands inside it, and
+/// then answers with the mint, so what is being asserted is a found transaction
+/// being dropped rather than nothing having been found.
+#[test]
+fn a_watch_cancelled_as_it_finds_the_hash_drives_nothing() {
+    const ANSWER_AFTER: Duration = Duration::from_millis(750);
+    const CANCEL_AFTER: Duration = Duration::from_millis(200);
+
+    let node = StubNode::routed(|method, params| {
+        if method == "eth_getLogs" {
+            std::thread::sleep(ANSWER_AFTER);
+        }
+        purchased_reply(method, params)
+    });
+    let window = window_on(&node.url);
+
+    window.post(serde_json::json!({
+        "type":          "auto_watch_start",
+        "kind":          "mint",
+        "owner_address": WALLET,
+        "token_id":      serde_json::Value::Null,
+    }));
+    std::thread::sleep(CANCEL_AFTER);
+    window.post(serde_json::json!({ "type": "auto_watch_cancel" }));
+
+    // Long enough for the poll holding the mint to come back and be acted on,
+    // if it were going to be.
+    std::thread::sleep(ANSWER_AFTER + Duration::from_millis(750));
+    let calls = window.drain();
+    assert!(
+        calls.is_empty(),
+        "a cancelled watch must not move the flow on, but it said {calls:?}",
+    );
+}
+
 /// A watch that ran out of time says something different from one that could
 /// not reach the endpoint, and neither tells anyone to send a second time.
 ///
@@ -352,8 +397,8 @@ fn a_watch_cancelled_mid_request_reports_nothing() {
 fn the_two_ways_of_giving_up_say_different_things() {
     use crate::webview::{auto_watch_detail, AutoWatchKind};
 
-    let timed_out = auto_watch_detail(AutoWatchKind::Mint, true);
-    let unreachable = auto_watch_detail(AutoWatchKind::Mint, false);
+    let timed_out = auto_watch_detail(AutoWatchKind::Mint, true, false);
+    let unreachable = auto_watch_detail(AutoWatchKind::Mint, false, false);
     assert_ne!(timed_out, unreachable);
 
     assert!(
@@ -365,10 +410,117 @@ fn the_two_ways_of_giving_up_say_different_things() {
         "the timeout copy must not invite a second purchase: {timed_out:?}",
     );
 
-    let activation = auto_watch_detail(AutoWatchKind::Activate, true);
+    let activation = auto_watch_detail(AutoWatchKind::Activate, true, false);
     assert!(
         activation.contains("activation") && timed_out.contains("purchase"),
         "each screen names the transaction it was waiting for: {activation:?} / {timed_out:?}",
+    );
+}
+
+/// Inside a cooldown the advice changes, and only inside a cooldown.
+///
+/// The default sentences tell a person to send the transaction now. On a token
+/// still cooling the contract reverts an `activate()`, so "now" costs them gas
+/// and gets them nothing: the copy has to point at the cooldown above instead.
+/// The wrapper composes both, so this is the whole of the rule rather than half
+/// of it - a page that substituted its own words could put them on a screen
+/// this function never speaks for.
+#[test]
+fn the_copy_waits_for_a_cooldown_that_has_not_ended() {
+    use crate::webview::{auto_watch_detail, AutoWatchKind};
+
+    for timed_out in [true, false] {
+        let ordinary = auto_watch_detail(AutoWatchKind::Activate, timed_out, false);
+        let cooling = auto_watch_detail(AutoWatchKind::Activate, timed_out, true);
+
+        assert_ne!(
+            ordinary, cooling,
+            "a cooling token must not be told to send it now (timed_out: {timed_out})",
+        );
+        assert!(
+            cooling.contains("cooldown"),
+            "the cooling copy must point at the cooldown above: {cooling:?}",
+        );
+        assert!(
+            cooling.contains("paste"),
+            "the fallback must still point at the box it just switched to: {cooling:?}",
+        );
+        assert!(
+            !ordinary.contains("cooldown"),
+            "a token that is not cooling must not be told to wait: {ordinary:?}",
+        );
+    }
+
+    // The specified default, unchanged on the screen that has no cooldown to
+    // wait out.
+    let purchase = auto_watch_detail(AutoWatchKind::Mint, false, false);
+    assert!(
+        purchase.contains("Send it from your wallet and paste its hash below."),
+        "the purchase screen keeps the plain instruction: {purchase:?}",
+    );
+}
+
+/// The wording a watch falls back to knows about the cooldown the screen is
+/// showing, without asking the chain a second time.
+///
+/// The whole sentence is the wrapper's, so the wrapper has to hold the fact that
+/// picks it. It comes from the `cooldownReady` read the cooldown screen was
+/// built from - which is the only source there is on this path, because the
+/// watch here fails on the head block before it makes a cooldown read of its
+/// own. Driven end to end from a purchase so that read really is the screen's.
+#[test]
+#[cfg(feature = "cooldown")]
+fn a_watch_that_fails_inside_a_cooldown_says_to_wait_for_it() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Long enough to outlast a watch giving up inside it: the head read is
+    /// retried on the poll interval before it is reported.
+    const COOLING_BLOCKS: u64 = 60;
+
+    let head_readable = Arc::new(AtomicBool::new(true));
+    let reported_head = Arc::clone(&head_readable);
+
+    let node = StubNode::routed(move |method, params| match method {
+        // `cooldownReady(tokenId)`: not ready, with a long way to go.
+        "eth_call" => serde_json::json!(format!("0x{:064x}{COOLING_BLOCKS:064x}", 0)),
+        // Unusable once the watch is armed, so the watch gives up on the read it
+        // opens with rather than on one that would tell it about the cooldown.
+        "eth_blockNumber" if !reported_head.load(Ordering::Relaxed) => serde_json::Value::Null,
+        other => purchased_reply(other, params),
+    });
+
+    let window = window_on(&node.url);
+    window.post(serde_json::json!({
+        "type":          "purchase_tx_sent",
+        "tx_hash":       MINT_TX,
+        "owner_address": WALLET,
+    }));
+    let cooldown = window.wait_for("onShowCooldown");
+    assert_eq!(
+        cooldown["ready"], false,
+        "this test needs a screen that is actually cooling: {cooldown}",
+    );
+
+    head_readable.store(false, Ordering::Relaxed);
+    window.post(serde_json::json!({
+        "type":          "auto_watch_start",
+        "kind":          "activate",
+        "owner_address": WALLET,
+        "token_id":      TOKEN_ID,
+    }));
+
+    let ended = window.wait_for("onAutoWatchEnded");
+    assert_eq!(
+        ended["reason"], "rpc",
+        "the head read is what failed here: {ended}",
+    );
+    let detail = ended["detail"]
+        .as_str()
+        .expect("the manual tab is given words");
+    assert!(
+        detail.contains("cooldown"),
+        "a token still cooling must not be told to send it now: {detail:?}",
     );
 }
 

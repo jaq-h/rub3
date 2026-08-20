@@ -745,25 +745,6 @@
       'drain ' + secs + 's linear ' + autoWatchHoldSecs(screen) + 's forwards';
   }
 
-  // What the manual tab says once a watch has given up. Usually the wrapper's
-  // own sentence, which knows how long it watched and what for. The one thing it
-  // cannot know is the cooldown: its "send it now" would be asking for a
-  // transaction the contract still reverts, which costs the person gas and gets
-  // them nothing.
-  //
-  // A watch holds until the cooldown ends before spending its budget, so this
-  // covers what is left over: an endpoint that failed during the hold, and a
-  // chain producing blocks slower than the estimate the wait was drawn from.
-  function autoWatchHint(screen, data) {
-    if (screen !== 'cooldown' || Date.now() >= cooldownEndsAt) return data.detail;
-    return data.reason === 'timeout'
-      ? 'We stopped watching the chain, and the cooldown above has not ended yet. '
-        + 'If you have already sent the activation, paste its hash below. Otherwise wait for '
-        + 'the cooldown to end, send it, then paste the hash here.'
-      : 'We could not reach the network to watch for your activation transaction. Wait for '
-        + 'the cooldown above to end, send it from your wallet, then paste its hash below.';
-  }
-
   function setTabHint(screen, text) {
     const el = document.getElementById(screen === 'purchase' ? 'p-hint' : 'cd-hint');
     el.textContent = text || '';
@@ -1024,10 +1005,14 @@
     // answering. Not an error screen - the transaction may well be on its way -
     // so the screen stays where it is and only the tab changes, with the manual
     // box already explaining itself and focused for the paste.
+    //
+    // `detail` is the whole sentence, composed by the wrapper: it knows how long
+    // it watched, what it watched for, and whether the cooldown above has ended,
+    // so the page does not choose words here.
     // data: { kind: 'mint' | 'activate', reason: 'timeout' | 'rpc', detail }
     onAutoWatchEnded(data) {
       const screen = data.kind === 'mint' ? 'purchase' : 'cooldown';
-      setTabHint(screen, autoWatchHint(screen, data));
+      setTabHint(screen, data.detail);
       selectTab(screen, 'manual');
       const input = document.getElementById(screen === 'purchase' ? 'p-tx-input' : 'cd-tx-input');
       if (input) input.focus();

@@ -974,14 +974,27 @@ impl Deadline {
     /// transaction broadcast during the hold is still there to be found on the
     /// first poll after it. Cancellation is honoured throughout the hold, so a
     /// held watch is no more able to outlive its screen than a polling one.
+    ///
+    /// `delay` is derived from what the contract says is left of the cooldown,
+    /// which is a `uint256` the wrapper does not bound, and `Instant + Duration`
+    /// panics on overflow rather than saturating. That panic would land on the
+    /// watcher thread, where nothing reports it: no `onAutoWatchEnded` is
+    /// emitted and the page spins forever with no fallback to the manual paste -
+    /// the one failure this whole path exists to prevent. A delay that cannot be
+    /// represented therefore degrades to no hold at all, so the watch spends its
+    /// budget and hands back to the manual tab in the ordinary way.
     pub fn starting_in(self, delay: std::time::Duration) -> Deadline {
         if delay.is_zero() {
             return self;
         }
         let now = std::time::Instant::now();
+        let (Some(at), Some(not_before)) = (self.at.checked_add(delay), now.checked_add(delay))
+        else {
+            return self;
+        };
         Deadline {
-            at: self.at + delay,
-            not_before: Some(now + delay),
+            at,
+            not_before: Some(not_before),
             ..self
         }
     }
@@ -2909,6 +2922,28 @@ mod watch_loop_tests {
             started.elapsed() >= HOLD,
             "the watch polled inside its hold ({:?})",
             started.elapsed(),
+        );
+    }
+
+    /// A hold the clock cannot represent falls back to no hold, rather than
+    /// killing the thread that was going to take it.
+    ///
+    /// The delay comes from `cooldownReady`, a `uint256` no part of the wrapper
+    /// bounds, and `Instant + Duration` panics on overflow. On the watcher
+    /// thread that panic is silent: `auto_watch_ended` never runs, the page is
+    /// never told, and it spins on the auto-detect tab with no way back to the
+    /// manual paste. Giving up the hold is the safe degradation - the watch
+    /// still runs, still times out, and still hands back.
+    #[test]
+    fn an_unrepresentable_hold_does_not_kill_the_watch() {
+        let deadline = Deadline::after(Duration::from_millis(120)).starting_in(Duration::MAX);
+
+        let err = watch_hashes(|| Ok(None), &deadline, TICK)
+            .expect_err("a watch that finds nothing must end, not hang");
+        assert_eq!(
+            end_of(&err),
+            WatchEnd::Timeout,
+            "the watch must reach the manual-tab fallback the ordinary way",
         );
     }
 

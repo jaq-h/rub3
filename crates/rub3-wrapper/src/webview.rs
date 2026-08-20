@@ -175,6 +175,10 @@ struct AutoWatchSlot {
     running: Option<crate::rpc::Cancel>,
     /// The screen currently offering auto-detect, and the head when it opened.
     opened_at: Option<(AutoWatchKind, u64)>,
+    /// When the cooldown this screen is showing is expected to end, from the
+    /// same `cooldownReady` read the screen and the watch's hold are drawn
+    /// from. `None` on a screen with no cooldown to wait out.
+    cooling_until: Option<std::time::Instant>,
 }
 
 #[cfg(feature = "onchain-write")]
@@ -206,6 +210,30 @@ impl AutoWatch {
     fn screen_opened(&self) {
         let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
         slot.opened_at = None;
+        slot.cooling_until = None;
+    }
+
+    /// Records that the screen now on display is waiting out `remaining` of
+    /// cooldown, so a watch that gives up can say the right thing about what to
+    /// do next. `Duration::ZERO` means there is nothing left to wait for.
+    ///
+    /// Set from a `cooldownReady` read the flow already makes rather than from a
+    /// read of its own: this is the same number the screen's copy and the
+    /// watch's hold are drawn from, and a second source for it would let the
+    /// words and the waiting disagree.
+    #[cfg(feature = "cooldown")]
+    fn cooling_for(&self, remaining: std::time::Duration) {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        slot.cooling_until = (!remaining.is_zero())
+            .then(|| std::time::Instant::now().checked_add(remaining))
+            .flatten();
+    }
+
+    /// Whether the screen this watch belongs to is still inside its cooldown.
+    fn cooling(&self) -> bool {
+        let slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        slot.cooling_until
+            .is_some_and(|end| std::time::Instant::now() < end)
     }
 
     /// The block a watch of `kind` starts from, or `None` before this screen has
@@ -231,6 +259,19 @@ impl AutoWatch {
             }
         }
     }
+}
+
+/// What a finished watch found.
+///
+/// The two kinds hand off to different pollers, and naming the outcome lets
+/// them do it from one place - so there is one cancellation check between a
+/// watch returning and the flow moving on, rather than one per kind with the
+/// second waiting to be forgotten.
+#[cfg(feature = "onchain-write")]
+enum Found {
+    Mint(String),
+    #[cfg(feature = "cooldown")]
+    Activation(String, u64),
 }
 
 // ── Internal channel ──────────────────────────────────────────────────────────
@@ -591,11 +632,18 @@ impl IpcState {
         // The cooldown in seconds as well as in blocks: the screen speaks in
         // both, and the number is estimated here rather than in the page so the
         // copy, the drain bar and the watch's own hold share one estimate.
-        let cooldown_secs = if ready {
-            0
+        let cooldown_remaining = if ready {
+            std::time::Duration::ZERO
         } else {
-            cooldown_wait(blocks_remaining).as_secs()
+            cooldown_wait(blocks_remaining)
         };
+        let cooldown_secs = cooldown_remaining.as_secs();
+
+        // The same estimate the words a failed watch falls back to are chosen
+        // by: inside a cooldown, "send it now" asks for a transaction the
+        // contract still reverts.
+        #[cfg(feature = "onchain-write")]
+        self.auto_watch.cooling_for(cooldown_remaining);
 
         #[cfg_attr(not(feature = "onchain-write"), allow(unused_mut))]
         let mut payload = serde_json::json!({
@@ -827,7 +875,14 @@ impl IpcState {
                             &deadline,
                         );
                         match read {
-                            Ok((_, blocks_remaining)) => cooldown_wait(blocks_remaining),
+                            Ok((_, blocks_remaining)) => {
+                                let remaining = cooldown_wait(blocks_remaining);
+                                // Fresher than the screen's own reading of the
+                                // same view, and the words a give-up falls back
+                                // to should follow the hold they describe.
+                                state.auto_watch.cooling_for(remaining);
+                                remaining
+                            }
                             Err(e) => {
                                 state.auto_watch_ended(kind, &cancel, &e);
                                 return;
@@ -842,19 +897,15 @@ impl IpcState {
 
             let deadline = deadline.starting_in(hold);
 
-            match kind {
-                AutoWatchKind::Mint => {
-                    match crate::rpc::watch_for_mint(
-                        &state.rpc_url,
-                        contract_addr,
-                        owner_addr,
-                        from_block,
-                        deadline,
-                    ) {
-                        Ok(tx_hash) => state.spawn_purchase_poller(tx_hash, owner_address),
-                        Err(e) => state.auto_watch_ended(kind, &cancel, &e),
-                    }
-                }
+            let found = match kind {
+                AutoWatchKind::Mint => crate::rpc::watch_for_mint(
+                    &state.rpc_url,
+                    contract_addr,
+                    owner_addr,
+                    from_block,
+                    deadline,
+                )
+                .map(Found::Mint),
 
                 #[cfg(feature = "cooldown")]
                 AutoWatchKind::Activate => {
@@ -862,16 +913,14 @@ impl IpcState {
                         state.eval_err("auto-detect asked to watch an activation with no token");
                         return;
                     };
-                    match crate::rpc::watch_for_activate(
+                    crate::rpc::watch_for_activate(
                         &state.rpc_url,
                         contract_addr,
                         id,
                         from_block,
                         deadline,
-                    ) {
-                        Ok(tx_hash) => state.spawn_tx_poller(tx_hash, id, owner_address),
-                        Err(e) => state.auto_watch_ended(kind, &cancel, &e),
-                    }
+                    )
+                    .map(|tx_hash| Found::Activation(tx_hash, id))
                 }
 
                 // No activation step is compiled in, so there is nothing to
@@ -882,7 +931,27 @@ impl IpcState {
                 AutoWatchKind::Activate => {
                     let _ = token_id;
                     state.eval_err("this build has no activation step to watch for");
+                    return;
                 }
+            };
+
+            // Both outcomes are checked against the flag in one place, because
+            // both are answers to a question the screen may have stopped asking.
+            // A cancel raised while the last request was in flight still lets
+            // that request come back with a hash, and dispatching it would drive
+            // the purchase or activation flow on from a screen the user has
+            // already left. Silence is what cancellation means, on either side.
+            if cancel.is_cancelled() {
+                return;
+            }
+
+            match found {
+                Ok(Found::Mint(tx_hash)) => state.spawn_purchase_poller(tx_hash, owner_address),
+                #[cfg(feature = "cooldown")]
+                Ok(Found::Activation(tx_hash, id)) => {
+                    state.spawn_tx_poller(tx_hash, id, owner_address)
+                }
+                Err(e) => state.auto_watch_ended(kind, &cancel, &e),
             }
         });
     }
@@ -922,7 +991,7 @@ impl IpcState {
             serde_json::json!({
                 "kind":   kind.as_str(),
                 "reason": if timed_out { "timeout" } else { "rpc" },
-                "detail": auto_watch_detail(kind, timed_out),
+                "detail": auto_watch_detail(kind, timed_out, self.auto_watch.cooling()),
             })
         ));
     }
@@ -1168,24 +1237,41 @@ fn cooldown_wait(blocks_remaining: u64) -> std::time::Duration {
 /// looking first. So it says what was watched for and what to do with the box
 /// that is now in front of them, and never suggests the transaction is lost or
 /// that it should be sent twice. Sending twice would buy a second licence.
+///
+/// `cooling` is the other half of "what to do now". Inside a cooldown the
+/// contract still reverts an `activate()`, so telling someone to send it now
+/// costs them gas and gets them nothing; the sentence has to point at the
+/// cooldown above instead. The whole sentence is composed here, in every case,
+/// so the page has nothing to say about wording and one edit here is the only
+/// edit there is - a copy in JS that only applied on one screen would be
+/// invisible to anyone reading this function.
 #[cfg(feature = "onchain-write")]
-fn auto_watch_detail(kind: AutoWatchKind, timed_out: bool) -> String {
+fn auto_watch_detail(kind: AutoWatchKind, timed_out: bool, cooling: bool) -> String {
     let subject = match kind {
         AutoWatchKind::Mint => "purchase",
         AutoWatchKind::Activate => "activation",
     };
-    if timed_out {
-        format!(
+    match (timed_out, cooling) {
+        (true, false) => format!(
             "We watched the chain for {} and did not see your {subject} transaction. \
              If you have already sent it, paste its hash below. If you have not, send it \
              now and paste the hash here - do not send it twice.",
             spoken_duration(crate::rpc::WATCH_BUDGET)
-        )
-    } else {
-        format!(
+        ),
+        (false, false) => format!(
             "We could not reach the network to watch for your {subject} transaction. \
              Send it from your wallet and paste its hash below."
-        )
+        ),
+        (true, true) => format!(
+            "We stopped watching the chain, and the cooldown above has not ended yet. \
+             If you have already sent the {subject}, paste its hash below. Otherwise wait \
+             for the cooldown to end, send it, then paste the hash here."
+        ),
+        (false, true) => format!(
+            "We could not reach the network to watch for your {subject} transaction. \
+             Wait for the cooldown above to end, send it from your wallet, then paste its \
+             hash below."
+        ),
     }
 }
 
