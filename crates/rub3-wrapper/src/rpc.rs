@@ -1044,8 +1044,8 @@ fn poll_for_mint(
 ///
 /// Polls `lastActivationBlock(tokenId)`. While it sits at or below
 /// `from_block`, which is the head when the screen was opened, nothing has
-/// happened; the moment it passes, the activation is in that block and the
-/// block is fetched to find which transaction it was.
+/// happened; the moment it passes, the activation is in that block and that one
+/// block is searched for the transaction that did it.
 ///
 /// **Which transaction, and why not the sender.** §5.1a describes picking the
 /// receipt whose `to` is the contract and whose `from` is the wallet, but the
@@ -1054,8 +1054,19 @@ fn poll_for_mint(
 /// the token this screen is waiting on rather than merely the account that paid
 /// for the gas. That also survives an activation relayed by someone else, which
 /// a `from` comparison would read as a stranger's transaction and miss.
-/// `to == contract` is kept as the cheap prefilter it was, so at most a handful
-/// of receipts in the block are ever fetched.
+///
+/// **And why one `eth_getLogs` rather than a receipt scan.** §5.1a sketches
+/// fetching the block's receipts and picking from them, which costs one
+/// `eth_getTransactionReceipt` per transaction in the block: a Base block holds
+/// hundreds, so the poll that finally sees the activation would fire hundreds
+/// of sequential requests at the user's endpoint, and a single failure among
+/// them would end the poll and start the whole scan over. Asking for the block
+/// with its transactions inlined instead would let `to` be read without a
+/// receipt, but a Base block also carries the OP-stack deposit transaction,
+/// whose `0x7e` type this provider's Ethereum types refuse to decode. The
+/// indexed log the event already emits answers the question in one request on
+/// any chain, and it is the same shape [`watch_for_mint`] uses. A reverted
+/// activation emits nothing, so the revert check comes for free.
 #[cfg(feature = "onchain-write")]
 pub fn watch_for_activate(
     rpc_url: &str,
@@ -1071,9 +1082,10 @@ pub fn watch_for_activate(
     )
 }
 
-/// One `lastActivationBlock` read, plus the block scan when it has moved.
-/// `Ok(None)` means no activation yet, or one whose transaction could not be
-/// pinned down - a reorg between the two reads, which the next poll resolves.
+/// One `lastActivationBlock` read, plus the one-block log query when it has
+/// moved. `Ok(None)` means no activation yet, or one whose transaction could
+/// not be pinned down - a reorg between the two reads, which the next poll
+/// resolves.
 #[cfg(feature = "onchain-write")]
 fn poll_for_activate(
     rpc_url: &str,
@@ -1081,7 +1093,7 @@ fn poll_for_activate(
     token_id: u64,
     from_block: u64,
 ) -> Result<Option<String>, RpcError> {
-    use alloy::rpc::types::BlockTransactionsKind;
+    use alloy::rpc::types::Filter;
     use alloy::sol_types::SolEvent;
 
     block_on(async move {
@@ -1103,43 +1115,42 @@ fn poll_for_activate(
             return Ok(None);
         }
 
-        let block = match provider
-            .get_block_by_number(last.into())
-            .kind(BlockTransactionsKind::Hashes)
-            .await
-            .map_err(RpcError::transport)?
-        {
-            Some(b) => b,
-            None => return Ok(None),
-        };
-
         let token_topic: B256 = U256::from(token_id).into();
+
+        // Pinned to the one block `lastActivationBlock` named, so the query
+        // stays a single bounded request whatever the node's range limits are.
+        let filter = Filter::new()
+            .address(contract)
+            .from_block(last)
+            .to_block(last)
+            .event_signature(IRub3License::Activated::SIGNATURE_HASH)
+            .topic1(token_topic);
+
+        let logs = provider
+            .get_logs(&filter)
+            .await
+            .map_err(RpcError::transport)?;
+
         let mut found = None;
 
-        for tx_hash in block.transactions.hashes() {
-            let receipt = match provider
-                .get_transaction_receipt(tx_hash)
-                .await
-                .map_err(RpcError::transport)?
+        // The node did the matching, and it is checked again here for the same
+        // reason `poll_for_mint` rechecks its own: what comes back decides
+        // which transaction a session is issued against, and a filter honoured
+        // loosely would hand this screen somebody else's activation.
+        for log in logs {
+            let topics = log.topics();
+            if log.address() != contract
+                || topics.len() != 3
+                || topics[0] != IRub3License::Activated::SIGNATURE_HASH
+                || topics[1] != token_topic
             {
-                Some(r) => r,
-                None => continue,
-            };
-            if receipt.to != Some(contract) || !receipt.status() {
                 continue;
             }
-            let activated = receipt.inner.logs().iter().any(|log| {
-                let topics = log.topics();
-                log.address() == contract
-                    && topics.len() == 3
-                    && topics[0] == IRub3License::Activated::SIGNATURE_HASH
-                    && topics[1] == token_topic
-            });
             // Last one wins: if a block somehow holds two activations of this
             // token, the one that left `lastActivationBlock` where it is now is
             // the later of them.
-            if activated {
-                found = Some(format!("0x{}", hex::encode(tx_hash.as_slice())));
+            if let Some(hash) = log.transaction_hash {
+                found = Some(format!("0x{}", hex::encode(hash.as_slice())));
             }
         }
 
@@ -2858,82 +2869,23 @@ mod watch_rpc_tests {
 
     // ── watch_for_activate ───────────────────────────────────────────────────
 
-    /// A node whose `lastActivationBlock` sits at `last`, holding one block of
-    /// `transactions` whose receipts are `receipts`.
-    fn activation_node(
-        last: u64,
-        transactions: Vec<&'static str>,
-        receipts: serde_json::Value,
-    ) -> StubNode {
-        StubNode::routed(move |method, params| match method {
+    /// A node whose `lastActivationBlock` sits at `last`, and whose activation
+    /// block answers a log query with `logs`.
+    fn activation_node(last: u64, logs: serde_json::Value) -> StubNode {
+        StubNode::routed(move |method, _params| match method {
             // The only `eth_call` this flow makes.
             "eth_call" => serde_json::json!(format!("0x{last:064x}")),
-            "eth_getBlockByNumber" => block_header(last, &transactions),
-            "eth_getTransactionReceipt" => {
-                let wanted = params[0].as_str().unwrap_or_default();
-                receipts
-                    .get(wanted)
-                    .cloned()
-                    .unwrap_or(serde_json::json!(null))
-            }
+            "eth_getLogs" => logs.clone(),
             _ => serde_json::json!(null),
         })
     }
 
-    /// A block header carrying `transactions`, with every field alloy insists
-    /// on present. Spelled out in full because a header missing one of them
-    /// fails to deserialize, and the watch reads that as a node that did not
-    /// answer - a green test that proves nothing.
-    fn block_header(number: u64, transactions: &[&'static str]) -> serde_json::Value {
-        const ZERO_HASH: &str =
-            "0x0000000000000000000000000000000000000000000000000000000000000000";
-        serde_json::json!({
-            "hash": "0x0000000000000000000000000000000000000000000000000000000000000042",
-            "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000041",
-            "sha3Uncles": ZERO_HASH,
-            "miner": "0x0000000000000000000000000000000000000000",
-            "stateRoot": ZERO_HASH,
-            "transactionsRoot": ZERO_HASH,
-            "receiptsRoot": ZERO_HASH,
-            "logsBloom": format!("0x{:0>512}", ""),
-            "difficulty": "0x0",
-            "number": format!("0x{number:x}"),
-            "gasLimit": "0x1c9c380",
-            "gasUsed": "0x5208",
-            "timestamp": "0x66000000",
-            "extraData": "0x",
-            "mixHash": ZERO_HASH,
-            "nonce": "0x0000000000000000",
-            "baseFeePerGas": "0x1",
-            "transactions": transactions,
-        })
-    }
-
-    /// One receipt carrying `logs`, as a node returns it.
-    fn receipt(tx: &str, to: &str, status: &str, logs: serde_json::Value) -> serde_json::Value {
-        serde_json::json!({
-            "type": "0x2",
-            "transactionHash": tx,
-            "transactionIndex": "0x0",
-            "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000042",
-            "blockNumber": "0x2a",
-            "from": BUYER.to_lowercase(),
-            "to": to,
-            "cumulativeGasUsed": "0x1",
-            "gasUsed": "0x1",
-            "effectiveGasPrice": "0x1",
-            "contractAddress": null,
-            "logs": logs,
-            "logsBloom": format!("0x{:0>512}", ""),
-            "status": status,
-        })
-    }
-
-    /// The `Activated(tokenId, owner, sessionId)` log the wrapper looks for.
-    fn activated_log(token_id: u64, tx: &str) -> serde_json::Value {
+    /// The `Activated(tokenId, owner, sessionId)` log the wrapper looks for, as
+    /// `emitter` emitted it.
+    fn activated_log(emitter: &str, token_id: u64, tx: &str) -> serde_json::Value {
         use alloy::sol_types::SolEvent;
         serde_json::json!({
-            "address": CONTRACT.to_lowercase(),
+            "address": emitter.to_lowercase(),
             "topics": [
                 format!("0x{}", hex::encode(IRub3License::Activated::SIGNATURE_HASH.as_slice())),
                 format!("0x{token_id:064x}"),
@@ -2955,20 +2907,54 @@ mod watch_rpc_tests {
     fn an_advanced_activation_block_resolves_to_its_transaction() {
         let node = activation_node(
             42,
-            vec![ACTIVATE_TX],
-            serde_json::json!({
-                ACTIVATE_TX: receipt(
-                    ACTIVATE_TX,
-                    &CONTRACT.to_lowercase(),
-                    "0x1",
-                    serde_json::json!([activated_log(TOKEN_ID, ACTIVATE_TX)]),
-                ),
-            }),
+            serde_json::json!([activated_log(CONTRACT, TOKEN_ID, ACTIVATE_TX)]),
         );
 
         let hash = watch_for_activate(&node.url, contract(), TOKEN_ID, 40, brief())
             .expect("an advanced activation block must resolve");
         assert_eq!(hash, ACTIVATE_TX);
+    }
+
+    /// Resolving the activation costs one request, whatever the block holds.
+    ///
+    /// The receipt scan this replaced read every transaction in the block to
+    /// learn its `to`, which on Base is hundreds of sequential requests inside
+    /// one poll; any one of them failing ended the poll, and the next one
+    /// started the scan again against an endpoint that was already rate
+    /// limiting. What a poll is allowed to ask for is therefore asserted here
+    /// rather than left to a comment above the function.
+    #[test]
+    fn resolving_the_activation_never_fans_out_over_the_block() {
+        use std::sync::{Arc, Mutex};
+
+        let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&asked);
+        let node = StubNode::routed(move |method, _params| {
+            recorder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(method.to_string());
+            match method {
+                "eth_call" => serde_json::json!(format!("0x{:064x}", 42)),
+                "eth_getLogs" => {
+                    serde_json::json!([activated_log(CONTRACT, TOKEN_ID, ACTIVATE_TX)])
+                }
+                _ => serde_json::json!(null),
+            }
+        });
+
+        let hash = poll_for_activate(&node.url, contract(), TOKEN_ID, 40)
+            .expect("the poll must reach the node")
+            .expect("the activation is in the block it named");
+        assert_eq!(hash, ACTIVATE_TX);
+
+        let asked = asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(
+            asked,
+            ["eth_call", "eth_getLogs"],
+            "a poll asks where the activation is, then what is in that block, \
+             and nothing else",
+        );
     }
 
     /// The block the token was last activated in is where it already sat when
@@ -2980,15 +2966,7 @@ mod watch_rpc_tests {
         for last in [39, 40] {
             let node = activation_node(
                 last,
-                vec![ACTIVATE_TX],
-                serde_json::json!({
-                    ACTIVATE_TX: receipt(
-                        ACTIVATE_TX,
-                        &CONTRACT.to_lowercase(),
-                        "0x1",
-                        serde_json::json!([activated_log(TOKEN_ID, ACTIVATE_TX)]),
-                    ),
-                }),
+                serde_json::json!([activated_log(CONTRACT, TOKEN_ID, ACTIVATE_TX)]),
             );
             let err = watch_for_activate(&node.url, contract(), TOKEN_ID, 40, brief())
                 .expect_err("an activation at or before the start block is the old one");
@@ -3000,22 +2978,19 @@ mod watch_rpc_tests {
         }
     }
 
-    /// A block holding somebody else's activation of a different token must not
-    /// be mistaken for this screen's. The token id is indexed on the event,
-    /// which is what makes the distinction available at all.
+    /// Somebody else's activation of a different token must not be mistaken for
+    /// this screen's. The token id is indexed on the event, which is what makes
+    /// the distinction available at all.
+    ///
+    /// The filter that goes out already pins that topic, so a node answering
+    /// this way is a node answering loosely. That is the case worth asserting:
+    /// what comes back decides which transaction a session is issued against,
+    /// so the wrapper checks it again rather than trusting the endpoint.
     #[test]
     fn another_tokens_activation_in_the_same_block_is_ignored() {
         let node = activation_node(
             42,
-            vec![OTHER_TX],
-            serde_json::json!({
-                OTHER_TX: receipt(
-                    OTHER_TX,
-                    &CONTRACT.to_lowercase(),
-                    "0x1",
-                    serde_json::json!([activated_log(TOKEN_ID + 1, OTHER_TX)]),
-                ),
-            }),
+            serde_json::json!([activated_log(CONTRACT, TOKEN_ID + 1, OTHER_TX)]),
         );
 
         let err = watch_for_activate(&node.url, contract(), TOKEN_ID, 40, brief())
@@ -3023,49 +2998,39 @@ mod watch_rpc_tests {
         assert_eq!(end_of(&err), WatchEnd::Timeout);
     }
 
-    /// A transaction that reverted did not activate anything, whatever else is
-    /// in the block.
+    /// And neither is an `Activated` some other contract emitted, however
+    /// loosely the endpoint reads the address the filter pins.
     #[test]
-    fn a_reverted_transaction_is_never_the_activation() {
+    fn an_activation_from_another_contract_is_ignored() {
         let node = activation_node(
             42,
-            vec![ACTIVATE_TX],
-            serde_json::json!({
-                ACTIVATE_TX: receipt(
-                    ACTIVATE_TX,
-                    &CONTRACT.to_lowercase(),
-                    "0x0",
-                    serde_json::json!([activated_log(TOKEN_ID, ACTIVATE_TX)]),
-                ),
-            }),
+            serde_json::json!([activated_log(
+                "0x000000000000000000000000000000000000beef",
+                TOKEN_ID,
+                OTHER_TX
+            )]),
         );
 
         let err = watch_for_activate(&node.url, contract(), TOKEN_ID, 40, brief())
-            .expect_err("a reverted transaction activates nothing");
+            .expect_err("another contract's Activated is not this licence's");
         assert_eq!(end_of(&err), WatchEnd::Timeout);
     }
 
-    /// A block with unrelated traffic in it: only the transaction that went to
-    /// the licence contract and emitted the right `Activated` is picked out.
+    /// A block with unrelated traffic in it: only the log that came from the
+    /// licence contract and named this token is picked out.
     #[test]
-    fn the_activation_is_found_among_unrelated_transactions() {
+    fn the_activation_is_found_among_unrelated_logs() {
         let node = activation_node(
             42,
-            vec![OTHER_TX, ACTIVATE_TX],
-            serde_json::json!({
-                OTHER_TX: receipt(
-                    OTHER_TX,
+            serde_json::json!([
+                activated_log(
                     "0x000000000000000000000000000000000000beef",
-                    "0x1",
-                    serde_json::json!([]),
+                    TOKEN_ID,
+                    OTHER_TX
                 ),
-                ACTIVATE_TX: receipt(
-                    ACTIVATE_TX,
-                    &CONTRACT.to_lowercase(),
-                    "0x1",
-                    serde_json::json!([activated_log(TOKEN_ID, ACTIVATE_TX)]),
-                ),
-            }),
+                activated_log(CONTRACT, TOKEN_ID + 1, OTHER_TX),
+                activated_log(CONTRACT, TOKEN_ID, ACTIVATE_TX),
+            ]),
         );
 
         let hash = watch_for_activate(&node.url, contract(), TOKEN_ID, 40, brief())

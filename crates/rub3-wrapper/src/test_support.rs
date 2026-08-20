@@ -52,10 +52,10 @@ impl StubNode {
     /// A node that answers each JSON-RPC call from its method name.
     ///
     /// What [`StubNode::serving`] cannot do: a flow that makes several
-    /// different calls in one poll - `lastActivationBlock`, then
-    /// `eth_getBlockByNumber`, then a receipt - needs a different answer to
-    /// each, and one canned body would have the first call's shape stand in
-    /// for all three. The responder returns the JSON-RPC `result` only.
+    /// different calls in one poll - `lastActivationBlock`, then the logs of
+    /// the block it named - needs a different answer to each, and one canned
+    /// body would have the first call's shape stand in for both. The responder
+    /// returns the JSON-RPC `result` only.
     #[cfg_attr(not(feature = "onchain-write"), allow(dead_code))]
     pub fn routed<F>(responder: F) -> Self
     where

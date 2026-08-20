@@ -255,6 +255,48 @@ fn an_unreachable_node_lands_on_the_manual_tab() {
     );
 }
 
+/// A watch cancelled while it is mid-request says nothing at all.
+///
+/// The silence on cancellation cannot be read off the error. A watch starts by
+/// reading the head, and a cancel raised while that request is in flight
+/// surfaces as whatever the request failed with, not as `WatchEnded(Cancelled)`.
+/// Reporting it would write "we could not reach the network" and a manual-tab
+/// switch into a screen the user has already left, on a watch that was stopped
+/// on purpose.
+///
+/// The node here answers slowly so the cancel reliably lands inside that first
+/// request, and then answers with something unusable so the request fails.
+#[test]
+fn a_watch_cancelled_mid_request_reports_nothing() {
+    const ANSWER_AFTER: Duration = Duration::from_millis(750);
+    const CANCEL_AFTER: Duration = Duration::from_millis(150);
+
+    let node = StubNode::routed(|_method, _params| {
+        std::thread::sleep(ANSWER_AFTER);
+        // Not a block number, so the head read this watch begins with fails.
+        serde_json::Value::Null
+    });
+    let window = window_on(&node.url);
+
+    window.post(serde_json::json!({
+        "type":          "auto_watch_start",
+        "kind":          "mint",
+        "owner_address": WALLET,
+        "token_id":      serde_json::Value::Null,
+    }));
+    std::thread::sleep(CANCEL_AFTER);
+    window.post(serde_json::json!({ "type": "auto_watch_cancel" }));
+
+    // Long enough for the failing request to come back and be reported, if it
+    // were going to be.
+    std::thread::sleep(ANSWER_AFTER + Duration::from_millis(750));
+    let calls = window.drain();
+    assert!(
+        calls.is_empty(),
+        "a cancelled watch must say nothing, but it said {calls:?}",
+    );
+}
+
 /// A watch that ran out of time says something different from one that could
 /// not reach the endpoint, and neither tells anyone to send a second time.
 ///

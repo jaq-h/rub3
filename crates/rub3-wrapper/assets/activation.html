@@ -554,7 +554,9 @@
 
   let currentScreen = null;
 
-  function show(name) {
+  // `tabSecs` is the auto-detect budget the wrapper reported, and is read only
+  // by the two screens that have tabs.
+  function show(name, tabSecs) {
     // A screen change is one of the two ways an auto-detect watch ends (the
     // other is the user picking a different tab). Leaving is handled here
     // rather than at each call site so that no future screen transition can
@@ -564,6 +566,12 @@
     SCREENS.forEach(s => {
       document.getElementById('screen-' + s).classList.toggle('hidden', s !== name);
     });
+    // And the incoming screen's tabs are reset here, after that, rather than by
+    // the caller before it. resetTabs starts the new watch, the leaveScreen
+    // above cancels the old one, and the wrapper holds a single watch slot that
+    // the last message wins: reset first and the outgoing screen's cancel would
+    // stop the watch the incoming screen had just started.
+    if (TAB_SCREENS.indexOf(name) !== -1) resetTabs(name, tabSecs);
   }
 
   function setError(id, msg) {
@@ -627,6 +635,12 @@
   const autoWatchSecs = { purchase: null, cooldown: null };
   const activeTab     = { purchase: null, cooldown: null };
 
+  // When the cooldown on screen is expected to end, as a wall-clock stamp, or 0
+  // when it already has. The watch outlives short cooldowns and expires inside
+  // long ones, so what the fallback should say depends on which of the two this
+  // turned out to be. Same estimate the screen itself shows: ~2 s per block.
+  let cooldownEndsAt = 0;
+
   function screenEl(screen) {
     return document.getElementById('screen-' + screen);
   }
@@ -635,8 +649,8 @@
     return name === 'auto' ? autoWatchSecs[screen] !== null : true;
   }
 
-  // Called by each onShow… handler once its screen is populated: decides which
-  // tabs this build offers and lands on the best of them.
+  // Called by show() once the screen it belongs to is the current one: decides
+  // which tabs this build offers and lands on the best of them.
   function resetTabs(screen, secs) {
     autoWatchSecs[screen] = (typeof secs === 'number' && secs > 0) ? secs : null;
 
@@ -698,6 +712,21 @@
     bar.style.animation = 'none';
     void bar.offsetWidth;                       // reflow, so the restart takes
     bar.style.animation = 'drain ' + secs + 's linear forwards';
+  }
+
+  // What the manual tab says once a watch has given up. Usually the wrapper's
+  // own sentence, which knows how long it watched and what for. The one thing it
+  // cannot know is the cooldown: it has no view of how many blocks are left, and
+  // its "send it now" would be asking for a transaction the contract still
+  // reverts, which costs the person gas and gets them nothing.
+  function autoWatchHint(screen, data) {
+    if (screen !== 'cooldown' || Date.now() >= cooldownEndsAt) return data.detail;
+    return data.reason === 'timeout'
+      ? 'We stopped watching the chain, and the cooldown above has not ended yet. '
+        + 'If you have already sent the activation, paste its hash below. Otherwise wait for '
+        + 'the cooldown to end, send it, then paste the hash here.'
+      : 'We could not reach the network to watch for your activation transaction. Wait for '
+        + 'the cooldown above to end, send it from your wallet, then paste its hash below.';
   }
 
   function setTabHint(screen, text) {
@@ -826,10 +855,7 @@
       document.getElementById('p-tx-input').value = '';
       clearError('p-error');
 
-      // Before show(): resetTabs starts the auto-detect watch, and the screen
-      // it belongs to has to be the one the next leaveScreen() sees.
-      resetTabs('purchase', data.autoWatchSecs);
-      show('purchase');
+      show('purchase', data.autoWatchSecs);
     },
 
     // The contract's code did not verify, so no purchase is offered at all.
@@ -888,6 +914,7 @@
       const waitBox       = document.getElementById('cd-wait');
       const blocksDisplay = document.getElementById('cd-blocks-remaining');
       const cooling       = !data.ready && data.blocksRemaining > 0;
+      cooldownEndsAt      = cooling ? Date.now() + data.blocksRemaining * 2000 : 0;
       if (cooling) {
         waitBox.classList.remove('hidden');
         blocksDisplay.textContent =
@@ -905,8 +932,7 @@
         ? 'The contract will accept the transaction once the cooldown above ends. Send it then; we are watching the chain and will pick it up on our own.'
         : 'Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.';
 
-      resetTabs('cooldown', data.autoWatchSecs);
-      show('cooldown');
+      show('cooldown', data.autoWatchSecs);
     },
 
     // Tier 3 - activate() tx confirmed; switch to session-signing screen.
@@ -960,7 +986,7 @@
     // data: { kind: 'mint' | 'activate', reason: 'timeout' | 'rpc', detail }
     onAutoWatchEnded(data) {
       const screen = data.kind === 'mint' ? 'purchase' : 'cooldown';
-      setTabHint(screen, data.detail);
+      setTabHint(screen, autoWatchHint(screen, data));
       selectTab(screen, 'manual');
       const input = document.getElementById(screen === 'purchase' ? 'p-tx-input' : 'cd-tx-input');
       if (input) input.focus();

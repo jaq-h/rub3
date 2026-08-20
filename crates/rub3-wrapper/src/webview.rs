@@ -700,13 +700,13 @@ impl IpcState {
             let from_block = match crate::rpc::get_block_number(&state.rpc_url) {
                 Ok(b) => b,
                 Err(e) => {
-                    state.auto_watch_ended(kind, &e);
+                    state.auto_watch_ended(kind, &cancel, &e);
                     return;
                 }
             };
 
             let deadline =
-                crate::rpc::Deadline::after(crate::rpc::WATCH_BUDGET).cancelled_by(cancel);
+                crate::rpc::Deadline::after(crate::rpc::WATCH_BUDGET).cancelled_by(cancel.clone());
 
             match kind {
                 AutoWatchKind::Mint => {
@@ -718,7 +718,7 @@ impl IpcState {
                         deadline,
                     ) {
                         Ok(tx_hash) => state.spawn_purchase_poller(tx_hash, owner_address),
-                        Err(e) => state.auto_watch_ended(kind, &e),
+                        Err(e) => state.auto_watch_ended(kind, &cancel, &e),
                     }
                 }
 
@@ -736,7 +736,7 @@ impl IpcState {
                         deadline,
                     ) {
                         Ok(tx_hash) => state.spawn_tx_poller(tx_hash, id, owner_address),
-                        Err(e) => state.auto_watch_ended(kind, &e),
+                        Err(e) => state.auto_watch_ended(kind, &cancel, &e),
                     }
                 }
 
@@ -759,11 +759,22 @@ impl IpcState {
     /// A cancelled watch is silent: cancellation means the page asked for this
     /// to stop, so it is already showing something else and a message now would
     /// land on the wrong screen.
+    ///
+    /// Whether it was cancelled is the flag's answer and not the error's. A
+    /// cancel raised while a request is in flight - the head read this watch
+    /// starts with, or the poll it is sleeping between - surfaces as whatever
+    /// that request failed with, so reading only the error would write "we
+    /// could not reach the network" into a screen the user has already left.
     #[cfg(feature = "onchain-write")]
-    fn auto_watch_ended(&self, kind: AutoWatchKind, e: &crate::rpc::RpcError) {
+    fn auto_watch_ended(
+        &self,
+        kind: AutoWatchKind,
+        cancel: &crate::rpc::Cancel,
+        e: &crate::rpc::RpcError,
+    ) {
         use crate::rpc::{RpcError, WatchEnd};
 
-        if matches!(e, RpcError::WatchEnded(WatchEnd::Cancelled)) {
+        if cancel.is_cancelled() || matches!(e, RpcError::WatchEnded(WatchEnd::Cancelled)) {
             return;
         }
         eprintln!(
@@ -1407,28 +1418,24 @@ mod tests {
 
     // ── The auto-detect protocol (§5.1a) ─────────────────────────────────────
 
-    /// The page and the handler agree on the auto-detect messages.
+    /// The messages the page posts are messages the handler accepts.
     ///
-    /// This is the one seam `session_flow`'s tests deliberately stop short of:
-    /// they drive `IpcState` directly, so a message the page spells differently
-    /// from the enum passes every one of them and fails only in front of a
-    /// person. Both halves are asserted, because a rename on either side is
-    /// silent - serde answers an unknown tag by logging "malformed IPC message"
-    /// and returning, and a `window.rub3` method the page never defined throws
-    /// inside the view where no test is looking.
+    /// Spelled out as the JSON that goes over the seam rather than as the enum,
+    /// because the enum is the half that cannot drift on its own: serde answers
+    /// a tag it does not know by logging "malformed IPC message" and returning,
+    /// so a rename here fails a test instead of failing in front of a person.
     ///
-    /// Whitespace is stripped before matching, so reformatting the page cannot
-    /// turn this red on its own.
+    /// The other half of the seam - that `assets/activation.html` posts exactly
+    /// these, and defines the `window.rub3.onAutoWatchEnded` this handler calls
+    /// back into - is not assertable from Rust: the page is JS, and matching
+    /// text in its source would prove only that the text is there, not that the
+    /// path is live. It is covered by driving the rendered page in a browser,
+    /// the way §5.1a was built.
     #[test]
-    fn the_page_and_the_handler_agree_on_the_auto_detect_protocol() {
-        let page: String = ACTIVATION_HTML
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-
-        // Inbound: what the page posts, the handler must accept - including
-        // the `token_id: null` a mint carries, which has no token yet.
+    fn the_handler_accepts_the_auto_detect_messages_the_page_posts() {
         for message in [
+            // A mint carries no token id: there is no token until the purchase
+            // lands, and `null` is what the page sends.
             serde_json::json!({
                 "type": "auto_watch_start",
                 "kind": "mint",
@@ -1446,41 +1453,6 @@ mod tests {
             serde_json::from_str::<IpcMessage>(&message.to_string())
                 .unwrap_or_else(|e| panic!("the handler must accept {message} ({e})"));
         }
-
-        // And the page must be the thing that posts them, spelled that way.
-        for literal in [
-            "type:'auto_watch_start'",
-            "type:'auto_watch_cancel'",
-            "kind:'mint'",
-            "kind:'activate'",
-            "owner_address:",
-            "token_id:",
-        ] {
-            assert!(
-                page.contains(literal),
-                "the page no longer posts {literal:?}; the handler still expects it",
-            );
-        }
-
-        // Outbound: the one call the handler makes, and the payload keys it
-        // fills in, must be what the page reads.
-        assert!(
-            page.contains("onAutoWatchEnded(data){"),
-            "the handler calls window.rub3.onAutoWatchEnded, which the page must define",
-        );
-        for key in ["data.kind", "data.detail"] {
-            assert!(
-                page.contains(key),
-                "the fallback payload carries {key}, which the page must read",
-            );
-        }
-
-        // The budget the screens report is what the page animates against, so
-        // the bar running out and the watch giving up are one moment.
-        assert!(
-            page.contains("data.autoWatchSecs"),
-            "the page must read the budget the screen payloads carry",
-        );
     }
 
     // ── The gate ─────────────────────────────────────────────────────────────

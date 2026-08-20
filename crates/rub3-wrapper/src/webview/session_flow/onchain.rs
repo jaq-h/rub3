@@ -882,10 +882,11 @@ const WATCH_STARTUP_GRACE: Duration = Duration::from_millis(1000);
 /// continues exactly as a pasted hash would have continued.
 ///
 /// The chain read under test is `watch_for_activate`: `lastActivationBlock`
-/// moving past the head the screen opened at, then the block scanned for the
-/// transaction that moved it. The assertion that it found the *right* one is
-/// the hash comparison - a scan that picked any transaction in the block would
-/// pass a weaker check and produce a session bound to the wrong activation.
+/// moving past the head the screen opened at, then that one block queried for
+/// the `Activated` log naming this token. The assertion that it found the
+/// *right* transaction is the hash comparison - a resolution that picked
+/// anything else in the block would pass a weaker check and produce a session
+/// bound to the wrong activation.
 #[test]
 #[ignore = "requires anvil + forge + cast on PATH"]
 fn auto_detect_finds_the_activation_and_the_session_completes_e2e() {
