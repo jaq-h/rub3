@@ -357,11 +357,11 @@ pub static CANONICAL: &[CanonicalContract] = &[
         source: "contracts/src/Rub3Registry.sol",
         role: Role::DiscoveryRegistry,
         release: RELEASE,
-        masked_sha256: "60bae1d9b9263cae3fb4fc664edce6b44c5616818c7593bcf29b0d26ed129783",
+        masked_sha256: "e4fb0fde2d8f2e268d3dd69876786e46c6f6e49cb64ba50c4332a493dca2f3c7",
         immutable_ranges: &[
-            ImmutableRange { start: 902, length: 32 },
-            ImmutableRange { start: 1764, length: 32 },
-            ImmutableRange { start: 1885, length: 32 },
+            ImmutableRange { start: 996, length: 32 },
+            ImmutableRange { start: 2570, length: 32 },
+            ImmutableRange { start: 2691, length: 32 },
         ],
     },
     CanonicalContract {
@@ -1083,13 +1083,13 @@ fn sanitised(record: RegistryRecord) -> RegistryRecord {
 ///
 /// Sixteen is deliberately far above anything legitimate rather than tight. A
 /// table is per *code layout*, not per contract and not per release: the whole
-/// canonical set spans four, one each for `Rub3Access`, `Rub3Subscription` and
-/// `Rub3Factory` plus the empty one the two deployer helpers and the registry
-/// share. A fifth appears only when a future contract's immutables land at
-/// offsets none of those describe, so sixteen leaves room for many such
-/// releases live at once. Raise it when a real deployment needs more tables
-/// than this, never to accommodate a registry publishing tables no contract was
-/// deployed under.
+/// canonical set spans five, one each for `Rub3Access`, `Rub3Subscription`,
+/// `Rub3Factory` and `Rub3Registry` plus the empty one the two deployer helpers
+/// and `Rub3CodeRegistry` itself share. A sixth appears only when a future
+/// contract's immutables land at offsets none of those describe, so sixteen
+/// leaves room for many such releases live at once. Raise it when a real
+/// deployment needs more tables than this, never to accommodate a registry
+/// publishing tables no contract was deployed under.
 const MAX_CANDIDATE_OFFSET_TABLES: usize = 16;
 
 /// What the registry said about code the pinned table did not recognise.
@@ -1909,7 +1909,15 @@ mod tests {
     #[test]
     fn the_gate_refuses_canonical_code_that_sells_nothing() {
         let code = fake_code(256, 0x10);
-        for role in [Role::Factory, Role::Deployer, Role::CodeRegistry] {
+        for role in [
+            Role::Factory,
+            Role::Deployer,
+            Role::CodeRegistry,
+            // The discovery registry is the one a shopper is most likely to
+            // hand to a purchase by mistake: it is the address §3.2 tells an
+            // agent to read before it has a licence address at all.
+            Role::DiscoveryRegistry,
+        ] {
             let table = entry_for(&code, vec![], role);
             match gate(&code, table) {
                 Err(Refusal::NotALicence { role: refused, .. }) => {
@@ -2583,6 +2591,7 @@ mod tests {
             Some(Role::Factory),
             Some(Role::Deployer),
             Some(Role::CodeRegistry),
+            Some(Role::DiscoveryRegistry),
             // A role published by a registry newer than this build. Unknown is
             // refused too: a purchase may only target a role this binary can
             // name, and guessing at the first variant would make an unknown

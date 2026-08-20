@@ -81,6 +81,41 @@ import {Rub3License} from "./Rub3License.sol";
 /// are the two facts the chain does not carry yet - §3.1 puts `contentURI` on
 /// the licence contract, and this field is what a listing quotes until it does.
 ///
+/// The one field a card does not carry whole is the wrapper hash set, which the
+/// licence contract lets its owner grow without limit: {card} takes the newest
+/// {MAX_CARD_WRAPPER_HASHES} and reports the true total beside them, so a
+/// truncated answer is always distinguishable from a complete one and no
+/// listing's own publishing history can decide what reading a page of cards
+/// costs anybody else.
+///
+/// # Every read is available in a form whose cost the caller controls
+///
+/// Registration is permissionless for anyone holding a factory deploy, and
+/// nothing is ever removed from {registered} - delisting and suspension change
+/// an entry's flags. The set therefore only grows, and it grows at a rate
+/// strangers decide, so any read that scans all of it is on a clock that runs
+/// out. This contract cannot be redeployed to fix that later, so both forms of
+/// every such read exist from the start:
+///
+/// | Whole set | Bounded | What the bounded one gives up |
+/// |---|---|---|
+/// | {registered} | {registeredWindow} | nothing |
+/// | {rankedListings}, {rankedListingWindow} | {rankedRegistrationWindow} | a globally correct order |
+/// | {cards} | {cardWindow} | the same |
+///
+/// {rankedListingWindow} and {cards} are in the left column deliberately. They
+/// take a `start` and a `count` and look bounded, but those index into the
+/// global ranking, which has to be computed over everything before a page of it
+/// can be cut: they bound the response and not the work. That is a legitimate
+/// read - a globally correct page is worth paying for - and it is written on
+/// both of them so nobody has to find it out from a gas limit.
+///
+/// The bounded reads take their cursor over registration order instead, and rank
+/// only inside the window they were given. Paging through them does not
+/// reconstruct {rankedListings}; a caller that wants the global order from
+/// bounded calls collects the windows and ranks them off-chain, where
+/// {isRecognisedRail} is the same input this contract uses.
+///
 /// # Ranking, and why it must not be a snapshot
 ///
 /// The protocol fee accrues in whatever asset a licence contract lists as its
@@ -204,9 +239,23 @@ contract Rub3Registry is Ownable2Step {
         uint16 feeBps;
         /// Where that fee accrues. Frozen with {feeBps}.
         address treasury;
-        /// Every wrapper hash the licence contract has ever published, with its
-        /// status.
+        /// The most recently published wrapper hashes, in publication order,
+        /// with each one's status. At most {MAX_CARD_WRAPPER_HASHES} of them -
+        /// compare against {wrapperHashCount} to find out whether that is all
+        /// of them, or read {wrapperHashesTruncated}, which says the same thing
+        /// without arithmetic.
         WrapperHash[] wrapperHashes;
+        /// How many wrapper hashes the licence contract actually holds, whether
+        /// or not they fit above.
+        ///
+        /// Reported next to the capped array so a partial answer is never
+        /// mistaken for a complete one. A card that quietly returned a short
+        /// list would tell an agent that a hash it holds was never published,
+        /// which is the one wrong answer this field exists to prevent.
+        uint256 wrapperHashCount;
+        /// True when {wrapperHashes} is a suffix of the published set rather
+        /// than the whole of it.
+        bool wrapperHashesTruncated;
         uint64 registeredAtBlock;
     }
 
@@ -226,6 +275,30 @@ contract Rub3Registry is Ownable2Step {
     ///         this contract be listed" - and a future factory that tightened its
     ///         own rule must not silently delist nine generations of apps here.
     uint256 public constant MAX_FACTORY_GENERATION_HOPS = 8;
+
+    /// @notice How many wrapper hashes {card} will assemble onto one card.
+    ///
+    ///         `Rub3License.addWrapperHash` is append-only and uncapped, and the
+    ///         status of each hash is a separate read. Without a bound here, a
+    ///         licence owner who published a large enough hash set could make
+    ///         their own card - and therefore any {cardWindow} or {cards} page
+    ///         containing it - run out of gas. That would be one listing's owner
+    ///         deciding that unrelated listings sharing their page stop being
+    ///         readable, which is a reach into other people's discoverability
+    ///         that no listing owner gets to have.
+    ///
+    ///         The cap is on the card, never on the licence contract: the full
+    ///         set stays published and readable there through
+    ///         `wrapperHashCount()` and `wrapperHashAt(index)`, and a card says
+    ///         how many there are ({AgentCard-wrapperHashCount}) so a caller can
+    ///         always tell a capped answer from a complete one.
+    ///
+    ///         The *newest* hashes are the ones kept, for the same reason
+    ///         {Rub3CodeRegistry.latestOffsetTables} spends its budget from that
+    ///         end: a buyer checking the build it just downloaded is asking
+    ///         about the most recently published hash, so a card truncated from
+    ///         the old end would drop exactly the entries the question is about.
+    uint256 public constant MAX_CARD_WRAPPER_HASHES = 32;
 
     /// @notice The canonical {Rub3Factory} this registry trusts, frozen at
     ///         deploy.
@@ -448,8 +521,41 @@ contract Rub3Registry is Ownable2Step {
 
     /// @notice Every address ever registered, in registration order, listed or
     ///         not. Only grows.
+    ///
+    ///         **Unbounded, and it is the caller's job to know that.**
+    ///         Registration is permissionless for anyone holding a factory
+    ///         deploy and nothing is ever removed, so this response grows
+    ///         without limit and eventually stops fitting a node's `eth_call`
+    ///         budget. That is what an indexer walking the whole set wants and
+    ///         what a caller with a deadline must not use; {registeredWindow} is
+    ///         the bounded form.
     function registered() external view returns (address[] memory) {
         return _registered;
+    }
+
+    /// @notice At most `count` registered addresses starting at `start`, in
+    ///         registration order.
+    ///
+    ///         The bounded form of {registered}: the work and the response are
+    ///         both the caller's `count`, never the size of the set.
+    ///
+    ///         Clamped rather than strict, so one call is enough and no reader
+    ///         needs {registeredCount} first: a `start` past the end returns
+    ///         nothing and a `count` past the end returns what is left.
+    function registeredWindow(uint256 start, uint256 count)
+        public
+        view
+        returns (address[] memory window)
+    {
+        uint256 total = _registered.length;
+        if (start >= total) return new address[](0);
+
+        uint256 available = total - start;
+        uint256 taken = count < available ? count : available;
+        window = new address[](taken);
+        for (uint256 i = 0; i < taken; i++) {
+            window[i] = _registered[start + i];
+        }
     }
 
     /// @notice How many addresses {registered} would return.
@@ -536,10 +642,15 @@ contract Rub3Registry is Ownable2Step {
     ///         ordering inside a group - by price, by age, by anything - would
     ///         be a ranking policy nobody asked for and nobody could audit.
     ///
-    ///         Each entry costs one `priceToken()` read, taken at call time.
-    ///         This returns the whole set, which is what an indexer wants and
-    ///         what a caller with a deadline should not use as the set grows;
-    ///         {rankedListingWindow} is the bounded form.
+    ///         **Unbounded in work as well as in response.** Each entry costs
+    ///         one `priceToken()` read taken at call time, and this scans every
+    ///         registered address to produce a globally correct order. That is
+    ///         what an indexer wants and what a caller with a deadline must not
+    ///         use: registration is permissionless and nothing is ever removed,
+    ///         so the cost of this call grows without limit.
+    ///         {rankedRegistrationWindow} is the form whose *work* is bounded.
+    ///         {rankedListingWindow} is not - it bounds only the response, and
+    ///         its doc says so.
     function rankedListings() public view returns (address[] memory ranked) {
         uint256 total = _registered.length;
 
@@ -577,14 +688,26 @@ contract Rub3Registry is Ownable2Step {
     /// @notice At most `count` listed applications starting at `start`, in the
     ///         order {rankedListings} returns them.
     ///
+    ///         **This bounds the response, not the cost.** `start` and `count`
+    ///         index into the global ranking, so producing them means computing
+    ///         that ranking first: this call reads every registered entry's
+    ///         quote no matter how small a page is asked for, and costs exactly
+    ///         what {rankedListings} costs. It is a globally correct page, and
+    ///         it is not a defence against the set growing.
+    ///
+    ///         A caller that needs its cost bounded wants
+    ///         {rankedRegistrationWindow}, which pays for a globally correct
+    ///         order by not providing one. Both exist because that trade is
+    ///         real and neither answer is right for everybody: pick the one
+    ///         whose failure mode you can live with.
+    ///
     ///         Clamped rather than strict, so a reader needs no second call to
     ///         find out how many there are: a `start` past the end returns
     ///         nothing and a `count` past the end returns what is left.
     ///
     /// @dev    The rank is computed over the whole set before the window is cut,
     ///         because a page of a ranking that was only ranked within the page
-    ///         is not a page of that ranking. The bound is on what the caller
-    ///         transfers and decodes, not on what this contract reads.
+    ///         is not a page of that ranking.
     function rankedListingWindow(uint256 start, uint256 count)
         public
         view
@@ -601,6 +724,80 @@ contract Rub3Registry is Ownable2Step {
         }
     }
 
+    /// @notice The listed applications among the `count` addresses registered
+    ///         from position `start`, ranked **within that window**: entries
+    ///         quoting a recognised rail first, then entries that do not, each
+    ///         group in registration order.
+    ///
+    ///         The read whose cost a caller controls. `start` and `count` are a
+    ///         cursor over {registered} - registration order, the one ordering
+    ///         this contract stores - so this scans at most `count` entries and
+    ///         makes at most one `priceToken()` read per listed entry among
+    ///         them. Nothing it costs depends on how large the registry has
+    ///         grown, which is what makes it the read a purchase path and a
+    ///         listing page can keep using.
+    ///
+    ///         **The order is local to the window, and cannot be assembled into
+    ///         a global one.** Reading this is not a page of {rankedListings}
+    ///         and paging through it does not reconstruct that list: an entry
+    ///         quoting an unrecognised rail in an early window still comes back
+    ///         before a recognised entry from a later one, because no window can
+    ///         know what the others hold without reading them. A caller that
+    ///         needs a globally correct order has two honest options and no
+    ///         third: pay for it with {rankedListings} or {rankedListingWindow},
+    ///         or collect the windows and rank them itself off-chain, where
+    ///         {isRecognisedRail} gives it the same input this uses.
+    ///
+    ///         The returned array is shorter than `count` whenever the window
+    ///         contains delisted, suspended or never-listed entries, so its
+    ///         length says nothing about how far the cursor moved. Advance by
+    ///         `count`, not by `window.length`.
+    ///
+    ///         Clamped rather than strict, exactly like {registeredWindow}: a
+    ///         `start` past the end returns nothing and a `count` past the end
+    ///         stops at the end, so one call is enough and no caller needs
+    ///         {registeredCount} first.
+    function rankedRegistrationWindow(uint256 start, uint256 count)
+        public
+        view
+        returns (address[] memory window)
+    {
+        uint256 total = _registered.length;
+        if (start >= total) return new address[](0);
+
+        uint256 available = total - start;
+        uint256 scanned = count < available ? count : available;
+
+        // One pass to read every quote in the window, for the same reason
+        // {rankedListings} does it: reading a contract twice could otherwise
+        // produce a self-inconsistent order if a quote moved between passes.
+        bool[] memory recognised = new bool[](scanned);
+        uint256 listedCount;
+        uint256 recognisedCount;
+        for (uint256 i = 0; i < scanned; i++) {
+            address license = _registered[start + i];
+            if (!isListed(license)) continue;
+            listedCount++;
+            if (isRecognisedRail(license)) {
+                recognised[i] = true;
+                recognisedCount++;
+            }
+        }
+
+        window = new address[](listedCount);
+        uint256 top;
+        uint256 bottom = recognisedCount;
+        for (uint256 i = 0; i < scanned; i++) {
+            address license = _registered[start + i];
+            if (!isListed(license)) continue;
+            if (recognised[i]) {
+                window[top++] = license;
+            } else {
+                window[bottom++] = license;
+            }
+        }
+    }
+
     /// @notice The full agent card for `license`, assembled from live reads.
     ///
     ///         Answers for an unregistered address too, with
@@ -610,6 +807,11 @@ contract Rub3Registry is Ownable2Step {
     ///         and refusing it would push that agent back onto whatever it was
     ///         told the price was.
     ///
+    ///         Bounded work: {MAX_CARD_WRAPPER_HASHES} caps the hash set, so no
+    ///         listing's own published history can decide what one of these
+    ///         costs. The cap is reported next to the true total rather than
+    ///         applied silently - see {AgentCard-wrapperHashCount}.
+    ///
     /// @dev    Reverts if `license` is not a licence contract, because every
     ///         field below one is read off it. Card assembly is not the place to
     ///         guess at a contract that cannot answer.
@@ -617,13 +819,16 @@ contract Rub3Registry is Ownable2Step {
         Listing storage entry = _listings[license];
         Rub3License lic = Rub3License(license);
 
-        bytes32[] memory hashes = lic.wrapperHashList();
-        WrapperHash[] memory published = new WrapperHash[](hashes.length);
-        for (uint256 i = 0; i < hashes.length; i++) {
-            published[i] = WrapperHash({
-                hash: hashes[i],
-                status: uint8(lic.wrapperHashes(hashes[i]))
-            });
+        // Deliberately not `wrapperHashList()`: that returns the whole set, and
+        // the point of the cap is that this call's cost does not follow it.
+        uint256 hashCount = lic.wrapperHashCount();
+        uint256 taken = hashCount < MAX_CARD_WRAPPER_HASHES ? hashCount : MAX_CARD_WRAPPER_HASHES;
+        uint256 skipped = hashCount - taken;
+
+        WrapperHash[] memory published = new WrapperHash[](taken);
+        for (uint256 i = 0; i < taken; i++) {
+            bytes32 hash = lic.wrapperHashAt(skipped + i);
+            published[i] = WrapperHash({hash: hash, status: uint8(lic.wrapperHashes(hash))});
         }
 
         address token = priceTokenOf(license);
@@ -644,20 +849,62 @@ contract Rub3Registry is Ownable2Step {
             tbaImplementation: lic.tbaImplementation(),
             feeBps:            lic.feeBps(),
             treasury:          lic.treasury(),
-            wrapperHashes:     published,
-            registeredAtBlock: entry.registeredAtBlock
+            wrapperHashes:          published,
+            wrapperHashCount:       hashCount,
+            wrapperHashesTruncated: skipped > 0,
+            registeredAtBlock:      entry.registeredAtBlock
         });
     }
 
     /// @notice At most `count` agent cards starting at `start`, in the order
-    ///         {rankedListings} returns them.
+    ///         {rankedListings} returns them: a **globally** ranked page of
+    ///         allowlistable contracts with the terms an agent's spend policy
+    ///         needs to decide.
     ///
-    ///         The one call an agent's spend policy makes: a ranked page of
-    ///         allowlistable contracts with the terms it needs to decide,
-    ///         bounded by the caller's own limit. Clamped exactly like
-    ///         {rankedListingWindow}.
+    ///         **This bounds the response, not the cost**, because
+    ///         {rankedListingWindow} does not: the global rank is computed over
+    ///         every registered entry before the page is cut, so the smallest
+    ///         page here costs what the whole set costs. Card assembly itself is
+    ///         bounded per entry ({MAX_CARD_WRAPPER_HASHES}), which is a
+    ///         different bound and does not rescue this one.
+    ///
+    ///         An agent that must not have its cost decided by how many
+    ///         applications strangers have registered reads {cardWindow}
+    ///         instead, and accepts a window-local order in exchange. Clamped
+    ///         exactly like {rankedListingWindow}.
     function cards(uint256 start, uint256 count) external view returns (AgentCard[] memory page) {
-        address[] memory window = rankedListingWindow(start, count);
+        return _cardsFor(rankedListingWindow(start, count));
+    }
+
+    /// @notice The agent cards for {rankedRegistrationWindow}`(start, count)`:
+    ///         the listed applications among the `count` addresses registered
+    ///         from position `start`, ranked within that window.
+    ///
+    ///         The bounded card read, and the one an agent walking the registry
+    ///         should use. Every part of its cost is the caller's: at most
+    ///         `count` entries scanned, at most one card assembled per listed
+    ///         entry among them, and at most {MAX_CARD_WRAPPER_HASHES} hashes on
+    ///         each card. None of the three follows the size of the registry or
+    ///         the publishing history of any listing in it.
+    ///
+    ///         **The ranking is local to the window** and paging through does
+    ///         not reconstruct the global order - see
+    ///         {rankedRegistrationWindow}, which says exactly what that costs
+    ///         and what it does not.
+    ///
+    ///         Clamped, and the returned page is shorter than `count` whenever
+    ///         the window holds entries that are not listed, so advance the
+    ///         cursor by `count` rather than by `page.length`.
+    function cardWindow(uint256 start, uint256 count)
+        external
+        view
+        returns (AgentCard[] memory page)
+    {
+        return _cardsFor(rankedRegistrationWindow(start, count));
+    }
+
+    /// @dev One card per address, in the order given.
+    function _cardsFor(address[] memory window) private view returns (AgentCard[] memory page) {
         page = new AgentCard[](window.length);
         for (uint256 i = 0; i < window.length; i++) {
             page[i] = card(window[i]);

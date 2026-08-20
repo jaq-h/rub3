@@ -727,30 +727,10 @@ contract Rub3RegistryTest is Test {
     function test_audit_registryHoldsNoStateChangingExternalCall() public view {
         bytes memory code = address(registry).code;
         assertGt(code.length, 0, "the registry is deployed");
-
-        for (uint256 i = 0; i < code.length; ) {
-            uint8 op = uint8(code[i]);
-
-            // PUSH1..PUSH32 carry their operand inline. Skipping it is what
-            // makes this an opcode walk rather than a byte scan: a 0xF1 inside a
-            // push immediate is data, not a CALL.
-            if (op >= 0x60 && op <= 0x7F) {
-                i += 1 + (uint256(op) - 0x5F);
-                continue;
-            }
-
-            assertTrue(
-                op != 0xF1 && // CALL
-                op != 0xF2 &&  // CALLCODE
-                op != 0xF4 &&  // DELEGATECALL
-                op != 0xF0 &&  // CREATE
-                op != 0xF5 &&  // CREATE2
-                op != 0xFF,    // SELFDESTRUCT
-                "the discovery registry must reach other contracts through STATICCALL only"
-            );
-
-            i += 1;
-        }
+        assertFalse(
+            _hasStateChangingCall(code),
+            "the discovery registry must reach other contracts through STATICCALL only"
+        );
     }
 
     /// Positive control for the opcode walk above: the licence contracts, which
@@ -947,6 +927,144 @@ contract Rub3RegistryTest is Test {
         assertEq(registry.registered().length, 0);
     }
 
+    // ── Group 5b: reads whose cost the caller controls ───────────────────────
+
+    function test_registeredWindow_clampsRatherThanReverting() public {
+        Rub3Access a = _deployEthOnly(developer);
+        Rub3Access b = _deployEthOnly(otherDev);
+        Rub3Access c = _deployEthOnly(developer);
+        _register(a, developer);
+        _register(b, otherDev);
+        _register(c, developer);
+
+        address[] memory first = registry.registeredWindow(0, 2);
+        assertEq(first.length, 2);
+        assertEq(first[0], address(a));
+        assertEq(first[1], address(b), "registration order, not rank");
+
+        assertEq(registry.registeredWindow(2, 99).length, 1, "count past the end is clamped");
+        assertEq(registry.registeredWindow(2, 99)[0], address(c));
+        assertEq(registry.registeredWindow(3, 1).length, 0, "start past the end is empty");
+        assertEq(registry.registeredWindow(99, 99).length, 0);
+    }
+
+    /// The bounded window includes only entries carrying the badge, exactly as
+    /// {rankedListings} does, and ranks them by rail inside the window.
+    function test_rankedRegistrationWindow_ranksInsideTheWindow() public {
+        Rub3Access unrecognised = _deployThrough(factory, developer, address(shiba), 1e18);
+        Rub3Access recognised = _deployThrough(factory, otherDev, address(usdc), USDC_PRICE);
+        Rub3Access delisted = _deployEthOnly(developer);
+        _register(unrecognised, developer);
+        _register(recognised, otherDev);
+        _register(delisted, developer);
+
+        vm.prank(developer);
+        registry.delist(address(delisted));
+
+        address[] memory window = registry.rankedRegistrationWindow(0, 3);
+        assertEq(window.length, 2, "the delisted entry is scanned and dropped");
+        assertEq(window[0], address(recognised), "the recognised rail leads its window");
+        assertEq(window[1], address(unrecognised));
+    }
+
+    /// **The tradeoff the NatSpec promises, asserted rather than described.**
+    ///
+    /// Paging through {rankedRegistrationWindow} does not reconstruct
+    /// {rankedListings}: an unrecognised entry in an earlier window still comes
+    /// back before a recognised one in a later window, because no window can
+    /// know what the others hold without reading them - which is the whole point
+    /// of not reading them. An integrator that assumed otherwise would
+    /// allowlist in the wrong order, so it is worth a test that fails if this
+    /// ever quietly starts being globally sorted.
+    function test_rankedRegistrationWindow_isNotAPageOfTheGlobalRanking() public {
+        Rub3Access early = _deployThrough(factory, developer, address(shiba), 1e18);
+        Rub3Access late = _deployThrough(factory, otherDev, address(usdc), USDC_PRICE);
+        _register(early, developer);
+        _register(late, otherDev);
+
+        address[] memory global = registry.rankedListings();
+        assertEq(global[0], address(late), "globally, the recognised rail leads");
+        assertEq(global[1], address(early));
+
+        address[] memory firstPage = registry.rankedRegistrationWindow(0, 1);
+        address[] memory secondPage = registry.rankedRegistrationWindow(1, 1);
+        assertEq(firstPage.length, 1);
+        assertEq(secondPage.length, 1);
+        assertEq(firstPage[0], address(early), "window-local: registration order wins across pages");
+        assertEq(secondPage[0], address(late));
+    }
+
+    function test_rankedRegistrationWindow_clampsRatherThanReverting() public {
+        Rub3Access a = _deployEthOnly(developer);
+        Rub3Access b = _deployEthOnly(otherDev);
+        _register(a, developer);
+        _register(b, otherDev);
+
+        assertEq(registry.rankedRegistrationWindow(1, 99).length, 1, "count is clamped");
+        assertEq(registry.rankedRegistrationWindow(1, 99)[0], address(b));
+        assertEq(registry.rankedRegistrationWindow(2, 1).length, 0, "start past the end is empty");
+        assertEq(registry.rankedRegistrationWindow(99, 99).length, 0);
+        assertEq(registry.rankedRegistrationWindow(0, 0).length, 0, "a zero window scans nothing");
+    }
+
+    /// A window shorter than `count` is what a cursor walking a set with
+    /// delisted entries in it looks like, so the docs tell callers to advance by
+    /// `count`. This is that instruction, executed.
+    function test_rankedRegistrationWindow_cursorAdvancesByCountNotByLength() public {
+        Rub3Access[] memory all = new Rub3Access[](4);
+        for (uint256 i = 0; i < 4; i++) {
+            all[i] = _deployEthOnly(developer);
+            _register(all[i], developer);
+        }
+        vm.startPrank(developer);
+        registry.delist(address(all[0]));
+        registry.delist(address(all[1]));
+        vm.stopPrank();
+
+        address[] memory seen = new address[](4);
+        uint256 found;
+        for (uint256 start = 0; start < registry.registeredCount(); start += 2) {
+            address[] memory page = registry.rankedRegistrationWindow(start, 2);
+            for (uint256 i = 0; i < page.length; i++) seen[found++] = page[i];
+        }
+
+        assertEq(found, 2, "every listed entry is reached exactly once");
+        assertEq(seen[0], address(all[2]));
+        assertEq(seen[1], address(all[3]));
+    }
+
+    /// **The bound is on the work, not only on the response.**
+    ///
+    /// `_registered` only grows and registration is permissionless, so a read
+    /// that scans all of it is on a clock. This measures the difference the
+    /// bounded read exists to make: over the same populated registry, a
+    /// two-entry {rankedRegistrationWindow} costs a fraction of
+    /// {rankedListings}, while {rankedListingWindow} - which cuts a page out of
+    /// the global ranking - costs what the whole scan costs. Both halves matter:
+    /// the first is the fix, and the second is why the docs on
+    /// {rankedListingWindow} say plainly that it bounds only the response.
+    function test_rankedRegistrationWindow_costDoesNotFollowTheSetSize() public {
+        for (uint256 i = 0; i < 24; i++) {
+            Rub3Access license = _deployEthOnly(developer);
+            _register(license, developer);
+        }
+
+        uint256 before = gasleft();
+        registry.rankedListings();
+        uint256 wholeSet = before - gasleft();
+
+        before = gasleft();
+        registry.rankedListingWindow(0, 2);
+        uint256 globalPage = before - gasleft();
+
+        before = gasleft();
+        registry.rankedRegistrationWindow(0, 2);
+        uint256 boundedPage = before - gasleft();
+
+        assertLt(boundedPage * 4, wholeSet, "the bounded read must not pay for the whole set");
+        assertGt(globalPage * 2, wholeSet, "a global page still pays for the whole set");
+    }
+
     // ── Group 6: the recognised-token list ───────────────────────────────────
 
     function test_recognisedTokens_areEnumerable() public {
@@ -1104,6 +1222,111 @@ contract Rub3RegistryTest is Test {
         assertFalse(page[1].recognisedRail);
 
         assertEq(registry.cards(2, 10).length, 0);
+    }
+
+    function test_cardWindow_returnsTheCardsForItsOwnWindow() public {
+        Rub3Access a = _deployThrough(factory, developer, address(shiba), 1e18);
+        Rub3Access b = _deployThrough(factory, otherDev, address(usdc), USDC_PRICE);
+        Rub3Access c = _deployEthOnly(developer);
+        _register(a, developer);
+        _register(b, otherDev);
+        _register(c, developer);
+
+        Rub3Registry.AgentCard[] memory page = registry.cardWindow(0, 2);
+        assertEq(page.length, 2);
+        assertEq(page[0].license, address(b), "ranked inside the window");
+        assertEq(page[1].license, address(a));
+
+        Rub3Registry.AgentCard[] memory tail = registry.cardWindow(2, 99);
+        assertEq(tail.length, 1, "clamped, like every other window here");
+        assertEq(tail[0].license, address(c));
+
+        assertEq(registry.cardWindow(99, 99).length, 0);
+    }
+
+    /// A complete hash set reports itself as complete, so `wrapperHashCount` is
+    /// meaningful on every card rather than only on capped ones.
+    function test_card_reportsAnUncappedHashSetAsComplete() public {
+        Rub3Access license = _deployEthOnly(developer);
+        _register(license, developer);
+
+        Rub3Registry.AgentCard memory c = registry.card(address(license));
+        assertEq(c.wrapperHashes.length, 1);
+        assertEq(c.wrapperHashCount, 1);
+        assertFalse(c.wrapperHashesTruncated);
+    }
+
+    /// **The griefing vector, closed and then measured.**
+    ///
+    /// `addWrapperHash` is append-only and uncapped, so before the cap one
+    /// licence owner could decide what reading *their* card cost - and with it
+    /// what any page of cards containing them cost, which is a reach into
+    /// unrelated listings' discoverability. The card now takes the newest
+    /// {MAX_CARD_WRAPPER_HASHES} and says how many there really are.
+    function test_card_capsTheHashSetAndReportsTheTrueTotal() public {
+        Rub3Access license = _deployEthOnly(developer);
+        _register(license, developer);
+
+        uint256 cap = registry.MAX_CARD_WRAPPER_HASHES();
+        uint256 total = cap + 5;
+        bytes32[] memory published = new bytes32[](total);
+        published[0] = WRAPPER_HASH;
+        vm.startPrank(developer);
+        for (uint256 i = 1; i < total; i++) {
+            published[i] = keccak256(abi.encodePacked("registry-test-wrapper", i));
+            license.addWrapperHash(published[i]);
+        }
+        vm.stopPrank();
+
+        Rub3Registry.AgentCard memory c = registry.card(address(license));
+        assertEq(c.wrapperHashes.length, cap, "the card is capped");
+        assertEq(c.wrapperHashCount, total, "and reports what the contract really holds");
+        assertTrue(c.wrapperHashesTruncated);
+
+        // The newest end is kept: a buyer checking the build it just downloaded
+        // is asking about the most recently published hash.
+        for (uint256 i = 0; i < cap; i++) {
+            assertEq(c.wrapperHashes[i].hash, published[total - cap + i]);
+            assertEq(c.wrapperHashes[i].status, uint8(Rub3License.HashStatus.Valid));
+        }
+        assertEq(license.wrapperHashCount(), total, "nothing was capped on the licence itself");
+    }
+
+    /// The cap's reason for existing, executed: one listing's publishing history
+    /// must not decide what a page of cards costs everybody sharing it.
+    function test_cardWindow_costDoesNotFollowOneListingsHashSet() public {
+        uint256 cap = registry.MAX_CARD_WRAPPER_HASHES();
+        Rub3Access atTheCap = _deployEthOnly(developer);
+        Rub3Access wellPast = _deployEthOnly(otherDev);
+        _register(atTheCap, developer);
+        _register(wellPast, otherDev);
+
+        // One licence publishes exactly what a card can carry, the other eight
+        // times that. Past the cap the card must stop getting more expensive,
+        // which is the whole of the property.
+        for (uint256 i = 1; i < cap; i++) {
+            vm.prank(developer);
+            atTheCap.addWrapperHash(keccak256(abi.encodePacked("at-cap", i)));
+        }
+        for (uint256 i = 1; i < cap * 8; i++) {
+            vm.prank(otherDev);
+            wellPast.addWrapperHash(keccak256(abi.encodePacked("well-past", i)));
+        }
+
+        uint256 before = gasleft();
+        registry.card(address(atTheCap));
+        uint256 atTheCapGas = before - gasleft();
+
+        before = gasleft();
+        registry.card(address(wellPast));
+        uint256 wellPastGas = before - gasleft();
+
+        assertLt(
+            wellPastGas,
+            (atTheCapGas * 11) / 10,
+            "a card's cost must not follow how much its owner has published"
+        );
+        assertEq(registry.cardWindow(0, 2).length, 2, "and the shared page still answers");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

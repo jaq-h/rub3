@@ -817,7 +817,9 @@ The walk is deliberately a second implementation rather than a call to `Rub3Fact
 
 ### The entry is an agent card
 
-`card(address)` returns one machine-readable record: the contract address and its current owner, both price rails, the identity model and its ERC-6551 implementation, the full wrapper hash set with each hash's status, the content URI, and the frozen `feeBps` / `treasury`. `cards(start,count)` returns a ranked page of them, which is the one call an agent's spend policy makes.
+`card(address)` returns one machine-readable record: the contract address and its current owner, both price rails, the identity model and its ERC-6551 implementation, the wrapper hash set with each hash's status, the content URI, and the frozen `feeBps` / `treasury`. `cards(start,count)` returns a globally ranked page of them and `cardWindow(start,count)` a bounded one; which of those an agent's spend policy should call is [the next section](#reads-whose-cost-the-caller-controls).
+
+The wrapper hash set is the one field a card does not carry whole. `Rub3License.addWrapperHash` is append-only and uncapped, so without a bound a licence owner would decide what reading their own card cost - and with it what any page of cards containing them cost, which is a reach into unrelated listings' discoverability. A card carries the newest `MAX_CARD_WRAPPER_HASHES` (32) hashes and reports `wrapperHashCount`, the number the licence contract really holds, beside them, plus a `wrapperHashesTruncated` flag saying the same thing without arithmetic. Nothing is capped on the licence contract itself: the full set stays readable there through `wrapperHashCount()` and `wrapperHashAt(index)`. The newest end is kept for the reason `latestOffsetTables` spends its budget there - a buyer checking the build it just downloaded is asking about the most recently published hash.
 
 **Everything on a card except the two presentation fields is read off the licence contract at call time.** Only `appName` and `contentURI` are stored here, because they are the two facts the chain does not carry yet - §3.1 puts `contentURI` on the licence contract, and this field is what a listing quotes until it does. A card can therefore never describe terms the contract no longer offers.
 
@@ -831,7 +833,7 @@ cast call <REGISTRY> "isRecognisedRail(address)(bool)" <LICENCE> --rpc-url $RPC
 
 # One listing, whole.
 cast call <REGISTRY> \
-  "card(address)((address,address,string,string,uint8,bool,bool,uint256,address,uint256,bool,uint8,address,uint16,address,(bytes32,uint8)[],uint64))" \
+  "card(address)((address,address,string,string,uint8,bool,bool,uint256,address,uint256,bool,uint8,address,uint16,address,(bytes32,uint8)[],uint256,bool,uint64))" \
   <LICENCE> --rpc-url $RPC
 ```
 
@@ -849,6 +851,29 @@ cast send <REGISTRY> "updateListing(address,string,string)" \
 cast send <REGISTRY> "delist(address)" <LICENCE> --rpc-url $RPC --private-key $DEVELOPER_KEY
 cast send <REGISTRY> "relist(address)" <LICENCE> --rpc-url $RPC --private-key $DEVELOPER_KEY
 ```
+
+### Reads whose cost the caller controls
+
+Registration is permissionless for anyone holding a factory deploy, and nothing is ever removed - `delist` and `suspend` change an entry's flags and leave it in `registered()`. The set therefore only grows, at a rate strangers decide, and the contract cannot be redeployed to fix that later. So every read that would scan all of it has a counterpart whose cost is the caller's:
+
+| Whole set | Bounded | What the bounded one gives up |
+|---|---|---|
+| `registered()` | `registeredWindow(start,count)` | nothing |
+| `rankedListings()`, `rankedListingWindow(start,count)` | `rankedRegistrationWindow(start,count)` | a globally correct order |
+| `cards(start,count)` | `cardWindow(start,count)` | the same |
+
+**`rankedListingWindow` and `cards` are in the left column deliberately.** They take a `start` and a `count` and look bounded, but those index into the global ranking, which has to be computed over every registered entry before a page of it can be cut: they bound the response, not the work, and cost what `rankedListings()` costs however small a page is asked for. That is a legitimate read - a globally correct page is worth paying for - and it is written on both functions rather than left to be discovered from a gas limit.
+
+The bounded reads take their cursor over registration order instead, so they scan at most `count` entries and make at most one `priceToken()` read per listed entry among them. **The price is that a bounded page is ranked within its window and not globally**: an entry quoting an unrecognised rail in an early window still comes back before a recognised entry from a later one, because no window can know what the others hold without reading them. Paging through does not reconstruct `rankedListings()`. A caller that needs the global order either pays for it, or collects the windows and ranks them off-chain, where `isRecognisedRail` is the same input the contract uses.
+
+A bounded page is also shorter than `count` whenever its window holds delisted, suspended or never-listed entries, so advance the cursor by `count` rather than by the page length. All of them clamp rather than revert at either end, exactly like `Rub3CodeRegistry.offsetTableWindow`, so one call is enough and no caller needs `registeredCount()` first.
+
+```bash
+# A ranked page whose cost does not follow how large the registry has grown.
+cast call <REGISTRY> "rankedRegistrationWindow(uint256,uint256)(address[])" 0 25 --rpc-url $RPC
+cast call <REGISTRY> "registeredWindow(uint256,uint256)(address[])" 0 25 --rpc-url $RPC
+```
+
 
 ### The recognised-token list, and why the rank is read live
 
