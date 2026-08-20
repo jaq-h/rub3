@@ -44,6 +44,19 @@ rub3/
 │   │       ├── derivation.rs         # Mutation proofs: the served answer follows the file
 │   │       ├── docs_legibility.rs    # The docs + llms.txt machine-legibility gate
 │   │       └── mcp_stdio.rs          # Spawns the binary and speaks JSON-RPC to it
+│   ├── rub3-cli/                     # The `rub3` command: pack and deploy (§2.5; the wrapper does not depend on it)
+│   │   ├── src/
+│   │   │   ├── main.rs               # Binary `rub3`: argument parsing, dispatch, exit codes
+│   │   │   ├── lib.rs                # Module map, and the one rule that runs through all of it
+│   │   │   ├── deployments.rs        # contracts/deployments.json, and the refusal when it publishes no factory
+│   │   │   ├── repo.rs               # Checkout resolution
+│   │   │   ├── tier.rs               # Tier bundles and front doors, named as an operator names them
+│   │   │   ├── pack.rs               # Wrapper + application + configuration, as one distributable
+│   │   │   └── deploy.rs             # A licence contract, through the canonical factory by default
+│   │   └── tests/
+│   │       ├── cli.rs                # The binary driven end to end, against a fixture manifest and the committed one
+│   │       ├── pack_build_gate.rs    # Ignored: a real `cargo check` proving the wrapper refuses a poisoned pack
+│   │       └── fixtures/deployments-populated.json # A manifest that publishes a factory; fabricated, never a deploy
 │   ├── rub3-sdk/                     # The `rub3` crate a wrapped application links (§3.5)
 │   │   └── src/
 │   │       ├── lib.rs                # `heartbeat()` / `session()` + what a heartbeat proves and does not
@@ -51,8 +64,10 @@ rub3/
 │   │       ├── wire.rs               # The protocol both halves share: env var, version, request/response, framing
 │   │       └── transport.rs          # Client connect: Unix socket, or a Windows named pipe opened as a file
 │   └── rub3-wrapper/                 # Wrapper runtime
+│       ├── build.rs                  # Validates what `rub3 pack` injects; refuses a placeholder or a half-set pack
 │       ├── src/
-│       │   ├── main.rs               # CLI entry point (clap), app constants
+│       │   ├── main.rs               # CLI entry point (clap), launch target, `--version` provenance
+│       │   ├── packed.rs             # What `rub3 pack` baked in: app identity, canonical factory, embedded application
 │       │   ├── lib.rs                # Public module re-exports (feature-gated)
 │       │   ├── license.rs            # License proof schema, activation message, ECDSA verification
 │       │   ├── identity.rs           # Identity models (access/account), ERC-6551 TBA derivation
@@ -129,10 +144,10 @@ rub3/
 
 ## Rust dependencies
 
-The wrapper's, which is what ships. `rub3-docs-mcp` is a separate workspace
-member with its own dependencies and the wrapper does not depend on it, so
-nothing it pulls in reaches a shipped binary: `cargo tree -p rub3-wrapper` is the
-check.
+The wrapper's, which is what ships. `rub3-docs-mcp` and `rub3-cli` are separate
+workspace members with their own dependencies and the wrapper depends on neither,
+so nothing they pull in reaches a shipped binary: `cargo tree -p rub3-wrapper` is
+the check, and CI runs it.
 
 | Crate | Purpose |
 |---|---|
@@ -186,6 +201,57 @@ webview build pulls - no WebKit, no AppKit, no ObjC runtime. Verify with:
 cargo tree -p rub3-wrapper --no-default-features --features tier-3,headless | grep -E 'wry|tao'
 ```
 
+## Packing a distributable
+
+`crates/rub3-cli` is the `rub3` command: it builds the wrapper, the application
+and the configuration into one file, and it deploys the licence contract that
+file checks. It is a build tool and never ships to a licence holder, so the
+wrapper does not depend on it.
+
+```bash
+cargo run -p rub3-cli -- pack \
+  --binary ./target/release/myapp --app-id com.example.myapp \
+  --contract 0x1234...abcd --chain base --tier cooldown --headless \
+  --session-ttl 7 --output ./dist/myapp
+```
+
+The application is embedded with `include_bytes!` and extracted on first launch
+to `{data_dir}/rub3/apps/{app_id}/{sha256}/{name}`, after activation succeeds and
+never before it. A packed binary carries its own application and refuses
+`--binary`; `rub3-wrapper --version` answers which licence it gates on, on which
+chain, through which factory, at which tier and through which front doors,
+without a network call.
+
+**`pack` reads the canonical `Rub3Factory` out of
+[contracts/deployments.json](contracts/deployments.json) and bakes it in beside
+`CONTRACT` and `CHAIN_ID`.** Every entry in that file is `null` until launch, and
+`null` is a hard error rather than a fallback to the zero address, so **`pack`
+and `deploy` refuse for every chain today** and exit 2 while doing it. That is
+the intended behaviour, not a missing feature: a distributable that claimed a
+canonical factory it cannot name would be worse than one that refuses to build.
+To build or deploy against a factory you deployed yourself, name it with
+`--factory <address>`; `deploy --direct` deploys through none at all.
+
+```bash
+cargo run -p rub3-cli -- deploy \
+  --type access --name "My App License" --symbol MAL \
+  --identity access --price-eth 0.05 --chain base \
+  --broadcast -- --private-key $DEPLOYER_KEY
+```
+
+`deploy` drives `contracts/script/Deploy.s.sol`, so the deploy path is the one
+the contract tests and [contracts/contracts.md](contracts/contracts.md) already
+exercise. It broadcasts only with `--broadcast`, and everything after `--` goes
+straight to `forge script`, which is where the signer goes. `--dry-run` on
+either subcommand prints the resolved plan and runs nothing.
+
+| Exit | Meaning |
+|---|---|
+| 0 | done |
+| 1 | the command line asked for something impossible or contradictory |
+| 2 | no canonical `Rub3Factory` is published for that chain |
+| 3 | the build (cargo) or the deploy (forge) failed |
+
 ## Testing
 
 ### Rust
@@ -207,6 +273,13 @@ cargo test -p rub3
 
 # The SDK channel end to end: a real wrapper launching a real SDK-linked app
 cargo test -p rub3-wrapper --no-default-features --features tier-3,sdk --test sdk_e2e
+
+# The rub3 CLI
+cargo test -p rub3-cli
+
+# The CLI's build gate: real `cargo check` runs proving the wrapper refuses a
+# poisoned pack. Ignored by default because each one costs a compile.
+cargo test -p rub3-cli --test pack_build_gate -- --ignored
 ```
 
 **Unit tests** (`src/`): one suite per module, so which ones compile follows the tier bundle and front door selected. [testing.md](testing.md) owns the per-suite inventory and the `--lib` count for each bundle.
@@ -601,8 +674,9 @@ the authority on what each covers, what it cost, and what comes next.
 - **`Rub3CodeRegistry` (§2.9)** - the append-only on-chain authority a wrapper asks when its own table misses, so a release newer than the binary is told apart from a modified copy. Nothing can remove, overwrite or invalidate a record, `Deprecated` means "not recommended" and never strands a licence, and the registry's own code is fingerprinted before its answer is believed. Built and tested; unpopulated in `deployments.json`, so it is inert until a deploy exists
 - **Spend ceilings (§2.2, §2.7)** - one operator policy bounds both rails before anything is spent: `RUB3_AGENT_MAX_TOKEN_AMOUNT` gates the stablecoin rail before an authorization is signed, `RUB3_AGENT_MAX_ETH_WEI` gates the ETH rail before the transaction is sent, and the ETH one defaults to 0.1 ETH so neither rail is ever unbounded (exit 22)
 - **Deploy scripts** - `forge script` deploys either licence contract to any EVM chain from env vars, directly or through a factory; `DeployFactory.s.sol` deploys the factory itself
+- **`rub3 pack` and `rub3 deploy` (§2.5)** - one command builds the wrapper, the application and the configuration into a single distributable, with the canonical factory read out of `contracts/deployments.json` and compiled in beside the contract and chain id; another deploys the licence contract through that factory by driving the existing forge script. A `null` manifest entry is a hard error at both, so both refuse for every chain until launch. `fetch` and `register` are deliberately unbuilt: the sections they belong to (§3.1, §3.2) do not exist yet
 
-**Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), CLI tooling (`pack` / `deploy` / `fetch` / `register`), content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
+**Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), the CLI's `fetch` and `register` subcommands, content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
 
 ## Direction
 

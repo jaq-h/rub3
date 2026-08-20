@@ -2,6 +2,12 @@ pub mod agent_env;
 pub mod license;
 pub mod store;
 
+// What `rub3 pack` baked in: the licence this binary checks, the chain, the
+// canonical factory it recognises, and the application it carries. Present in
+// every bundle - an unpacked build compiles the placeholder identity - because
+// the constants are what every front door is handed.
+pub mod packed;
+
 // Pre-purchase contract attestation. Needs to read the chain, so it exists from
 // tier-2 up and compiles away entirely below that: a tier-0 or tier-1 build
 // never touches the chain, so it has nothing to attest.

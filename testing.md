@@ -16,31 +16,34 @@ cargo test -p rub3-wrapper
 
 This runs all unit tests, integration tests, and license e2e tests. No external tools required - wallet generation and signing are done natively in Rust via `k256`.
 
-The workspace has a further member, the docs MCP server, whose suites are
-separate and described in [Docs MCP server](#docs-mcp-server-cratesrub3-docs-mcp)
-below: `cargo test -p rub3-docs-mcp`.
+The workspace has two further members whose suites are separate: the docs MCP
+server, described in [Docs MCP server](#docs-mcp-server-cratesrub3-docs-mcp), and
+the `rub3` CLI, described in [The rub3 CLI](#the-rub3-cli-cratesrub3-cli):
+`cargo test -p rub3-docs-mcp` and `cargo test -p rub3-cli`.
 
 The default bundle is `tier-2` + `webview`, so it compiles neither the tier-3
 capabilities nor the headless front door. Cargo features are additive, so
 `--no-default-features` is mandatory when selecting another bundle:
 
 ```bash
-# tier-3 (adds onchain-write + cooldown): 133 lib tests
+# tier-3 (adds onchain-write + cooldown): 137 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
 
-# tier-3 + the headless (agent) front door: 197 lib tests
+# tier-3 + the headless (agent) front door: 201 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
 
-# tier-3 + the webview (human) front door: 149 lib tests
+# tier-3 + the webview (human) front door: 153 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,webview --lib
 ```
 
-For reference, `--lib` counts per bundle: `tier-0` 53, `tier-1` 83, `tier-2` 123,
-`tier-3`/`tier-4` 133, `tier-2,webview` 124, `tier-3,webview` 149,
-`tier-3,headless` 197, `tier-0,sdk` 65, `tier-3,sdk` 150. Every count on this
-page, and in `implementation.md` §3.5, is the number libtest reports as
-*running* - passed plus `#[ignore]`d, not passed alone - so a plain run of
-`tier-3,webview` prints 145 passed and 4 ignored against the 149 above. The
+For reference, `--lib` counts per bundle: `tier-0` 57, `tier-1` 87, `tier-2` 127,
+`tier-3`/`tier-4` 137, `tier-2,webview` 128, `tier-3,webview` 153,
+`tier-3,headless` 201, `tier-0,sdk` 69, `tier-3,sdk` 154. Every count on this
+page is the number libtest reports as *running* - passed plus `#[ignore]`d, not
+passed alone - so a plain run of `tier-3,webview` prints 149 passed and 4 ignored
+against the 153 above. The four `packed` tests are in every bundle, which is why
+each count above is four higher than the one `implementation.md` §3.5 recorded
+when it was written. The
 ignored ones are one network test in every bundle, plus the three anvil-gated
 webview session-flow tests under `tier-3,webview`. `tier-1` and `tier-2` diverge because
 `attest` needs `onchain-read`. `tier-2,webview` and `tier-3,webview` diverge
@@ -73,6 +76,7 @@ scripts/test-e2e.sh
 
 - **`license::tests`** - activation message hashing, personal_sign prefix, proof serialization round-trips
 - **`store::tests`** - proof save/load, directory creation, overwrite, missing file handling
+- **`packed::tests`** - what `rub3 pack` baked in (§2.5), compiled in every bundle. The test build asserts itself *not* to be a packed build, which is what gives the other three a fixed subject: the factory is `None`, since it is the one constant with no placeholder and an unpacked build may not invent one; no application is embedded; the placeholder `CONTRACT` is still the zero address the wrapper reads as "no contract configured", which is why a stock build never touches the chain; the numeric constants parse at compile time; and `provenance()` names the app id, contract, chain and rpc it will act on and says "development build" where a packed binary names its factory
 - **`rpc::tests`** - provider construction, contract call error paths, `encode_activate_calldata` selector + layout, `get_tx_receipt` / `get_block_number` / `get_code` error paths, ENS stub; the endpoint redaction (§2.8), which is a property of the wrapper's whole RPC error surface rather than of any one screen: a key placed in a path segment, in a query parameter and as userinfo must each be absent from the error's `Display` after construction through `RpcError::transport` and `RpcError::contract` while the host, the port and the failure text survive; a bracketed IPv6 authority keeps its host and loses its key, including when trailing punctuation follows it; an address whose authority will not parse at all is dropped whole rather than half-printed, which is the fail-closed property that a bare `[redacted url]` followed by a verbatim path would violate; plus one drive of `tokens_of_owner` against a dead port because alloy classifies an unreachable node during an `eth_call` as a contract error rather than a transport one; and for the EIP-3009 rail (§2.2) the `ReceiveWithAuthorization` typehash against its literal preimage, the signing digest against a vector computed independently with `cast`, every signed field proving it changes that digest, and the `purchaseWithAuthorization` calldata selector
 - **`session::tests`** (requires `session` feature) - message determinism, tier-diffing, expiry edge cases, sign/verify round-trip, wrong-wallet failure; with `cooldown` adds: `verify_onchain` missing-field + bad-URL paths, `should_reverify` distribution sanity
 - **`session_store::tests`** (requires `session` feature) - save/load round-trip, missing-session, `load_latest_session` picking the freshest valid session (`load_latest_session_for_wallet` narrows the same scan to one signer, covered from `activation::tests`)
@@ -395,6 +399,70 @@ run that silently tested nothing cannot report green:
 RUB3_DOCS_MCP_REQUIRE_ARTIFACTS=1 cargo test -p rub3-docs-mcp
 ```
 
+### The rub3 CLI (`crates/rub3-cli/`)
+
+The `rub3` command of §2.5: `pack` and `deploy`. Its own workspace member, so
+its suites are their own invocation and nothing it depends on reaches a shipped
+binary:
+
+```bash
+cargo test -p rub3-cli
+```
+
+**The subject is mostly the refusal.** Nothing is deployed to any public network,
+so `contracts/deployments.json` publishes no canonical factory and the path that
+succeeds cannot be exercised against a real address. It is exercised against
+`tests/fixtures/deployments-populated.json`, a fabricated manifest that publishes
+one on `base` and leaves `base_sepolia` null - the two records have independent
+lifecycles, and a fixture where everything is populated would not exercise the
+refusal that matters.
+
+- **`src/` unit tests** (17) - `deployments::tests` reads the *committed*
+  manifest, compiled in with `include_str!`: every entry is asserted still null,
+  so the day something is deployed, the tests that assume a refusal are read
+  again rather than quietly passing; a null `factory` is refused with the chain's
+  name and id and without offering an address; a name resolves to the id the file
+  keys it by; an unknown name is refused with the list of the ones that exist; a
+  chain id the manifest does not answer for is still addressable but has no
+  canonical factory; a zero address written into the file is refused as malformed
+  rather than used; and a schema bump is refused rather than read anyway.
+  `tier::tests` covers the five bundles and all three spellings of each
+  (`cooldown`, `tier-3`, `3`); `deploy::tests` covers the decimal-to-smallest-unit
+  conversion on both rails, a price finer than the unit refused rather than
+  rounded, and the wrapper-hash shape including the zero hash the contract reads
+  as "unknown"; `repo::tests` covers checkout resolution
+- **`tests/cli.rs`** (17) - the binary itself, driven against a temporary
+  checkout carrying one manifest or the other. Both subcommands exit 2 on a null
+  entry with a message naming the chain and containing no address to paste, and
+  print no plan while doing it; a published factory is what gets baked in and
+  what a deploy goes through; `--factory` is the only other way to get one and
+  says on screen that it is not canonical; `--factory 0x0` is refused like every
+  other zero address; a deploy without `--broadcast` says it is simulating; a
+  `--direct` deploy passes no `FACTORY` at all *and* removes an inherited one;
+  `--price-usdc` without `--price-token` is refused with the reason; the account
+  model without a TBA implementation and a subscription without a period are
+  refused; and `there_is_no_fetch_and_no_register_subcommand` asserts the two
+  unbuilt subcommands are absent from the binary and from `--help`
+- **`tests/pack_build_gate.rs`** (5, `#[ignore]`d) - the wrapper's own gate,
+  `crates/rub3-wrapper/build.rs`, which is not reachable from the CLI. Each test
+  runs a **real `cargo check`** against a poisoned environment and reads what
+  cargo says: a zero factory, a zero contract, a half-configured pack, and the
+  placeholders `null`, `TBD` and `0xYourFactory` are each refused. The fifth is
+  the positive control - a complete environment builds - without which the other
+  four would pass on a gate that refused everything. They are ignored because
+  each one costs a compile, and they serialise on a mutex since they share a
+  target directory:
+
+```bash
+cargo test -p rub3-cli --test pack_build_gate -- --ignored
+```
+
+`pack` and `deploy` have no anvil-gated suite. What one would cover is the
+`cargo build` and the `forge script` they drive, both of which are covered where
+they live, and neither can be exercised through the canonical path until a
+factory exists. The end-to-end run that *was* performed by hand is recorded in
+`implementation.md` §2.5.
+
 ## 3. Seed a license proof for manual testing
 
 The `seed-license.sh` script generates a valid license proof so the wrapper skips the activation window. Requires Foundry (`cast`).
@@ -442,14 +510,33 @@ cast call <CONTRACT_ADDRESS> "ownerOf(uint256)" 1 --rpc-url http://127.0.0.1:854
 
 ## 5. App constants
 
-The wrapper's identity is controlled by constants in `crates/rub3-wrapper/src/main.rs`:
+The wrapper's identity lives in `crates/rub3-wrapper/src/packed.rs`. Each constant
+has a development placeholder, which is what an ordinary `cargo build` compiles,
+and a packed value that `rub3 pack` injects through a `RUB3_PACK_*` environment
+variable on the build it runs:
 
-| Constant | Default | Purpose |
+| Constant | Placeholder | Purpose |
 |---|---|---|
 | `APP_ID` | `com.rub3.example` | Reverse-DNS app identifier |
 | `CONTRACT` | `0x0000...0000` | ERC-721 license contract address |
 | `CHAIN_ID` | `8453` | EVM chain ID (Base mainnet) |
 | `RPC_URL` | `https://mainnet.base.org` | JSON-RPC endpoint |
 | `DEVELOPER_ENS` | `None` | Optional ENS name |
+| `SESSION_TTL_SECS` | `604800` | Session lifetime, 7 days |
+| `FACTORY` | none | The canonical `Rub3Factory`, and the one constant with no placeholder |
 
-To test against a real contract, update `CONTRACT` to your deployed ERC-721 address and rebuild.
+The zero `CONTRACT` is what makes a stock build never touch the chain: the wrapper
+reads it as "no contract configured" and skips the on-chain ownership check. To
+test against a real contract, either edit the placeholder and rebuild, or pack a
+binary against it:
+
+```bash
+cargo run -p rub3-cli -- pack --binary <app> --app-id com.rub3.example \
+  --contract <deployed> --chain 31337 --rpc-url http://127.0.0.1:8545 \
+  --tier verified --factory <a factory you deployed> --output ./dist/myapp
+```
+
+`--factory` is required there because nothing is deployed to a public network, so
+`contracts/deployments.json` publishes no canonical factory for any chain and
+`pack` refuses rather than substituting anything. `rub3-wrapper --version` prints
+every value above out of the binary that carries it.

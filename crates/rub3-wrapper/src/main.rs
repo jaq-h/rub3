@@ -2,32 +2,14 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use rub3_wrapper::activation;
+use rub3_wrapper::packed;
 
 // ── App configuration ─────────────────────────────────────────────────────────
 //
-// These constants are placeholders for the POC.
-// `rub3 pack` (§2.5) will inject them at build time from the developer's
-// config, embedding the correct values for each distributed binary.
-
-/// Reverse-DNS identifier for this application.
-const APP_ID: &str = "com.rub3.example";
-
-/// ERC-721 license contract address on the target chain.
-const CONTRACT: &str = "0x0000000000000000000000000000000000000000";
-
-/// EVM chain ID. 8453 = Base mainnet.
-const CHAIN_ID: u64 = 8453;
-
-/// JSON-RPC endpoint for the target chain.
-const RPC_URL: &str = "https://mainnet.base.org";
-
-/// Optional ENS name the developer registered for this app.
-/// Set to None if the developer has not registered an ENS name.
-const DEVELOPER_ENS: Option<&str> = None;
-
-/// Session lifetime (seconds) applied when a new tier-3 session is minted.
-/// 7 days matches the default `session_ttl_days` from `architecture.md`.
-const SESSION_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+// `rub3 pack` (implementation.md §2.5) injects the app identity at build time;
+// an unpacked build compiles the placeholders. Both live in `packed`, which is
+// also where the canonical `Rub3Factory` this binary recognises comes from and
+// where the embedded application is kept.
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -35,12 +17,18 @@ const SESSION_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 #[command(
     name = "rub3-wrapper",
     about = "rub3 license wrapper",
+    version,
+    // `--version` answers which licence this binary gates on, on which chain,
+    // and which factory it treats as canonical - the questions somebody who did
+    // not build it has, all of them answerable without a network call.
+    long_version = provenance(),
     after_help = activation::EXIT_CODE_HELP,
 )]
 struct Cli {
-    /// Path to the binary to launch
+    /// Path to the binary to launch. A packed build carries its own
+    /// application and rejects this flag.
     #[arg(long)]
-    binary: PathBuf,
+    binary: Option<PathBuf>,
 
     /// Activate without a window: read a signer from the environment, purchase
     /// and activate on-chain as needed, sign the session locally, then launch.
@@ -58,15 +46,26 @@ struct Cli {
     args: Vec<String>,
 }
 
+/// [`packed::provenance`] as the `'static` string clap needs, built once.
+fn provenance() -> &'static str {
+    static PROVENANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PROVENANCE.get_or_init(packed::provenance).as_str()
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
 
-    if !cli.binary.exists() {
-        eprintln!("error: binary not found: {}", cli.binary.display());
-        std::process::exit(activation::EXIT_GENERIC);
-    }
+    // Resolved before activation so a launch that cannot happen opens no
+    // activation window and signs nothing.
+    let target = match LaunchTarget::resolve(cli.binary.as_deref()) {
+        Ok(target) => target,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(activation::EXIT_GENERIC);
+        }
+    };
 
     // Whichever door authorises the launch hands back what the SDK channel will
     // report to the wrapped application (§3.5).
@@ -77,12 +76,12 @@ fn main() {
         }
     } else {
         match rub3_wrapper::ensure(
-            APP_ID,
-            CONTRACT,
-            CHAIN_ID,
-            RPC_URL,
-            DEVELOPER_ENS.map(str::to_string),
-            SESSION_TTL_SECS,
+            packed::APP_ID,
+            packed::CONTRACT,
+            packed::CHAIN_ID,
+            packed::RPC_URL,
+            packed::DEVELOPER_ENS.map(str::to_string),
+            packed::SESSION_TTL_SECS,
         ) {
             Ok(launch) => launch,
             Err(e) => {
@@ -97,11 +96,62 @@ fn main() {
         }
     };
 
-    std::process::exit(rub3_wrapper::supervisor_run(
-        &cli.binary,
-        &cli.args,
-        &launch,
-    ));
+    // Only now, with the launch authorised: an embedded application is written
+    // to disk after the licence check and never before it, so a failed
+    // activation leaves nothing extracted for the caller to run directly.
+    let binary = match target.path() {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(activation::EXIT_GENERIC);
+        }
+    };
+
+    std::process::exit(rub3_wrapper::supervisor_run(&binary, &cli.args, &launch));
+}
+
+/// What this launch runs: the application `rub3 pack` embedded, or the one
+/// `--binary` names.
+enum LaunchTarget {
+    /// A packed build's own application, still compiled into this binary.
+    Embedded(&'static packed::EmbeddedApp),
+    /// A path on this machine, checked to exist.
+    External(PathBuf),
+}
+
+impl LaunchTarget {
+    /// Decides what to launch, and refuses anything that cannot be launched.
+    ///
+    /// A packed build refuses `--binary` rather than honouring it: the point of
+    /// packing is a distributable that is one file, and a wrapper that would
+    /// launch a different application on request is a licence gate wrapped
+    /// around whatever the caller felt like running.
+    fn resolve(requested: Option<&std::path::Path>) -> Result<LaunchTarget, String> {
+        match (packed::embedded_app(), requested) {
+            (Some(_), Some(path)) => Err(format!(
+                "this build carries its own application, so --binary {} cannot be honoured",
+                path.display()
+            )),
+            (Some(app), None) => Ok(LaunchTarget::Embedded(app)),
+            (None, Some(path)) if path.exists() => Ok(LaunchTarget::External(path.to_path_buf())),
+            (None, Some(path)) => Err(format!("binary not found: {}", path.display())),
+            (None, None) => Err(
+                "no application to launch: this build embeds none, so --binary must name one"
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// The executable to run, extracting the embedded application if that is
+    /// what this build carries.
+    fn path(self) -> Result<PathBuf, String> {
+        match self {
+            LaunchTarget::Embedded(app) => {
+                app.materialise(packed::APP_ID).map_err(|e| e.to_string())
+            }
+            LaunchTarget::External(path) => Ok(path),
+        }
+    }
 }
 
 // ── Headless ──────────────────────────────────────────────────────────────────
@@ -120,11 +170,11 @@ fn run_headless(token_id: Option<u64>) -> Result<rub3_wrapper::Launch, i32> {
     })?;
 
     let ctx = HeadlessContext {
-        app_id: APP_ID.to_string(),
-        contract: CONTRACT.to_string(),
-        chain_id: CHAIN_ID,
-        rpc_url: RPC_URL.to_string(),
-        session_ttl_secs: SESSION_TTL_SECS,
+        app_id: packed::APP_ID.to_string(),
+        contract: packed::CONTRACT.to_string(),
+        chain_id: packed::CHAIN_ID,
+        rpc_url: packed::RPC_URL.to_string(),
+        session_ttl_secs: packed::SESSION_TTL_SECS,
         token_id,
     };
 

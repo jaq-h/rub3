@@ -96,10 +96,10 @@ jobs:
   # Formatting and lint. BOTH checks are REAL GATES: a rustfmt drift or a clippy
   # warning turns this job red.
   #
-  # Scope. Both commands run over the whole workspace, which now means three
-  # members: `rub3-wrapper`, `rub3-docs-mcp` and the `rub3` SDK crate.
-  # implementation.md §3.3 relies on that scope, since the docs crate has no
-  # lint job of its own.
+  # Scope. Both commands run over the whole workspace, which now means four
+  # members: `rub3-wrapper`, `rub3-docs-mcp`, the `rub3` SDK crate and
+  # `rub3-cli`. implementation.md §3.3 relies on that scope, since the docs
+  # crate has no lint job of its own, and §2.5 relies on it for the CLI.
   #
   # `-D warnings` is load-bearing: plain `cargo clippy` exits 0 even when it
   # emits warnings, so a permissive clippy job would sit green forever and prove
@@ -183,6 +183,67 @@ jobs:
 
       - name: Test (unit + doctests)
         run: cargo test -p rub3
+
+  # ---------------------------------------------------------------------------
+  # The `rub3` CLI (implementation.md §2.5): `rub3 pack` and `rub3 deploy`.
+  #
+  # Its own job for the same reason the SDK crate has one: the wrapper matrix
+  # runs `cargo test -p rub3-wrapper`, which does not run another package's
+  # tests, and `cargo clippy --workspace` in the lint job covers this crate for
+  # lint only.
+  #
+  # The second step is the load-bearing one. `crates/rub3-wrapper/build.rs` is
+  # the last gate between a pack value and a binary somebody else runs, and it
+  # is not reachable from the CLI, so its tests drive a real `cargo check`
+  # against a poisoned environment and read what cargo says. That costs a
+  # compile each, which is why they are `#[ignore]`d and run here rather than in
+  # the default run. `assert-e2e-ran.sh` is what makes the step mean anything:
+  # cargo exits 0 for a filter that selects no tests.
+  # ---------------------------------------------------------------------------
+  cli:
+    name: rust (rub3 CLI)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: cli
+
+      - name: Build
+        run: cargo build -p rub3-cli --all-targets
+
+      - name: Test
+        run: cargo test -p rub3-cli
+
+      - name: Pack build gate (real cargo check runs)
+        env:
+          # Update when a test is added to or removed from this suite.
+          EXPECTED_TESTS: 5
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP:-/tmp}/pack_build_gate.log"
+          cargo test -p rub3-cli --test pack_build_gate -- --ignored --nocapture 2>&1 | tee "$log"
+          scripts/assert-e2e-ran.sh "$log" "$EXPECTED_TESTS"
+
+      # A build tool has no business adding weight to a shipped binary, and the
+      # same reasoning the docs job spells out applies here. Cargo's own
+      # resolver answers, rather than a manifest read, because the constraint is
+      # about what the wrapper *reaches* and not about what it names.
+      - name: rub3-cli stays off the wrapper's dependency path
+        run: |
+          set -euo pipefail
+          fail=0
+          for bundle in "" "--no-default-features --features tier-3,headless"; do
+            # shellcheck disable=SC2086
+            tree=$(cargo tree -p rub3-wrapper -e normal $bundle)
+            if printf '%s\n' "$tree" | grep -qE "(^|[^[:alnum:]_-])rub3-cli v[0-9]"; then
+              echo "FAIL: rub3-wrapper ${bundle:-(default bundle)} reaches rub3-cli."
+              echo "      The CLI is a build tool and must stay off the shipped binary's dependency path."
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ]
 
   # ---------------------------------------------------------------------------
   # Solidity. `forge test` MUST run from contracts/ -- remappings.txt uses paths
