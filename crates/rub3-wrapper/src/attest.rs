@@ -357,11 +357,11 @@ pub static CANONICAL: &[CanonicalContract] = &[
         source: "contracts/src/Rub3Registry.sol",
         role: Role::DiscoveryRegistry,
         release: RELEASE,
-        masked_sha256: "e4fb0fde2d8f2e268d3dd69876786e46c6f6e49cb64ba50c4332a493dca2f3c7",
+        masked_sha256: "d4659f49df7f424e0623e0ce8fb9cf7d03b7b2e1e77882e4f3d393e623091489",
         immutable_ranges: &[
-            ImmutableRange { start: 996, length: 32 },
-            ImmutableRange { start: 2570, length: 32 },
-            ImmutableRange { start: 2691, length: 32 },
+            ImmutableRange { start: 1037, length: 32 },
+            ImmutableRange { start: 2731, length: 32 },
+            ImmutableRange { start: 2852, length: 32 },
         ],
     },
     CanonicalContract {
@@ -614,13 +614,13 @@ const PUSH32: u8 = 0x7f;
 ///    and that is what turns "we did not look at these bytes" into "these bytes
 ///    cannot execute". It holds by construction on compiler output: solc
 ///    compiles every read of an immutable to a `PUSH32` whose operand the
-///    deployer fills in. Measured on all four of this repository's contracts
-///    that have immutables - `Rub3Access`, `Rub3Subscription`, `Rub3Factory` and
-///    `Rub3Registry`; the two deployer helpers and `Rub3CodeRegistry` have none
-///    - not assumed. Should
-///    a future compiler emit them another way, this rejects the registry's table
-///    and the gate falls back to refusing - fail-closed, on the path that spends
-///    money, which is the right direction to be wrong in.
+///    deployer fills in. Measured rather than assumed, on all four of this
+///    repository's contracts that have immutables - `Rub3Access`,
+///    `Rub3Subscription`, `Rub3Factory` and `Rub3Registry`; the two deployer
+///    helpers and `Rub3CodeRegistry` have none. Should a future compiler emit
+///    them another way, this rejects the registry's table and the gate falls
+///    back to refusing - fail-closed, on the path that spends money, which is
+///    the right direction to be wrong in.
 ///
 /// **What the one-byte lookback does not establish**, said plainly because the
 /// claim above is the one this module publishes: it does not prove the `PUSH32`

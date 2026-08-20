@@ -165,18 +165,18 @@
     },
     "Rub3Registry": {
       "source": "src/Rub3Registry.sol",
-      "deployed_bytecode_sha256": "e4fb0fde2d8f2e268d3dd69876786e46c6f6e49cb64ba50c4332a493dca2f3c7",
+      "deployed_bytecode_sha256": "d4659f49df7f424e0623e0ce8fb9cf7d03b7b2e1e77882e4f3d393e623091489",
       "immutable_ranges": [
         {
-          "start": 996,
+          "start": 1037,
           "length": 32
         },
         {
-          "start": 2570,
+          "start": 2731,
           "length": 32
         },
         {
-          "start": 2691,
+          "start": 2852,
           "length": 32
         }
       ]

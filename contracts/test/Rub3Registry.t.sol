@@ -28,6 +28,25 @@ contract HalfFactory {
     }
 }
 
+/// @notice Answers every call with no data at all, the way a proxy whose
+///         implementation slot was never set does.
+///
+///         The fixture for {Rub3Registry.priceTokenOf}. A `try`/`catch` around a
+///         getter that returns data decodes the response in the *calling* frame,
+///         so this shape reverts the caller rather than entering the `catch` -
+///         which is why the registry checks the response itself.
+contract SilentFallback {
+    fallback() external {}
+}
+
+/// @notice Answers `priceToken()` with a full word whose high bits are set, so
+///         the response is 32 bytes wide but is not a valid encoded address.
+contract DirtyQuote {
+    function priceToken() external pure returns (bytes32) {
+        return bytes32(type(uint256).max);
+    }
+}
+
 /// @notice The discovery registry (implementation.md §3.2).
 ///
 /// **This suite is about `Rub3Registry`, the discovery registry, and not about
@@ -156,6 +175,16 @@ contract Rub3RegistryTest is Test {
     function _register(Rub3Access license, address owner_) internal {
         vm.prank(owner_);
         registry.register(address(license), "Test App", "ipfs://bafyTestApp");
+    }
+
+    /// `length` bytes of filler, for the text-bound tests. Single-byte
+    /// characters, because the limits are stated in bytes.
+    function _text(uint256 length) internal pure returns (string memory) {
+        bytes memory buffer = new bytes(length);
+        for (uint256 i = 0; i < length; i++) {
+            buffer[i] = "a";
+        }
+        return string(buffer);
     }
 
     // ── Group 1: construction ────────────────────────────────────────────────
@@ -324,6 +353,113 @@ contract Rub3RegistryTest is Test {
         vm.prank(developer);
         registry.updateListing(address(license), "Unpublished App", "ipfs://bafyLater");
         assertEq(registry.card(address(license)).contentURI, "ipfs://bafyLater");
+    }
+
+    /// Both text fields are bounded at the point of entry, and both boundaries
+    /// are exact.
+    ///
+    /// The bound is what makes the claim on `AgentCard` and `cardWindow` true
+    /// rather than aspirational: registration is permissionless for anyone
+    /// holding a factory deploy, so without it a single listing's owner would
+    /// choose what reading a shared page of cards costs everybody in it.
+    function test_register_acceptsTextExactlyAtItsLimit() public {
+        Rub3Access license = _deployEthOnly(developer);
+        string memory name = _text(registry.MAX_APP_NAME_BYTES());
+        string memory uri = _text(registry.MAX_CONTENT_URI_BYTES());
+
+        vm.prank(developer);
+        registry.register(address(license), name, uri);
+
+        Rub3Registry.AgentCard memory entry = registry.card(address(license));
+        assertEq(bytes(entry.appName).length, registry.MAX_APP_NAME_BYTES());
+        assertEq(bytes(entry.contentURI).length, registry.MAX_CONTENT_URI_BYTES());
+    }
+
+    function test_register_refusesTextOneByteOverItsLimit() public {
+        Rub3Access license = _deployEthOnly(developer);
+        uint256 nameLimit = registry.MAX_APP_NAME_BYTES();
+        uint256 uriLimit = registry.MAX_CONTENT_URI_BYTES();
+
+        vm.prank(developer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Rub3Registry.TextTooLong.selector, "appName", nameLimit + 1, nameLimit
+            )
+        );
+        registry.register(address(license), _text(nameLimit + 1), "ipfs://bafyTestApp");
+
+        vm.prank(developer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Rub3Registry.TextTooLong.selector, "contentURI", uriLimit + 1, uriLimit
+            )
+        );
+        registry.register(address(license), "Test App", _text(uriLimit + 1));
+
+        assertEq(
+            uint8(registry.listing(address(license)).status),
+            uint8(Rub3Registry.Status.Unknown),
+            "a refused registration must leave nothing behind"
+        );
+    }
+
+    /// The same two boundaries on the other writer. `updateListing` is the one a
+    /// griefer would reach for, because it costs a listing they already hold.
+    function test_updateListing_holdsTheSameTextLimits() public {
+        Rub3Access license = _deployEthOnly(developer);
+        _register(license, developer);
+
+        uint256 nameLimit = registry.MAX_APP_NAME_BYTES();
+        uint256 uriLimit = registry.MAX_CONTENT_URI_BYTES();
+
+        vm.prank(developer);
+        registry.updateListing(address(license), _text(nameLimit), _text(uriLimit));
+        assertEq(bytes(registry.listing(address(license)).appName).length, nameLimit);
+
+        vm.prank(developer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Rub3Registry.TextTooLong.selector, "appName", nameLimit + 1, nameLimit
+            )
+        );
+        registry.updateListing(address(license), _text(nameLimit + 1), "ipfs://bafyTestApp");
+
+        vm.prank(developer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Rub3Registry.TextTooLong.selector, "contentURI", uriLimit + 1, uriLimit
+            )
+        );
+        registry.updateListing(address(license), "Test App", _text(uriLimit + 1));
+
+        assertEq(
+            bytes(registry.listing(address(license)).appName).length,
+            nameLimit,
+            "a refused update must leave the stored listing as it was"
+        );
+    }
+
+    /// The bound is on the page, not on any one listing's choice: a card page
+    /// containing an entry that used every byte it is allowed still carries only
+    /// the published constants, so the worst case a neighbour can be made to pay
+    /// is a number this contract states rather than one a stranger picks.
+    function test_cardWindow_costOfAMaximalEntryIsTheStatedConstant() public {
+        Rub3Access neighbour = _deployEthOnly(developer);
+        _register(neighbour, developer);
+
+        Rub3Access maximal = _deployEthOnly(otherDev);
+        string memory name = _text(registry.MAX_APP_NAME_BYTES());
+        string memory uri = _text(registry.MAX_CONTENT_URI_BYTES());
+        vm.prank(otherDev);
+        registry.register(address(maximal), name, uri);
+
+        Rub3Registry.AgentCard[] memory page = registry.cardWindow(0, 2);
+        assertEq(page.length, 2);
+        for (uint256 i = 0; i < page.length; i++) {
+            assertLe(bytes(page[i].appName).length, registry.MAX_APP_NAME_BYTES());
+            assertLe(bytes(page[i].contentURI).length, registry.MAX_CONTENT_URI_BYTES());
+            assertLe(page[i].wrapperHashes.length, registry.MAX_CARD_WRAPPER_HASHES());
+        }
     }
 
     /// rub3 changes its take by deploying a new factory. The applications the
@@ -548,6 +684,27 @@ contract Rub3RegistryTest is Test {
         vm.prank(registryOwner);
         vm.expectRevert(abi.encodeWithSelector(Rub3Registry.TextRequired.selector, "reason"));
         registry.suspend(address(license), "");
+    }
+
+    /// The reason never lands on a card, but it goes through the same entry gate
+    /// as every other text field here, so that none is left to be remembered
+    /// separately.
+    function test_suspend_boundsTheReasonAtTheSameGate() public {
+        Rub3Access license = _deployEthOnly(developer);
+        _register(license, developer);
+        uint256 limit = registry.MAX_SUSPENSION_REASON_BYTES();
+
+        vm.prank(registryOwner);
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3Registry.TextTooLong.selector, "reason", limit + 1, limit)
+        );
+        registry.suspend(address(license), _text(limit + 1));
+
+        assertTrue(registry.isListed(address(license)), "a refused suspension changes nothing");
+
+        vm.prank(registryOwner);
+        registry.suspend(address(license), _text(limit));
+        assertFalse(registry.isListed(address(license)));
     }
 
     function test_reinstate_restoresVisibilityOnlyWhenTheOwnerAlsoWantsIt() public {
@@ -780,6 +937,37 @@ contract Rub3RegistryTest is Test {
     }
 
     // ── Group 5: ranking, read live ──────────────────────────────────────────
+
+    /// "A licence contract that cannot answer at all is read as ETH only" has to
+    /// hold for every shape of address that cannot answer, not just for one that
+    /// reverts with a reason.
+    ///
+    /// An address with no code and a contract whose fallback returns nothing
+    /// both produce empty returndata. A `try`/`catch` does not save the caller
+    /// from either, because solc decodes the response in the calling frame and
+    /// omits its `extcodesize` check when a return value is expected - so both
+    /// of these reverted the reader before the registry checked the response
+    /// itself.
+    function test_priceTokenOf_readsAnAddressThatCannotAnswerAsEthOnly() public {
+        address eoa = address(0xEDA);
+        assertEq(eoa.code.length, 0, "the fixture must really have no code");
+        assertEq(registry.priceTokenOf(eoa), address(0));
+        assertTrue(registry.isRecognisedRail(eoa));
+
+        address silent = address(new SilentFallback());
+        assertEq(registry.priceTokenOf(silent), address(0));
+        assertTrue(registry.isRecognisedRail(silent));
+    }
+
+    /// A full word of high bits is a bad quote, not a reason to revert whoever
+    /// asked. Reading it as an unrecognised rail is what keeps one malformed
+    /// answer from taking down the page it shares.
+    function test_priceTokenOf_readsAMalformedAnswerAsABadQuote() public {
+        address dirty = address(new DirtyQuote());
+
+        assertEq(registry.priceTokenOf(dirty), address(uint160(type(uint256).max)));
+        assertFalse(registry.isRecognisedRail(dirty));
+    }
 
     /// The ETH-only shape ranks in the upper group: it quotes no token at all,
     /// and its protocol fee accrues in ETH.

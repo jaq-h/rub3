@@ -825,6 +825,18 @@ The wrapper hash set is the one field a card does not carry whole. `Rub3License.
 
 `appName` is required, because a listing nobody can name is not a listing. `contentURI` is not: an empty string means "nothing published yet", which is the honest state while §3.1 is unbuilt, and a mandatory field a developer has no value for is filled with a placeholder that reads like a URI. That is the position [`deployments.json`](deployments.json) already takes on unpublished addresses.
 
+**Both are length-bounded, and the limits are the two numbers a publisher has to plan around:**
+
+| Field | Limit | Constant |
+|---|---|---|
+| `appName` | 128 bytes | `MAX_APP_NAME_BYTES` |
+| `contentURI` | 512 bytes | `MAX_CONTENT_URI_BYTES` |
+| `suspend` reason | 512 bytes | `MAX_SUSPENSION_REASON_BYTES` |
+
+Bytes, not characters: that is what the chain charges for, so a multi-byte name fits fewer glyphs. Two limits rather than one because a name and a locator are not the same kind of value - a CIDv1 base32 `ipfs://` URI already runs to about 66 bytes before any path is added. Over-length input reverts `TextTooLong(field, length, limit)`, which names what to shorten and to what, so a rejected registration takes one more attempt rather than a bisection.
+
+The bound exists for the same reason the hash cap above does, and it is checked at the point the text *enters* the contract rather than while a card is assembled. `card` copies both strings, and registration is permissionless for anyone holding a factory deploy, so an unbounded `appName` would have let one listing's owner decide what reading a shared page of cards cost everybody in it - exactly the reach `MAX_CARD_WRAPPER_HASHES` was added to close. Bounding at entry also closes the class rather than the two known instances: a text field added later is bounded by being written through the same helper, which is the only way it gets written at all. `contentURI` stays optional throughout - it passes a length-only sibling of the required-text check, so an empty value is still accepted and still means "nothing published yet".
+
 ```bash
 cast call <REGISTRY> "isCanonicalDeploy(address)(bool)" <LICENCE> --rpc-url $RPC
 cast call <REGISTRY> "rankedListings()(address[])" --rpc-url $RPC

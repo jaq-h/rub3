@@ -300,6 +300,41 @@ contract Rub3Registry is Ownable2Step {
     ///         the old end would drop exactly the entries the question is about.
     uint256 public constant MAX_CARD_WRAPPER_HASHES = 32;
 
+    /// @notice The longest {Listing-appName} this registry will store, in bytes.
+    ///
+    ///         Bounded for the same reason {MAX_CARD_WRAPPER_HASHES} is, and it
+    ///         is the same reach: {card} copies this string onto the card, so
+    ///         without a limit here one listing's owner would decide what every
+    ///         {cardWindow} or {cards} page containing them costs to read. A
+    ///         name is a name; 128 bytes is more than a name needs and far less
+    ///         than a page can be made unreadable with.
+    ///
+    ///         Bytes rather than characters, because that is what the chain
+    ///         charges for and what a caller's response budget is spent in. A
+    ///         multi-byte name fits fewer glyphs, which is the honest unit.
+    uint256 public constant MAX_APP_NAME_BYTES = 128;
+
+    /// @notice The longest {Listing-contentURI} this registry will store, in
+    ///         bytes.
+    ///
+    ///         A separate, roomier limit than {MAX_APP_NAME_BYTES} on purpose: a
+    ///         name and a locator are not the same kind of value, and a CIDv1
+    ///         base32 `ipfs://` URI already runs to about 66 bytes before any
+    ///         path or gateway is added.
+    ///
+    ///         A bound, not a requirement. An empty `contentURI` stays valid and
+    ///         still means "nothing published yet"; see {Listing-contentURI}.
+    uint256 public constant MAX_CONTENT_URI_BYTES = 512;
+
+    /// @notice The longest {suspend} reason this registry will log, in bytes.
+    ///
+    ///         Same bound as {MAX_CONTENT_URI_BYTES}, for a different reason:
+    ///         the reason is never stored and never lands on a card, but it is
+    ///         written to a permanent log that indexers replay, and every text
+    ///         field entering this contract goes through the same gate so that
+    ///         none is left to be remembered separately.
+    uint256 public constant MAX_SUSPENSION_REASON_BYTES = 512;
+
     /// @notice The canonical {Rub3Factory} this registry trusts, frozen at
     ///         deploy.
     ///
@@ -427,6 +462,13 @@ contract Rub3Registry is Ownable2Step {
 
     /// @notice A text field a listing is read by was left empty.
     error TextRequired(string field);
+
+    /// @notice A text field was longer than this contract stores.
+    ///
+    ///         Carries what to shorten and to what, because a publisher whose
+    ///         registration reverted needs both numbers to fix it in one more
+    ///         attempt rather than by bisection.
+    error TextTooLong(string field, uint256 length, uint256 limit);
 
     /// @notice Ownership here is the right to curate: to maintain the
     ///         recognised-token list as tokens move, and to withhold the badge.
@@ -583,12 +625,28 @@ contract Rub3Registry is Ownable2Step {
     ///         consistency guarantee rather than a live path: what it rules out
     ///         is one unreachable entry making the whole of {rankedListings}
     ///         revert.
+    ///
+    ///         Deliberately a low-level `staticcall` and not `try`/`catch`. A
+    ///         `try` on a function that returns data decodes the response in
+    ///         *this* frame, and solc omits the `extcodesize` check because the
+    ///         decode would fail anyway - so an address with no code, or a
+    ///         contract with a silent fallback returning nothing, reverts here
+    ///         instead of entering the `catch`, which is the opposite of what
+    ///         the rule above says. Checking the code size first and the
+    ///         response width second is what makes "cannot answer at all" read
+    ///         as ETH only for every shape of address, which is the same reason
+    ///         the constructor probes {factory} behind a code-length check.
     function priceTokenOf(address license) public view returns (address) {
-        try Rub3License(license).priceToken() returns (address token) {
-            return token;
-        } catch {
-            return address(0);
-        }
+        if (license.code.length == 0) return address(0);
+
+        (bool answered, bytes memory response) =
+            license.staticcall(abi.encodeCall(Rub3License(license).priceToken, ()));
+        if (!answered || response.length < 32) return address(0);
+
+        // Decoded as a word and narrowed, rather than as an `address`, so that a
+        // contract answering with dirty high bits is read as a bad quote instead
+        // of reverting the whole page it happens to share.
+        return address(uint160(uint256(abi.decode(response, (bytes32)))));
     }
 
     /// @notice Whether `token` counts as a recognised rail.
@@ -933,7 +991,8 @@ contract Rub3Registry is Ownable2Step {
         if (_listings[license].status != Status.Unknown) revert AlreadyRegistered(license);
         if (!isCanonicalDeploy(license)) revert NotCanonicalDeploy(license);
         _requireLicenseOwner(license);
-        _requireText(appName, "appName");
+        _requireText(appName, "appName", MAX_APP_NAME_BYTES);
+        _requireBoundedText(contentURI, "contentURI", MAX_CONTENT_URI_BYTES);
 
         Listing storage entry = _listings[license];
         entry.status = Status.Listed;
@@ -956,7 +1015,8 @@ contract Rub3Registry is Ownable2Step {
     {
         _requireRegistered(license);
         _requireLicenseOwner(license);
-        _requireText(appName, "appName");
+        _requireText(appName, "appName", MAX_APP_NAME_BYTES);
+        _requireBoundedText(contentURI, "contentURI", MAX_CONTENT_URI_BYTES);
 
         Listing storage entry = _listings[license];
         entry.appName = appName;
@@ -1076,7 +1136,7 @@ contract Rub3Registry is Ownable2Step {
     ///               though the state is reversible.
     function suspend(address license, string calldata reason) external onlyOwner {
         _requireRegistered(license);
-        _requireText(reason, "reason");
+        _requireText(reason, "reason", MAX_SUSPENSION_REASON_BYTES);
 
         Listing storage entry = _listings[license];
         if (entry.suspended) revert ListingSuspended(license);
@@ -1124,7 +1184,28 @@ contract Rub3Registry is Ownable2Step {
         }
     }
 
-    function _requireText(string calldata value, string memory field) private pure {
+    /// @dev The single gate every text field entering this contract passes
+    ///      through, for a field that is required as well as bounded.
+    ///
+    ///      Bounding at entry rather than while a card is assembled is the whole
+    ///      point: a read-side cap would leave the stored string unbounded and
+    ///      would have to be remembered again for the next field somebody adds.
+    ///      Here, a new text field is bounded by being written through this
+    ///      helper, which is the only way it gets written at all.
+    function _requireText(string calldata value, string memory field, uint256 limit) private pure {
         if (bytes(value).length == 0) revert TextRequired(field);
+        _requireBoundedText(value, field, limit);
+    }
+
+    /// @dev The bounded half of {_requireText}, for a field that is optional.
+    ///      `contentURI` uses this one: empty means "nothing published yet" and
+    ///      must keep being accepted, but its length is bounded exactly as a
+    ///      required field's is.
+    function _requireBoundedText(string calldata value, string memory field, uint256 limit)
+        private
+        pure
+    {
+        uint256 length = bytes(value).length;
+        if (length > limit) revert TextTooLong(field, length, limit);
     }
 }
