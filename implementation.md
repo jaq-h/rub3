@@ -142,7 +142,7 @@ surfaces it to the user, and polls the receipt they paste back.
 
 **Deferred**
 - Refactor `activation.html` to Preact (vendored `preact.mjs` + `htm.mjs`, custom-protocol handler via `include_dir` - no Node/build step). Tracked as §5.2.
-- Replace the "paste your tx hash" box with auto-detect + WalletConnect tabs while keeping manual paste as the fallback floor. Tracked as §5.1.
+- Replace the "paste your tx hash" box with auto-detect + WalletConnect tabs while keeping manual paste as the fallback floor. Tracked as §5.1, which carries the per-mode status: auto-detect shipped there, WalletConnect is still outstanding.
 
 **Verification**
 - `cargo test -p rub3-wrapper --lib` (default tier-2): 57 pass (up from 51)
@@ -188,7 +188,7 @@ function cooldownReady(uint256 tokenId)
 - ActivateTxSent handler: spawns a background polling thread (10 × 3s; 30s total timeout) calling `get_tx_receipt`; on confirmation asserts `receipt.to == contract` and `status == true`, reads `activeSessionId`, mints a `new_nonce()`, computes `expires_at` from `SESSION_TTL_SECS`, builds the session message, and emits `onTxConfirmed`
 - SessionSigned handler: assembles `Session` (tier-3 fields populated from echoed state), calls `verify_local`, sends `ActivationResult::SessionSuccess`
 - `activation.rs::ensure` - tries three paths in order: (1) tier-3 session fast path (`load_latest_session` → `verify_local`), (2) legacy proof fast path, (3) webview. Takes a new `session_ttl_secs` param threaded through from `main.rs` (`SESSION_TTL_SECS = 7 days`). On `SessionSuccess` persists via `session_store::save_session`.
-- `assets/activation.html` new screens: `cooldown` (shows calldata + tx-hash input with per-block-remaining banner when cooldown is active), `sign-session` (shows tx hash / block / session id / session message, captures signature). JS tracks `pendingSessionCtx` across the cooldown → tx-confirm → sign-session flow and echoes it back in `session_signed`. The tx-hash input is the "manual paste" path today; the richer auto-detect and WalletConnect tabs layered on top are tracked as §5.1.
+- `assets/activation.html` new screens: `cooldown` (shows calldata + tx-hash input with per-block-remaining banner when cooldown is active), `sign-session` (shows tx hash / block / session id / session message, captures signature). JS tracks `pendingSessionCtx` across the cooldown → tx-confirm → sign-session flow and echoes it back in `session_signed`. The tx-hash input is the "manual paste" path, and it remains the floor; the richer tabs layered on top are tracked as §5.1.
 
 **Phase C - verification hardening `[complete]`**
 - `session::verify_onchain(session, rpc_url)` (gated on `cooldown`) - fetches the activation tx receipt and confirms `status == true`, `receipt.to` matches `session.contract`, `receipt.block_hash` matches `session.activation_block_hash`. Each failure mode has a dedicated `VerifyError` variant (`MissingTxHash`, `MissingBlockHash`, `Rpc`, `ReceiptNotFound`, `TxReverted`, `ContractMismatch`, `BlockHashMismatch`)
@@ -1063,9 +1063,9 @@ The interactive path stays fully supported - manual tx-hash paste is the floor t
 
 ### 5.1 - Frictionless tx confirmation `[partial]`
 
-Demoted from Phase 1, where it was specified as §1.10 before the agent-first revision; the spec below applies unchanged when picked up. The manual-paste floor already works and stays reachable forever, so richer confirmation modes are human-surface polish rather than a gap.
+Demoted from Phase 1, where it was specified as §1.10 before the agent-first revision; the spec below is the one that was picked up, with the four places auto-detect had to depart from it recorded under §5.1a "As built". The manual-paste floor already works and stays reachable forever, so richer confirmation modes are human-surface polish rather than a gap.
 
-The purchase (§1.7) and activate (§1.8) flows currently ask the user to paste a transaction hash back into the webview after sending from their wallet. That manual-paste path is our robust fallback - it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
+The purchase (§1.7) and activate (§1.8) flows originally asked the user to paste a transaction hash back into the webview after sending from their wallet, and still do whenever the Manual tab is the one in use. That manual-paste path is our robust fallback - it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
 
 **Three modes, in order of preference:**
 
