@@ -180,7 +180,9 @@ fn deploy_access() -> String {
             "(0,0x0000000000000000000000000000000000000000,0)",
             "(0,0x0000000000000000000000000000000000000000)",
             "0",
-            "15",
+            // SessionTerms (§3.4): (cooldownBlocks, seatsPerToken,
+            // sessionTtlSeconds). One seat, which is the tier-3 licence.
+            "(15,1,86400)",
             ZERO_ADDR,
             DEPLOYER_ADDR,
         ],

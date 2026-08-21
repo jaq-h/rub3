@@ -64,6 +64,7 @@ contract Rub3FactoryTest is Test {
     uint256 internal constant PRICE = 1 ether;
     uint256 internal constant USDC_PRICE = 5_000_000; // 5 USDC, 6 decimals
     uint256 internal constant COOLDOWN_BLOCKS = 15;
+    uint256 internal constant SESSION_TTL = 24 hours;
 
     /// Within [MIN_FEE_BPS, MAX_FEE_BPS]. Deliberately not a round 2% or 3%: the
     /// rate is a deploy-time decision and the tests must not read as if one
@@ -99,6 +100,21 @@ contract Rub3FactoryTest is Test {
     }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────
+
+    /// Session terms with the single-seat default: one concurrent session per
+    /// token, which is the tier-3 licence seats generalise (§3.4).
+    function _session() internal pure returns (Rub3License.SessionTerms memory) {
+        return _session(1);
+    }
+
+    /// Session terms granting `seats` concurrent sessions per token.
+    function _session(uint256 seats) internal pure returns (Rub3License.SessionTerms memory) {
+        return Rub3License.SessionTerms({
+            cooldownBlocks: COOLDOWN_BLOCKS,
+            seatsPerToken: seats,
+            sessionTtlSeconds: SESSION_TTL
+        });
+    }
 
     function _hashes(bytes32 h) internal pure returns (bytes32[] memory out) {
         out = new bytes32[](1);
@@ -136,7 +152,7 @@ contract Rub3FactoryTest is Test {
             wrapperHashes: _hashes(WRAPPER_HASH),
             sale: sale,
             supplyCap: 0,
-            cooldownBlocks: COOLDOWN_BLOCKS,
+            session: _session(),
             predecessor: address(0),
             owner: address(0) // defaults to the caller
         });
@@ -169,7 +185,7 @@ contract Rub3FactoryTest is Test {
             _saleEthOnly(price),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             developer
         );
@@ -826,7 +842,7 @@ contract Rub3FactoryTest is Test {
             _sale(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             developer
         );
@@ -858,7 +874,7 @@ contract Rub3FactoryTest is Test {
             _saleEthOnly(PRICE),
             Rub3License.FeeTerms({feeBps: 10_001, treasury: treasury}),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             developer
         );
@@ -878,7 +894,7 @@ contract Rub3FactoryTest is Test {
             _saleEthOnly(PRICE),
             Rub3License.FeeTerms({feeBps: 250, treasury: address(0)}),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             developer
         );
@@ -896,7 +912,7 @@ contract Rub3FactoryTest is Test {
             _saleEthOnly(PRICE),
             Rub3License.FeeTerms({feeBps: 0, treasury: treasury}),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             developer
         );
@@ -966,7 +982,7 @@ contract Rub3FactoryTest is Test {
             _saleEthOnly(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             developer
         );
@@ -1125,7 +1141,7 @@ contract Rub3FactoryTest is Test {
             _saleEthOnly(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(shadow),
             developer
         );

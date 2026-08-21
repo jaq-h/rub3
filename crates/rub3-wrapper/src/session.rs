@@ -355,16 +355,46 @@ impl SessionDraft {
     }
 }
 
+/// The session's `expires_at`: the earlier of the packed TTL and the on-chain
+/// seat expiry, as RFC 3339.
+///
+/// The clamp is the whole of "the chain is authoritative". A session that
+/// outlived its seat would keep launching after the contract had freed the seat
+/// for somebody else, which is a token running more concurrent sessions than it
+/// sold - so where the two clocks disagree, the shorter one wins.
+#[cfg(feature = "cooldown")]
+fn session_expiry(session_ttl_secs: i64, seat_expires_at: u64) -> Result<String, String> {
+    let packed = chrono::Utc::now() + chrono::Duration::seconds(session_ttl_secs);
+    let seat = chrono::DateTime::from_timestamp(
+        i64::try_from(seat_expires_at)
+            .map_err(|_| format!("contract reported an unusable seat expiry: {seat_expires_at}"))?,
+        0,
+    )
+    .ok_or_else(|| format!("contract reported an unusable seat expiry: {seat_expires_at}"))?;
+
+    Ok(packed.min(seat).to_rfc3339())
+}
+
 /// Reads the on-chain facts a fresh tier-3 session binds to, and assembles the
 /// preimage the wallet must sign.
 ///
-/// Given a landed `activate()` receipt, this reads `activeSessionId`, resolves
-/// the contract's identity model (deriving the ERC-6551 TBA locally for
-/// account-model deploys), mints a nonce, computes `expires_at` from the TTL,
+/// Given a landed `activate()` receipt, this decodes the seat that activation
+/// took, resolves the contract's identity model (deriving the ERC-6551 TBA
+/// locally for account-model deploys), mints a nonce, computes `expires_at`,
 /// and builds the session message over all of it.
 ///
 /// `block_hash` is the activation transaction's block hash, which binds the
 /// session to a specific point on the chain - `verify_onchain` re-checks it.
+///
+/// `activation` comes from the transaction's own receipt rather than from a
+/// state read, because under seats (§3.4) a fleet coming up puts several
+/// activations in one block and a view read cannot say which was yours.
+///
+/// **The session never outlives the seat that admits it.** `expires_at` is the
+/// earlier of the packed TTL and the seat's own on-chain expiry, so packaging
+/// can shorten a session and never lengthen one past the concurrency the
+/// contract sold. Getting that backwards would let a token run more sessions at
+/// once than it has seats.
 ///
 /// Errors are returned as display strings: the callers surface them to a UI or
 /// wrap them in their own error type, and none of them branch on the variant.
@@ -378,10 +408,10 @@ pub fn draft_from_activation(
     token_id: u64,
     wallet: alloy::primitives::Address,
     block_hash: &str,
+    activation: crate::rpc::ActivationRecord,
     session_ttl_secs: i64,
 ) -> Result<SessionDraft, String> {
-    let session_id = crate::rpc::active_session_id(rpc_url, contract, token_id)
-        .map_err(|e| format!("failed to read activeSessionId: {e}"))?;
+    let session_id = activation.session_id;
 
     // Identity model + TBA derivation. The TBA is pure CREATE2 - no RPC beyond
     // reading the implementation address the contract was deployed with.
@@ -407,8 +437,7 @@ pub fn draft_from_activation(
     let user_id = crate::identity::resolve_user_id(model, wallet, tba);
     let wallet_str = crate::identity::format_addr(wallet);
     let nonce = new_nonce();
-    let expires_at =
-        (chrono::Utc::now() + chrono::Duration::seconds(session_ttl_secs)).to_rfc3339();
+    let expires_at = session_expiry(session_ttl_secs, activation.seat_expires_at)?;
 
     let message = session_message(
         app_id,
@@ -812,6 +841,46 @@ mod tests {
     fn verify_local_expired_fails() {
         let s = make_session(Some("2000-01-01T00:00:00Z"));
         assert!(matches!(verify_local(&s), Err(VerifyError::Expired)));
+    }
+
+    // ── Seats: the session never outlives the seat that admits it (§3.4) ─────
+
+    /// The clamp that keeps a token from running more sessions at once than it
+    /// has seats. A packed TTL longer than the contract's would leave a session
+    /// launching after the chain had handed its seat to somebody else.
+    #[test]
+    #[cfg(feature = "cooldown")]
+    fn session_expiry_takes_the_seat_when_the_seat_is_shorter() {
+        let seat = chrono::Utc::now().timestamp() as u64 + 60;
+        let expiry = session_expiry(86_400, seat).expect("a usable expiry");
+        let parsed: chrono::DateTime<chrono::Utc> = expiry.parse().expect("rfc3339");
+        assert_eq!(parsed.timestamp(), seat as i64);
+    }
+
+    /// And the other direction: packaging may shorten a session. A wrapper that
+    /// wants sessions to last an hour on a contract that grants a day gets an
+    /// hour.
+    #[test]
+    #[cfg(feature = "cooldown")]
+    fn session_expiry_takes_the_packed_ttl_when_it_is_shorter() {
+        let now = chrono::Utc::now().timestamp();
+        let seat = now as u64 + 86_400;
+        let expiry = session_expiry(3_600, seat).expect("a usable expiry");
+        let parsed: chrono::DateTime<chrono::Utc> = expiry.parse().expect("rfc3339");
+        assert!(
+            (parsed.timestamp() - (now + 3_600)).abs() <= 1,
+            "expected the packed hour, got {expiry}"
+        );
+    }
+
+    /// A seat expiry a `DateTime` cannot hold is a contract answering something
+    /// this build cannot reason about. Reported rather than silently clamped:
+    /// a clamp would be this wrapper choosing a session lifetime the chain
+    /// never agreed to.
+    #[test]
+    #[cfg(feature = "cooldown")]
+    fn session_expiry_refuses_an_unusable_seat_expiry() {
+        assert!(session_expiry(3_600, u64::MAX).is_err());
     }
 
     // ── verify_onchain - pre-flight error paths (no network needed) ──────────

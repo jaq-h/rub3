@@ -52,7 +52,7 @@ One block is exempt, via the formatter's own `// forgefmt: disable-next-item` ma
 
 Prefer that marker, scoped to one item, over a config change, whenever a single block needs to keep its shape.
 
-One block keeps its shape without a marker and must go on doing so: the `string[25] memory forbidden` list in `test/Rub3Invariants.t.sol`. `prefer_compact = "none"` and `line_length = 100` leave it one signature per line, and that is the layout the wrapper's mirror test parses when it checks `attest::FORBIDDEN_SIGNATURES` against the Solidity list. A `[fmt]` change that repacked the array would turn that Rust test red rather than drift in silence, but the coupling is worth knowing before touching the settings. The sibling `string[10]` in `test/Rub3CodeRegistry.t.sol` has the same shape and no such reader.
+One block keeps its shape without a marker and must go on doing so: the `string[30] memory forbidden` list in `test/Rub3Invariants.t.sol`. `prefer_compact = "none"` and `line_length = 100` leave it one signature per line, and that is the layout the wrapper's mirror test parses when it checks `attest::FORBIDDEN_SIGNATURES` against the Solidity list. A `[fmt]` change that repacked the array would turn that Rust test red rather than drift in silence, but the coupling is worth knowing before touching the settings. The sibling `string[10]` in `test/Rub3CodeRegistry.t.sol` has the same shape and no such reader.
 
 ## Local testing with Anvil
 
@@ -171,7 +171,9 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | `WRAPPER_HASH` | no | Single-hash shorthand for `WRAPPER_HASHES`. Ignored when `WRAPPER_HASHES` is set; a zero hash means "none" |
 | `PREDECESSOR` | no | License contract whose holders may migrate onto this one via `claimFromPredecessor`. Frozen at deploy; `0x0` (default) accepts no migrations. With `FACTORY` set it must additionally be canonical - see [A factory deploy may only succeed a canonical predecessor](#a-factory-deploy-may-only-succeed-a-canonical-predecessor) |
 | `SUPPLY_CAP` | no | Max mintable tokens; `0` = uncapped (default). Immutable once deployed |
-| `COOLDOWN_BLOCKS` | no | Blocks between activations per token (default `1800` ≈ 1 hr on Base; floor `15` ≈ 30 s is enforced on-chain) |
+| `COOLDOWN_BLOCKS` | no | Blocks a *seat* must wait between activations (default `1800` ≈ 1 hr on Base; floor `15` ≈ 30 s is enforced on-chain). Per seat, so a token lands at most `SEATS` activations per window |
+| `SEATS` | no | Concurrent sessions one token grants (default `1`, the single-session tier-3 licence; ceiling `64` is enforced on-chain). Immutable and per contract: sell a second seat count by deploying a second contract |
+| `SESSION_TTL` | no | Seconds a seat stays taken when nobody releases it (default `86400`; range `300` to `7776000` is enforced on-chain). This is what frees a seat when a fleet instance dies without calling `release` |
 | `OWNER` | no | Contract owner address; defaults to broadcaster |
 | `FACTORY` | no | `Rub3Factory` to deploy through. Set it to the **published canonical address** to stamp the protocol fee and get an `isDeployed` row. It also constrains `PREDECESSOR`, which has to be canonical on this path. Unset or `0x0` (**the default**) deploys directly: fee-free and **unrecorded**, free to name any predecessor, and nothing fails to tell you so. The canonical address for a chain is published in [`deployments.json`](deployments.json), and is unpopulated on every chain until launch. See [The protocol fee](#the-protocol-fee) and [A factory deploy may only succeed a canonical predecessor](#a-factory-deploy-may-only-succeed-a-canonical-predecessor) |
 
@@ -725,7 +727,7 @@ The manifest keys contracts by name, so a name declared in two different files u
 
 - **A record says the code is a genuine rub3 release. It says nothing about a deployment.** Which address runs that code, who deployed it, what the immutables behind the mask were set to, and how the owner will behave are all outside it. "Was this deployed through the canonical factory" is `Rub3Factory.isDeployed` on a specific factory address, and the two questions must not be run together.
 - **`Deprecated` means "not recommended for new purchases". It never means "stop honouring".** The record stays whole, offsets included, and a held token is untouched - the registry has no status that could invalidate one, and nothing on any launch path reads it. An agent meeting a deprecated hash warns and buys.
-- **Nothing can be removed, overwritten, or moved backwards.** `publish` reverts on a hash that already has a record, deprecated ones included. There is no proxy, no removal, and no un-deprecate. A compromise of the owner key can therefore only *add*, and every addition is a permanent public `Published` event. `test/Rub3CodeRegistry.t.sol` asserts the removal and rewrite surfaces are absent from the deployed runtime bytecode, the way the licence contracts' forbidden selectors are - with its own 10-name list, because the shared 25-name list is about tokens and says nothing about a registry.
+- **Nothing can be removed, overwritten, or moved backwards.** `publish` reverts on a hash that already has a record, deprecated ones included. There is no proxy, no removal, and no un-deprecate. A compromise of the owner key can therefore only *add*, and every addition is a permanent public `Published` event. `test/Rub3CodeRegistry.t.sol` asserts the removal and rewrite surfaces are absent from the deployed runtime bytecode, the way the licence contracts' forbidden selectors are - with its own 10-name list, because the shared 30-name list is about tokens and says nothing about a registry.
 
 ### Publishing a release
 
@@ -966,13 +968,16 @@ for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
            "unrevokeWrapperHash(bytes32)" \
            "forceMigrate(uint256,address)" "setPredecessor(address)" \
            "setPreviousFactory(address)" \
-           "setFeeBps(uint16)" "setTreasury(address)"; do
+           "setFeeBps(uint16)" "setTreasury(address)" \
+           "setSeatsPerToken(uint256)" "setMaxConcurrentSessions(uint256,uint256)" \
+           "setSessionTtl(uint256)" \
+           "revokeSeat(uint256,uint256)" "clearSeats(uint256)"; do
   SEL=$(cast sig "$SIG" | sed 's/^0x//')
   case "$CODE" in *"$SEL"*) echo "PRESENT: $SIG";; esac
 done
 ```
 
-Silence means exactly one thing: none of those 25 known revocation selectors appears in the deployed runtime bytecode. **It is not evidence that no revocation surface exists**, and it should never be reported as though it were. The list is a blacklist of *names*, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, or something as dull as `reconcileLedger(uint256,address)` - and pass this scan in silence. The scan also weakens with every legitimate function the contracts gain, because one more plausible-looking owner function is far less conspicuous among fifteen than among six.
+Silence means exactly one thing: none of those 30 known revocation selectors appears in the deployed runtime bytecode. **It is not evidence that no revocation surface exists**, and it should never be reported as though it were. The list is a blacklist of *names*, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, or something as dull as `reconcileLedger(uint256,address)` - and pass this scan in silence. The scan also weakens with every legitimate function the contracts gain, because one more plausible-looking owner function is far less conspicuous among fifteen than among six.
 
 Its real job is the failure message. When the fingerprint comparison rejects a contract, this scan is what turns "unrecognised code" into "the contract exposes `seize(uint256)`" - a finding a human can act on. That is the whole of its value, and the wrapper keeps it for exactly that reason and labels it a diagnostic in the code.
 
@@ -983,7 +988,6 @@ Sanity-check the method itself against a selector that *is* there - `cast sig "a
 The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern), the §2.2 stablecoin rail, the §2.3 factory and protocol fee, and the §2.9 code registry, all of which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
 
 - **`contentURI`** (§3.1) - content-addressed binary location on-chain, making the contract a complete distribution record
-- **Concurrent seats** (§3.4) - `maxConcurrentSessions[tokenId] = K` generalizing `activeSessionId` for agent fleets
 - **`Rub3Metered`** (§4.1) - per-launch / per-session micropayment billing
 - **`Rub3Registry`** (§3.2) - discovery and verification, never validity; entries double as ERC-8004-style agent cards. Distinct from the `Rub3CodeRegistry` above, which records which *code* is a genuine rub3 release and lists no products
 

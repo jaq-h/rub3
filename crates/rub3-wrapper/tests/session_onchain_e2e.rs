@@ -102,9 +102,9 @@ fn start_anvil() -> AnvilGuard {
 fn forge_create_rub3_access() -> String {
     // 10 constructor args:
     //   name, symbol, identity, wrapperHashes, sale, fee, supplyCap,
-    //   cooldownBlocks, predecessor, owner
+    //   session, predecessor, owner
     //
-    // Three of them are tuples that `forge create` takes parenthesised.
+    // Four of them are tuples that `forge create` takes parenthesised.
     // `identity` is `(identityModel, tbaImplementation)`. `sale` is the
     // `SaleTerms` of contracts §2.2 - (price in wei, priceToken, priceAmount) -
     // where a zero priceToken advertises no stablecoin rail. `fee` is the
@@ -140,7 +140,11 @@ fn forge_create_rub3_access() -> String {
             // FeeTerms: (feeBps, treasury). Direct deploy, so no fee.
             "(0,0x0000000000000000000000000000000000000000)",
             "0",
-            "15",
+            // SessionTerms: (cooldownBlocks, seatsPerToken, sessionTtlSeconds)
+            // of §3.4. One seat is the tier-3 licence seats generalise, and the
+            // seat suite in `contracts/test/Rub3Seats.t.sol` is where K > 1 is
+            // proven; this fixture is about the wrapper meeting the contract.
+            "(15,1,86400)",
             zero_addr,
             DEPLOYER_ADDR,
         ])

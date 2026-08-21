@@ -73,6 +73,34 @@ fn mint_log() -> serde_json::Value {
     })
 }
 
+/// The words `activationStatus(tokenId)` answers with, ABI-encoded (§3.4).
+///
+/// Every member of the struct is static, so the return is the members back to
+/// back with no offset in front of them. The fixtures below build their answers
+/// through this rather than each writing out a hex string, so a field added to
+/// the struct is one edit and not four.
+#[cfg(feature = "cooldown")]
+fn activation_status_hex(
+    ready: bool,
+    fleet_exhausted: bool,
+    seat_index: u64,
+    seats_in_use: u64,
+    seats: u64,
+    blocks_remaining: u64,
+    seconds_remaining: u64,
+) -> String {
+    format!(
+        "0x{:064x}{:064x}{:064x}{:064x}{:064x}{:064x}{:064x}",
+        u8::from(ready),
+        u8::from(fleet_exhausted),
+        seat_index,
+        seats_in_use,
+        seats,
+        blocks_remaining,
+        seconds_remaining,
+    )
+}
+
 /// A node that has already seen the buyer's `purchase()` land.
 ///
 /// Answers the four calls the whole purchase-to-cooldown path makes: the head
@@ -106,9 +134,9 @@ fn purchased_reply(method: &str, _params: &serde_json::Value) -> serde_json::Val
             "logsBloom": format!("0x{:0>512}", ""),
             "status": "0x1",
         }),
-        // The only view the cooldown screen reads: `cooldownReady(tokenId)`,
-        // answering "ready, nothing remaining".
-        "eth_call" => serde_json::json!(format!("0x{:064x}{:064x}", 1, 0)),
+        // The only view the cooldown screen reads: `activationStatus(tokenId)`,
+        // answering "ready, seat 0, none of one in use, nothing remaining".
+        "eth_call" => serde_json::json!(activation_status_hex(true, false, 0, 0, 1, 0, 0)),
         _ => serde_json::json!(null),
     }
 }
@@ -482,8 +510,18 @@ fn a_watch_that_fails_inside_a_cooldown_says_to_wait_for_it() {
     let reported_head = Arc::clone(&head_readable);
 
     let node = StubNode::routed(move |method, params| match method {
-        // `cooldownReady(tokenId)`: not ready, with a long way to go.
-        "eth_call" => serde_json::json!(format!("0x{:064x}{COOLING_BLOCKS:064x}", 0)),
+        // `activationStatus(tokenId)`: a free seat, and a long cooldown to go.
+        "eth_call" => {
+            serde_json::json!(activation_status_hex(
+                false,
+                false,
+                0,
+                0,
+                1,
+                COOLING_BLOCKS,
+                0
+            ))
+        }
         // Unusable once the watch is armed, so the watch gives up on the read it
         // opens with rather than on one that would tell it about the cooldown.
         "eth_blockNumber" if !reported_head.load(Ordering::Relaxed) => serde_json::Value::Null,
@@ -666,8 +704,8 @@ fn cooldown_hold() -> Duration {
     crate::webview::cooldown_wait(COOLDOWN_BLOCKS_REMAINING)
 }
 
-/// A node whose token is mid-cooldown: `cooldownReady` says not yet, with
-/// [`COOLDOWN_BLOCKS_REMAINING`] to go.
+/// A node whose token is mid-cooldown: `activationStatus` reports a free seat
+/// and [`COOLDOWN_BLOCKS_REMAINING`] to go.
 ///
 /// Nothing else needs an answer, because a watch that respects the cooldown asks
 /// nothing else until it has passed - which is what the test is about.
@@ -676,7 +714,15 @@ fn cooling_node() -> StubNode {
     StubNode::routed(|method, _params| match method {
         "eth_blockNumber" => serde_json::json!(format!("0x{HEAD:x}")),
         "eth_call" => {
-            serde_json::json!(format!("0x{:064x}{COOLDOWN_BLOCKS_REMAINING:064x}", 0))
+            serde_json::json!(activation_status_hex(
+                false,
+                false,
+                0,
+                0,
+                1,
+                COOLDOWN_BLOCKS_REMAINING,
+                0
+            ))
         }
         "eth_getLogs" => serde_json::json!([]),
         _ => serde_json::json!(null),

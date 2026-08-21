@@ -24,7 +24,7 @@ The flow above is the interactive (human) path. Agents take the same loop throug
 RUB3_AGENT_KEY=0x<hex> rub3-wrapper --headless --binary /path/to/your/app
 ```
 
-One call runs `tokensOfOwner` → purchase if empty → cooldown check → `activate()` → sign the session locally → verify → persist, then launches. Documented exit codes let an orchestrator react programmatically. See [Headless activation](#headless-activation-agents) below.
+One call runs `tokensOfOwner` → purchase if empty → seat and cooldown check → `activate()` → sign the session locally → verify → persist, then launches. Documented exit codes let an orchestrator react programmatically. See [Headless activation](#headless-activation-agents) below.
 
 ## Project structure
 
@@ -109,6 +109,7 @@ rub3/
 │   │   └── Rub3Registry.sol          # §3.2 - discovery: which apps exist and are listable. NOT the code registry
 │   ├── test/
 │   │   ├── Rub3Access.t.sol
+│   │   ├── Rub3Seats.t.sol           # §3.4: K concurrent seats, TTL lapse, and the per-seat churn defence
 │   │   ├── Rub3Invariants.t.sol      # Ownership invariants (§2.4) + no-revocation bytecode audit
 │   │   ├── Rub3TokenPurchase.t.sol   # Stablecoin rail (§2.2): EIP-3009 authorization, replay, front-running
 │   │   ├── Rub3Factory.t.sol         # §2.3: fee immutability, exact split on both rails, direct deploys
@@ -215,6 +216,15 @@ cargo run -p rub3-cli -- pack \
   --contract 0x1234...abcd --chain base --tier cooldown --headless \
   --session-ttl 7 --output ./dist/myapp
 ```
+
+`deploy` takes the seat terms of §3.4 alongside the cooldown: `--seats K`
+grants K concurrent sessions per token (default 1, the single-session tier-3
+licence), and `--session-ttl SECONDS` says how long a seat stays taken when
+nobody releases it. Both are frozen at deploy, so what a buyer reads before
+paying is what their token grants for as long as it exists. `--session-ttl` on
+`pack` is a different number in a different unit - days, and the wrapper's own
+session lifetime - and the wrapper always takes the *shorter* of the two, so
+packaging can shorten a session and never outlive the seat that admits it.
 
 The application is embedded with `include_bytes!` and extracted on first launch
 to `{data_dir}/rub3/apps/{app_id}/{sha256}/{name}`, after activation succeeds and
@@ -388,7 +398,7 @@ RUB3_LICENSE_DIR=/tmp/rub3-test cargo run -p rub3-wrapper -- --binary /path/to/y
 `--headless` runs the whole activation pipeline with no window and no human:
 enumerate the signer's tokens, purchase one if it holds none (verifying the
 contract's code first - see [Contract code check](#contract-code-check)), check
-the cooldown, send `activate()`, sign the session message locally, verify it,
+the seat and cooldown status, send `activate()`, sign the session message locally, verify it,
 and persist it - then launch the wrapped binary.
 
 ```bash
@@ -486,7 +496,8 @@ claim to be one:
 
 - It says nothing about the masked values themselves. Canonical code pointed at
   a hostile ERC-6551 implementation matches. Read `identityModel()`,
-  `tbaImplementation()`, `supplyCap()`, `cooldownBlocks()`, `predecessor()`,
+  `tbaImplementation()`, `supplyCap()`, `cooldownBlocks()`, `seatsPerToken()`,
+  `sessionTtlSeconds()`, `predecessor()`,
   `feeBps()` and `treasury()` and check them against your own policy.
 - It says nothing about how a contract owner will use the powers the invariants
   deliberately keep (`setPrice`, `setSuccessor`, `revokeWrapperHash`,
@@ -526,7 +537,7 @@ activation failure.
 | 10 | No usable signer | Configure `RUB3_AGENT_KEY` or a keystore |
 | 11 | Insufficient funds for purchase + gas | Top up the wallet |
 | 12 | No token held and supply sold out | Terminal - try another contract |
-| 13 | Cooldown active | Back off `blocks_remaining` blocks, then retry |
+| 13 | Cooldown active on a seat | Back off `blocks_remaining` blocks, then retry |
 | 14 | `activate()` failed (reverted, or not confirmed in time) | Retry - a re-run re-reads ownership, so a purchase this run already completed is activated, not paid for twice |
 | 15 | Session verification failed | Signer/config bug - do not retry blindly |
 | 16 | Chain RPC / transport failure | Retry, or switch endpoint |
@@ -537,6 +548,7 @@ activation failure.
 | 21 | Purchase broadcast but not confirmed - timed out, or the receipt query kept failing | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
 | 22 | The listed price is above the configured spend ceiling for the rail it was listed on. On the stablecoin rail the ceiling is weighed before anything is signed, so the rail was not exercised and this is no evidence it is otherwise usable; on the ETH rail it is weighed before the transaction is sent, so no gas was spent | Terminal - raise the variable the message names (`RUB3_AGENT_MAX_TOKEN_AMOUNT` or `RUB3_AGENT_MAX_ETH_WEI`) if the price is acceptable, or do not buy |
 | 23 | This build will not buy a licence from the contract at that address, either because the code is canonical rub3 code at an address that sells none (the factory, a deployer helper, the code registry, or the discovery registry) or because no authority it could reach vouches for it. Checked before anything is signed, so no transaction was sent and nothing was spent | Terminal - the same address holds the same code. The detail line below says which case it is: verify the address, or use a build packed with the release that contract came from |
+| 24 | Fleet exhausted - every seat this token grants is holding a live session (§3.4). Nothing was sent and nothing was spent | Scale down, `--release-seat` on an instance you are done with, or buy another token. The detail line carries `seats_in_use`, `seats` and `seconds_remaining`, which is when the earliest seat lapses if you do nothing |
 
 Failures with structured parameters also print one parseable line, carrying only
 parameters the wrapper actually measured:
@@ -672,9 +684,9 @@ the authority on what each covers, what it cost, and what comes next.
 - **Sessions** - schema, local sign and verify, TTL, per-token persistence, and tier-3 on-chain re-verification on a sampled fraction of cold starts
 - **Interactive front door** - native activation window: address input, token enumeration and selection, purchase and cooldown screens, signature paste. Those two screens confirm a transaction through an Auto-detect tab that watches the chain for it (§5.1a) or a Manual tab that takes a pasted tx hash; Manual is always reachable
 - **Headless front door (§2.1)** - `--headless` runs enumerate → purchase → activate → sign → verify → persist → launch in one call, with stable exit codes and a `Signer` trait for KMS- or enclave-backed keys
-- **On-chain reads** - `ownerOf`, price on both rails, supply, enumeration, cooldown, session id, receipt polling, via alloy
+- **On-chain reads** - `ownerOf`, price on both rails, supply, enumeration, seat and cooldown status, receipt polling, via alloy
 - **Identity models** - `access` and `account`, with local ERC-6551 TBA derivation signed into the session preimage
-- **Contracts** - `Rub3Access`, the one licence model: ERC-721 + Enumerable, bought once on either payment rail, valid for as long as it is held, with tier-3 `activate` + cooldown. 255 forge tests
+- **Contracts** - `Rub3Access`, the one licence model: ERC-721 + Enumerable, bought once on either payment rail, valid for as long as it is held, with tier-3 `activate` + per-seat cooldown and §3.4 concurrent seats. 290 forge tests
 - **Stablecoin rail (§2.2)** - USDC purchases through EIP-3009 authorizations anyone may submit, including from EIP-1271 smart-contract wallets, so an agent holding no ETH can still buy the price
 - **`Rub3Factory` + protocol fee (§2.3)** - immutable fee terms stamped into every canonical deploy and recorded in `isDeployed`; direct deploys stay fee-free and unrecorded. The registry the row is for is built (§3.2) and the marketplace (§4.3) is not, and neither is deployed: the factory and the registry launch together, so nothing reaches mainnet or is declared ready before then
 - **Ownership invariants (§2.4)** - append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor`, the contract-side `honorsContract` trust rule, and a no-revocation bytecode audit over three deployed contracts

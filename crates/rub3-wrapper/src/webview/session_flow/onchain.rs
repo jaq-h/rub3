@@ -47,6 +47,11 @@ const APP_ID: &str = "com.rub3.session-flow-test";
 const CHAIN_ID: u64 = 31337; // anvil's default
 const SESSION_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 
+/// Seconds a seat stays taken on the fixture contract (§3.4). Long enough that
+/// no flow here lapses mid-test, so the seat state these tests see is only ever
+/// what they put there.
+const SEAT_TTL_SECS: u64 = 24 * 60 * 60;
+
 /// The contract's enforced floor, `MIN_COOLDOWN_BLOCKS`. Every fixture here
 /// deploys at it: the shortest legal window is the fastest to mine past, and it
 /// is the value a real deploy is most likely to be checked against.
@@ -179,15 +184,18 @@ fn start_anvil() -> AnvilGuard {
 /// Deploys `Rub3Access` minting for free on the ETH rail, with no supply cap.
 ///
 /// Constructor args (10): name, symbol, identity, wrapperHashes, sale, fee,
-/// supplyCap, cooldownBlocks, predecessor, owner - the shape `headless_e2e.rs`
+/// supplyCap, session, predecessor, owner - the shape `headless_e2e.rs`
 /// documents at length. `identity` is `(model, tbaImpl)`; `sale` is
 /// `(price, priceToken, priceAmount)`, where a zero `priceToken` advertises no
 /// stablecoin rail; `fee` is `(feeBps, treasury)`, zero for a direct deploy.
 /// `wrapperHashes` is seeded with one stand-in release hash because the zero
-/// hash is the `Unknown` sentinel and is rejected on-chain.
+/// hash is the `Unknown` sentinel and is rejected on-chain. `session` is the
+/// `SessionTerms` of §3.4 - `(cooldownBlocks, seatsPerToken,
+/// sessionTtlSeconds)` - with the single seat these flows are about; the seat
+/// count itself is proven in `contracts/test/Rub3Seats.t.sol`.
 fn deploy_access() -> String {
     let sale = format!("({PRICE_WEI},{ZERO_ADDR},0)");
-    let cooldown = COOLDOWN_BLOCKS.to_string();
+    let session = format!("({COOLDOWN_BLOCKS},1,{SEAT_TTL_SECS})");
     let output = Command::new("forge")
         .current_dir(contracts_dir())
         .args([
@@ -206,7 +214,7 @@ fn deploy_access() -> String {
             &sale,
             "(0,0x0000000000000000000000000000000000000000)",
             "0",
-            &cooldown,
+            &session,
             ZERO_ADDR,
             DEPLOYER_ADDR,
         ])

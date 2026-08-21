@@ -467,7 +467,7 @@
       <div class="tv" id="cd-owner">-</div>
     </div>
     <div id="cd-wait" class="token-box hidden" style="background:#2a1a1a;border-color:#4a2a2a">
-      <div class="tl" style="color:#a65a5a">Cooldown Active</div>
+      <div class="tl" style="color:#a65a5a" id="cd-wait-title">Cooldown Active</div>
       <div class="tv" id="cd-countdown" style="color:#f0a0a0">-</div>
       <div id="cd-blocks-note">-</div>
     </div>
@@ -722,10 +722,12 @@
     // Zero. The contract will take the transaction now, and the wrapper's
     // watcher comes off its hold at this same moment, so the screen becomes
     // the one it would have rendered had the token been ready all along: the
-    // wait box goes, and the copy says what it says outside a cooldown.
+    // wait box goes, and the copy says what it says outside a wait. The same
+    // for both waits this box carries - a cooldown running out and the last
+    // seat lapsing are the same moment to this screen.
     cooldownEndsAt = 0;
     document.getElementById('cd-wait').classList.add('hidden');
-    setCooldownWatchCopy(false);
+    setCooldownWatchCopy(false, false);
   }
 
   // The two lines the auto-detect panel carries on this screen, and the only
@@ -739,13 +741,21 @@
   // guaranteed not to have. Both wait: the wrapper holds its watch until the
   // cooldown ends, and the copy says so rather than promising to be looking
   // already.
-  function setCooldownWatchCopy(cooling) {
-    document.getElementById('cd-watch-head').textContent = cooling
-      ? 'Waiting for the cooldown to end…'
-      : 'Waiting for your wallet to broadcast the tx…';
-    document.getElementById('cd-watch-sub').textContent = cooling
-      ? 'The contract will accept the transaction once the cooldown above ends. Send it then: we start watching the chain as the cooldown runs out, and will pick it up on our own.'
-      : 'Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.';
+  function setCooldownWatchCopy(waiting, exhausted) {
+    const head = document.getElementById('cd-watch-head');
+    const sub  = document.getElementById('cd-watch-sub');
+    if (!waiting) {
+      head.textContent = 'Waiting for your wallet to broadcast the tx…';
+      sub.textContent  = 'Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.';
+      return;
+    }
+    if (exhausted) {
+      head.textContent = 'Waiting for a seat to free…';
+      sub.textContent  = 'Every seat this licence grants is holding a live session, so the contract will refuse the transaction until one frees. Send it once the countdown above ends: we start watching the chain as it runs out, and will pick it up on our own.';
+      return;
+    }
+    head.textContent = 'Waiting for the cooldown to end…';
+    sub.textContent  = 'The contract will accept the transaction once the cooldown above ends. Send it then: we start watching the chain as the cooldown runs out, and will pick it up on our own.';
   }
 
   // The window closing tears the page down and every timer with it, but only
@@ -1028,24 +1038,43 @@
       clearError('cd-error');
 
       const waitBox    = document.getElementById('cd-wait');
+      const waitTitle  = document.getElementById('cd-wait-title');
       const blocksNote = document.getElementById('cd-blocks-note');
-      const cooling    = !data.ready && data.blocksRemaining > 0;
+      // Two different refusals share this box, because both are answered by
+      // waiting and the page has one clock. What differs is what is being
+      // waited for, so the title, the note and the watch copy all say which.
+      const exhausted  = !data.ready && !!data.fleetExhausted;
+      const cooling    = !data.ready && !exhausted && data.blocksRemaining > 0;
+      const waiting    = cooling || exhausted;
       const waitSecs   = data.cooldownSecsRemaining || 0;
-      cooldownEndsAt   = cooling ? Date.now() + waitSecs * 1000 : 0;
-      if (cooling) {
+      cooldownEndsAt   = waiting ? Date.now() + waitSecs * 1000 : 0;
+      if (waiting) {
         waitBox.classList.remove('hidden');
-        // The blocks are the chain's own answer and the countdown above them
-        // is this page's reading of it, so the note says which is which. The
-        // count is not ticked down beside the clock: re-deriving blocks from
-        // the clock would be the page inventing a number the chain never gave
-        // it, and it is only ever an estimate away from the one it did.
-        blocksNote.textContent =
-          'Estimated from ' + data.blocksRemaining
-          + ' block' + (data.blocksRemaining === 1 ? '' : 's') + ' remaining on Base';
+        if (exhausted) {
+          // A licence grants a fixed number of concurrent sessions, so this is
+          // not something this machine did: it is the fleet being full. Say how
+          // full, and say what ends it, because "wait" is only one of the
+          // answers - releasing a seat elsewhere is the other.
+          waitTitle.textContent = 'All Seats In Use';
+          blocksNote.textContent =
+            data.seatsInUse + ' of ' + data.seats + ' seat'
+            + (data.seats === 1 ? '' : 's') + ' in use. The next frees when the countdown ends, '
+            + 'or sooner if another instance releases one.';
+        } else {
+          waitTitle.textContent = 'Cooldown Active';
+          // The blocks are the chain's own answer and the countdown above them
+          // is this page's reading of it, so the note says which is which. The
+          // count is not ticked down beside the clock: re-deriving blocks from
+          // the clock would be the page inventing a number the chain never gave
+          // it, and it is only ever an estimate away from the one it did.
+          blocksNote.textContent =
+            'Estimated from ' + data.blocksRemaining
+            + ' block' + (data.blocksRemaining === 1 ? '' : 's') + ' remaining on Base';
+        }
       } else {
         waitBox.classList.add('hidden');
       }
-      setCooldownWatchCopy(cooling);
+      setCooldownWatchCopy(waiting, exhausted);
 
       // show() starts the countdown, which paints the clock from the stamp set
       // above and flips the copy back the moment it reaches zero.

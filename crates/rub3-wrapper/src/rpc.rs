@@ -11,10 +11,13 @@ use alloy::sol_types::SolCall;
 //   balanceOf(owner)              - ERC-721 standard
 //   tokenOfOwnerByIndex(...)      - ERC-721Enumerable
 //   activate(tokenId)             - tier-3 session activation (returns sessionId)
-//   cooldownReady(tokenId)        - tier-3 view helper
+//   release(tokenId, sessionId)   - hands a seat back before its TTL (§3.4)
+//   activationStatus(tokenId)     - what activate() would do, in one call (§3.4)
 //   lastActivationBlock(tokenId)  - tier-3 read
 //   cooldownBlocks()              - tier-3 read
-//   activeSessionId(tokenId)      - tier-3 revocation check
+//   seatsPerToken()               - concurrent sessions one token grants (§3.4)
+//   sessionSeat(tokenId, id)      - whether a session still holds a seat
+//   seatAt(tokenId, index)        - one seat's raw state
 //   identityModel()               - 0 = access, 1 = account (read at session creation)
 //   tbaImplementation()           - ERC-6551 impl for account-model TBA derivation
 //   supplyCap()                   - immutable mint cap (0 = unlimited)
@@ -34,16 +37,62 @@ sol! {
         function tokenOfOwnerByIndex(address owner, uint256 index) external view returns (uint256 tokenId);
 
         function activate(uint256 tokenId) external returns (uint256 sessionId);
-        function cooldownReady(uint256 tokenId) external view returns (bool ready, uint256 blocksRemaining);
+        function release(uint256 tokenId, uint256 sessionId) external;
         function lastActivationBlock(uint256 tokenId) external view returns (uint256 blockNumber);
         function cooldownBlocks() external view returns (uint256 blocks);
-        function activeSessionId(uint256 tokenId) external view returns (uint256 sessionId);
+        function seatsPerToken() external view returns (uint256 seats);
+        function sessionTtlSeconds() external view returns (uint256 secs);
+        function sessionSeat(uint256 tokenId, uint256 sessionId)
+            external view returns (bool live, uint256 index);
 
-        /// Emitted by `activate(tokenId)`. Declared here for its topic0 alone:
-        /// `watch_for_activate` uses it to tell which transaction in a block
-        /// was the activation it is waiting for, and taking the hash from the
-        /// ABI is what stops a hand-copied constant drifting from the contract.
-        event Activated(uint256 indexed tokenId, address indexed owner, uint256 sessionId);
+        /// Mirrors `Rub3License.Seat`. `activatedAt` is the seat's cooldown
+        /// stamp and is never cleared; `expiresAt` at or before the current
+        /// block timestamp means the seat is free.
+        struct Seat {
+            uint64  activatedAt;
+            uint64  expiresAt;
+            uint256 sessionId;
+        }
+
+        function seatAt(uint256 tokenId, uint256 index) external view returns (Seat memory seat);
+
+        /// Mirrors `Rub3License.ActivationStatus` (§3.4). Field order is part of
+        /// the ABI encoding, so it must match the Solidity struct exactly.
+        ///
+        /// The two refusals are told apart by `fleetExhausted`: a full fleet
+        /// waits `secondsRemaining` for a seat to lapse, while a cooldown waits
+        /// `blocksRemaining`. Neither number is meaningful for the other case,
+        /// which is why the contract answers both in one call rather than
+        /// leaving a caller to infer which it is looking at. The flag is the
+        /// contract's own answer rather than something derived from the seat
+        /// counts, because a single-seat licence's one occupied seat is
+        /// retakeable and so is not exhaustion.
+        struct ActivationStatus {
+            bool    ready;
+            bool    fleetExhausted;
+            uint256 seatIndex;
+            uint256 seatsInUse;
+            uint256 seats;
+            uint256 blocksRemaining;
+            uint256 secondsRemaining;
+        }
+
+        function activationStatus(uint256 tokenId)
+            external view returns (ActivationStatus memory status);
+
+        /// Emitted by `activate(tokenId)`. Declared here for its topic0 *and*
+        /// its body: `watch_for_activate` uses the topic to tell which
+        /// transaction in a block was the activation it is waiting for, and
+        /// `activation_from_receipt` decodes the body to learn which seat and
+        /// session id that activation got. Taking both from the ABI is what
+        /// stops a hand-copied constant drifting from the contract.
+        event Activated(
+            uint256 indexed tokenId,
+            address indexed owner,
+            uint256 sessionId,
+            uint256 seatIndex,
+            uint256 expiresAt
+        );
 
         function identityModel() external view returns (uint8 model);
         function tbaImplementation() external view returns (address impl);
@@ -113,6 +162,21 @@ pub struct TxReceipt {
     /// `to` address from the receipt, lowercased hex. Used by tier-3
     /// on-chain re-verification to confirm the tx hit the license contract.
     pub to: Option<String>,
+    /// Logs this transaction emitted, in order.
+    ///
+    /// Carried because a seat activation's own receipt is the only unambiguous
+    /// record of which seat it got (§3.4): a second read of contract state
+    /// under a fleet spinning up would just as happily return somebody else's
+    /// activation.
+    pub logs: Vec<ReceiptLog>,
+}
+
+/// One log from a [`TxReceipt`], in the raw form an ABI decoder wants.
+#[derive(Debug, Clone)]
+pub struct ReceiptLog {
+    pub address: Address,
+    pub topics: Vec<B256>,
+    pub data: Vec<u8>,
 }
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -430,49 +494,6 @@ pub fn resolve_ens(_rpc_url: &str, _name: &str) -> Result<Address, RpcError> {
 
 // ── Tier-3: activation / cooldown ─────────────────────────────────────────────
 
-/// Calls `cooldownReady(tokenId)` view; returns `(ready, blocks_remaining)`.
-///
-/// Classified rather than blanket-labelled a contract error, for the reason
-/// `poll_for_activate` gives: an auto-detect watch reads this before it starts
-/// and retries it on `retry_read`, so a rate limit reported as a revert would be
-/// a settled answer that ends the watch on the first hiccup.
-pub fn cooldown_ready(
-    rpc_url: &str,
-    contract: Address,
-    token_id: u64,
-) -> Result<(bool, u64), RpcError> {
-    block_on(read_cooldown_ready(rpc_url, contract, token_id))
-}
-
-/// The same read, abandoned if the endpoint has not answered within `limit`.
-///
-/// For the watch path, which cannot afford an unbounded request; see
-/// [`WATCH_REQUEST_TIMEOUT`].
-#[cfg(feature = "onchain-write")]
-pub fn cooldown_ready_within(
-    rpc_url: &str,
-    contract: Address,
-    token_id: u64,
-    limit: std::time::Duration,
-) -> Result<(bool, u64), RpcError> {
-    block_on_within(read_cooldown_ready(rpc_url, contract, token_id), limit)
-}
-
-async fn read_cooldown_ready(
-    rpc_url: &str,
-    contract: Address,
-    token_id: u64,
-) -> Result<(bool, u64), RpcError> {
-    let provider = build_provider(rpc_url)?;
-    let instance = IRub3License::new(contract, provider);
-    let r = instance
-        .cooldownReady(U256::from(token_id))
-        .call()
-        .await
-        .map_err(|e| classify_call_error(&e))?;
-    Ok((r.ready, r.blocksRemaining.to::<u64>()))
-}
-
 /// Calls `lastActivationBlock(tokenId)` view.
 pub fn last_activation_block(
     rpc_url: &str,
@@ -498,21 +519,6 @@ pub fn cooldown_blocks(rpc_url: &str, contract: Address) -> Result<u64, RpcError
         let instance = IRub3License::new(contract, provider);
         let r = instance
             .cooldownBlocks()
-            .call()
-            .await
-            .map_err(RpcError::contract)?;
-        Ok(r.to::<u64>())
-    })
-}
-
-/// Calls `activeSessionId(tokenId)` view. Used after an `activate()` tx lands
-/// to read the authoritative session id the contract assigned.
-pub fn active_session_id(rpc_url: &str, contract: Address, token_id: u64) -> Result<u64, RpcError> {
-    block_on(async move {
-        let provider = build_provider(rpc_url)?;
-        let instance = IRub3License::new(contract, provider);
-        let r = instance
-            .activeSessionId(U256::from(token_id))
             .call()
             .await
             .map_err(RpcError::contract)?;
@@ -560,13 +566,249 @@ pub fn get_tx_receipt(rpc_url: &str, tx_hash: &str) -> Result<Option<TxReceipt>,
             .to
             .map(|a| format!("0x{}", hex::encode(a.as_slice())));
 
+        let logs = receipt
+            .inner
+            .logs()
+            .iter()
+            .map(|log| ReceiptLog {
+                address: log.address(),
+                topics: log.topics().to_vec(),
+                data: log.data().data.to_vec(),
+            })
+            .collect();
+
         Ok(Some(TxReceipt {
             status: receipt.status(),
             block_number,
             block_hash,
             to,
+            logs,
         }))
     })
+}
+
+/// Everything an `activate()` transaction settled about the session that
+/// follows it, decoded from the `Activated` log in its **own** receipt.
+///
+/// The receipt rather than a follow-up state read, and that is the whole point
+/// under seats (§3.4): with a fleet coming up, `activate()` calls from several
+/// instances land in the same block, so any view read afterwards may honestly
+/// answer with a seat somebody else just took. A transaction's own log cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivationRecord {
+    /// The session id the contract assigned.
+    pub session_id: u64,
+    /// Which of the token's seats it landed on.
+    pub seat_index: u64,
+    /// Unix seconds at which that seat frees itself if nobody releases it.
+    pub seat_expires_at: u64,
+}
+
+/// Decodes the `Activated` log this receipt emitted for `token_id`.
+///
+/// Pure - no RPC. Errors when the receipt carries no such log, which means the
+/// transaction was not the activation it was taken for.
+pub fn activation_from_receipt(
+    receipt: &TxReceipt,
+    contract: Address,
+    token_id: u64,
+) -> Result<ActivationRecord, RpcError> {
+    use alloy::sol_types::SolEvent;
+
+    let wanted = U256::from(token_id);
+    for log in &receipt.logs {
+        if log.address != contract {
+            continue;
+        }
+        let decoded = match IRub3License::Activated::decode_raw_log(log.topics.clone(), &log.data) {
+            Ok(event) => event,
+            Err(_) => continue,
+        };
+        if decoded.tokenId != wanted {
+            continue;
+        }
+        return Ok(ActivationRecord {
+            session_id: saturating_u64(decoded.sessionId),
+            seat_index: saturating_u64(decoded.seatIndex),
+            seat_expires_at: saturating_u64(decoded.expiresAt),
+        });
+    }
+
+    Err(RpcError::Contract(format!(
+        "the activate() receipt carries no Activated log for token {token_id} from {contract}"
+    )))
+}
+
+/// A `uint256` the contract has bounded well inside 64 bits, read as a `u64`.
+///
+/// Saturating rather than wrapping: every field this is used on is a counter, a
+/// seat index, or a Unix timestamp, and for all three a clamp at `u64::MAX` is
+/// a value that fails loudly downstream, while a wrap is one that reads as
+/// plausible.
+fn saturating_u64(value: U256) -> u64 {
+    value.try_into().unwrap_or(u64::MAX)
+}
+
+/// What `activate(tokenId)` would do right now (§3.4), read in one `eth_call`.
+///
+/// Mirrors the contract's own scan, so a wrapper that reads this and a wrapper
+/// that sends the transaction cannot disagree about which seat is next or why
+/// there is none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivationStatus {
+    /// Whether `activate()` would succeed at the block this was read at.
+    pub ready: bool,
+    /// Whether `activate()` would be refused with nothing to wait for in
+    /// blocks: every seat holds a live session that this caller may not retake.
+    ///
+    /// The contract's own answer. Not derived from `seats_in_use == seats`,
+    /// because a single-seat licence's one occupied seat *is* retakeable - a
+    /// sole holder is never locked out of their own licence - so the counts
+    /// alone do not settle it.
+    pub fleet_exhausted: bool,
+    /// The seat `activate()` would take. Meaningful only when `ready`.
+    pub seat_index: u64,
+    /// Seats holding a session that has neither lapsed nor been released.
+    pub seats_in_use: u64,
+    /// Seats this contract grants per token.
+    pub seats: u64,
+    /// Blocks until the earliest free seat leaves its cooldown. Meaningful only
+    /// when `!ready && seats_in_use < seats`.
+    pub blocks_remaining: u64,
+    /// Seconds until the earliest occupied seat lapses. This is the wait when
+    /// the fleet is full.
+    pub seconds_remaining: u64,
+}
+
+/// Calls `activationStatus(tokenId)`.
+///
+/// Classified rather than blanket-labelled a contract error, for the reason
+/// `poll_for_activate` gives: the auto-detect watch reads this before it starts
+/// and retries it on `retry_read`, so a rate limit reported as a revert would be
+/// a settled answer that ends the watch on the first hiccup.
+pub fn activation_status(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+) -> Result<ActivationStatus, RpcError> {
+    block_on(read_activation_status(rpc_url, contract, token_id))
+}
+
+/// The same read, abandoned if the endpoint has not answered within `limit`.
+///
+/// For the watch path, which cannot afford an unbounded request; see
+/// [`WATCH_REQUEST_TIMEOUT`].
+#[cfg(feature = "onchain-write")]
+pub fn activation_status_within(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+    limit: std::time::Duration,
+) -> Result<ActivationStatus, RpcError> {
+    block_on_within(read_activation_status(rpc_url, contract, token_id), limit)
+}
+
+async fn read_activation_status(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+) -> Result<ActivationStatus, RpcError> {
+    let provider = build_provider(rpc_url)?;
+    let instance = IRub3License::new(contract, provider);
+    let r = instance
+        .activationStatus(U256::from(token_id))
+        .call()
+        .await
+        .map_err(|e| classify_call_error(&e))?;
+    Ok(ActivationStatus {
+        ready: r.ready,
+        fleet_exhausted: r.fleetExhausted,
+        seat_index: saturating_u64(r.seatIndex),
+        seats_in_use: saturating_u64(r.seatsInUse),
+        seats: saturating_u64(r.seats),
+        blocks_remaining: saturating_u64(r.blocksRemaining),
+        seconds_remaining: saturating_u64(r.secondsRemaining),
+    })
+}
+
+impl ActivationStatus {
+    /// How long before the contract would take an `activate()`, given a
+    /// block-time estimate for the cooldown case.
+    ///
+    /// One place for the arithmetic, because the two refusals are measured in
+    /// different units and a caller that got the unit wrong would arm a watch
+    /// for a transaction the chain is guaranteed not to see.
+    #[cfg(feature = "onchain-write")]
+    pub fn wait_before_activate(
+        &self,
+        block_wait: impl Fn(u64) -> std::time::Duration,
+    ) -> std::time::Duration {
+        if self.ready {
+            std::time::Duration::ZERO
+        } else if self.fleet_exhausted {
+            std::time::Duration::from_secs(self.seconds_remaining)
+        } else {
+            block_wait(self.blocks_remaining)
+        }
+    }
+}
+
+/// Calls `sessionSeat(tokenId, sessionId)`: whether that session still holds a
+/// seat, and which one.
+pub fn session_seat(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+    session_id: u64,
+) -> Result<(bool, u64), RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        let r = instance
+            .sessionSeat(U256::from(token_id), U256::from(session_id))
+            .call()
+            .await
+            .map_err(|e| classify_call_error(&e))?;
+        Ok((r.live, saturating_u64(r.index)))
+    })
+}
+
+/// Calls `seatAt(tokenId, index)`: the session id holding that seat, and the
+/// Unix second at which it frees itself.
+///
+/// `None` when the seat is free - never taken, released, or lapsed - so a
+/// caller cannot mistake a stale record for an occupant.
+pub fn occupied_seat(
+    rpc_url: &str,
+    contract: Address,
+    token_id: u64,
+    index: u64,
+) -> Result<Option<(u64, u64)>, RpcError> {
+    block_on(async move {
+        let provider = build_provider(rpc_url)?;
+        let instance = IRub3License::new(contract, provider);
+        let r = instance
+            .seatAt(U256::from(token_id), U256::from(index))
+            .call()
+            .await
+            .map_err(|e| classify_call_error(&e))?;
+        if r.expiresAt == 0 || r.sessionId.is_zero() {
+            return Ok(None);
+        }
+        Ok(Some((saturating_u64(r.sessionId), r.expiresAt)))
+    })
+}
+
+/// Returns the 0x-prefixed ABI-encoded calldata for
+/// `release(tokenId, sessionId)`.
+///
+/// Pure - no RPC, the same shape [`encode_activate_calldata`] has.
+pub fn encode_release_calldata(token_id: u64, session_id: u64) -> String {
+    let call = IRub3License::releaseCall {
+        tokenId: U256::from(token_id),
+        sessionId: U256::from(session_id),
+    };
+    format!("0x{}", hex::encode(call.abi_encode()))
 }
 
 /// Tx receipt polling budget - attempts × interval = total wait.
@@ -2055,6 +2297,205 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    // ── Seats (§3.4) ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn encode_release_calldata_matches_selector() {
+        use alloy::sol_types::SolCall;
+        let data = encode_release_calldata(7, 12);
+        let selector = hex::encode(IRub3License::releaseCall::SELECTOR);
+        assert!(data.starts_with(&format!("0x{selector}")), "got {data}");
+        // selector (4) + two 32-byte arguments = 68 bytes.
+        assert_eq!(data.len(), 2 + 136);
+        assert!(
+            data.ends_with("000000000000000000000000000000000000000000000000000000000000000c"),
+            "the session id is the second argument: {data}"
+        );
+    }
+
+    #[test]
+    fn encode_release_calldata_differs_by_session_id() {
+        assert_ne!(encode_release_calldata(1, 1), encode_release_calldata(1, 2));
+    }
+
+    /// Builds the `Activated` log a real `activate()` emits, from the ABI
+    /// mirror rather than from a hand-written topic - the same reason
+    /// `watch_for_activate` takes its topic0 from the `sol!` block.
+    fn activated_receipt_log(
+        emitter: Address,
+        token_id: u64,
+        session_id: u64,
+        seat_index: u64,
+        expires_at: u64,
+    ) -> ReceiptLog {
+        use alloy::sol_types::{SolEvent, SolValue};
+        let owner: Address = SAMPLE_CONTRACT.parse().unwrap();
+        ReceiptLog {
+            address: emitter,
+            topics: vec![
+                IRub3License::Activated::SIGNATURE_HASH,
+                B256::from(U256::from(token_id)),
+                B256::from(U256::from_be_slice(owner.as_slice())),
+            ],
+            data: (
+                U256::from(session_id),
+                U256::from(seat_index),
+                U256::from(expires_at),
+            )
+                .abi_encode_sequence(),
+        }
+    }
+
+    fn receipt_with(logs: Vec<ReceiptLog>) -> TxReceipt {
+        TxReceipt {
+            status: true,
+            block_number: 100,
+            block_hash: "0xblock".into(),
+            to: None,
+            logs,
+        }
+    }
+
+    /// The seat an activation got comes from that transaction's own log. This
+    /// is the read a fleet coming up makes correct: several `activate()` calls
+    /// land in one block, and a state read afterwards cannot say which was
+    /// yours.
+    #[test]
+    fn activation_from_receipt_decodes_the_seat_the_tx_took() {
+        let contract: Address = SAMPLE_CONTRACT.parse().unwrap();
+        let receipt = receipt_with(vec![activated_receipt_log(
+            contract,
+            4,
+            91,
+            3,
+            1_700_000_000,
+        )]);
+
+        let record = activation_from_receipt(&receipt, contract, 4).expect("decodes");
+        assert_eq!(record.session_id, 91);
+        assert_eq!(record.seat_index, 3);
+        assert_eq!(record.seat_expires_at, 1_700_000_000);
+    }
+
+    /// The fleet case, held explicitly: one receipt carrying several tokens'
+    /// activations must answer with the one asked for.
+    #[test]
+    fn activation_from_receipt_picks_the_log_for_this_token() {
+        let contract: Address = SAMPLE_CONTRACT.parse().unwrap();
+        let receipt = receipt_with(vec![
+            activated_receipt_log(contract, 1, 10, 0, 111),
+            activated_receipt_log(contract, 2, 11, 1, 222),
+        ]);
+
+        assert_eq!(
+            activation_from_receipt(&receipt, contract, 2)
+                .expect("decodes")
+                .session_id,
+            11
+        );
+    }
+
+    /// A log from somewhere else is not this contract's activation, whatever it
+    /// looks like. Without the address check any contract could hand a wrapper
+    /// a session id to sign over.
+    #[test]
+    fn activation_from_receipt_ignores_another_contracts_log() {
+        let contract: Address = SAMPLE_CONTRACT.parse().unwrap();
+        let impostor: Address = "0x000000000000000000000000000000000000dead"
+            .parse()
+            .unwrap();
+        let receipt = receipt_with(vec![activated_receipt_log(impostor, 4, 91, 0, 1)]);
+
+        assert!(activation_from_receipt(&receipt, contract, 4).is_err());
+    }
+
+    #[test]
+    fn activation_from_receipt_without_the_log_is_an_error() {
+        let contract: Address = SAMPLE_CONTRACT.parse().unwrap();
+        assert!(activation_from_receipt(&receipt_with(Vec::new()), contract, 4).is_err());
+    }
+
+    /// The distinction the whole seat-aware path turns on, and why it is a
+    /// field rather than a comparison of the two counts.
+    #[test]
+    fn fleet_exhaustion_is_the_contracts_answer_not_a_count_comparison() {
+        let full = ActivationStatus {
+            ready: false,
+            fleet_exhausted: true,
+            seat_index: 0,
+            seats_in_use: 4,
+            seats: 4,
+            blocks_remaining: 0,
+            seconds_remaining: 900,
+        };
+        assert!(full.fleet_exhausted);
+
+        // A single-seat licence with its one seat live: the counts read as a
+        // full fleet and it is not one, because the holder may retake their own
+        // seat. Taking the flag from the contract rather than deriving it from
+        // the counts is what makes this case right.
+        let sole_holder = ActivationStatus {
+            fleet_exhausted: false,
+            seats_in_use: 1,
+            seats: 1,
+            blocks_remaining: 12,
+            seconds_remaining: 900,
+            ..full
+        };
+        assert!(!sole_holder.fleet_exhausted);
+        assert_eq!(sole_holder.seats_in_use, sole_holder.seats);
+    }
+
+    /// The two refusals are measured in different units, so one place does the
+    /// arithmetic. A caller that got the unit wrong would arm a watch for a
+    /// transaction the chain is guaranteed not to see.
+    #[test]
+    #[cfg(feature = "onchain-write")]
+    fn wait_before_activate_reads_the_unit_that_applies() {
+        let block_wait = |blocks: u64| std::time::Duration::from_secs(blocks * 2);
+
+        let full = ActivationStatus {
+            ready: false,
+            fleet_exhausted: true,
+            seat_index: 0,
+            seats_in_use: 4,
+            seats: 4,
+            blocks_remaining: 0,
+            seconds_remaining: 900,
+        };
+        assert_eq!(
+            full.wait_before_activate(block_wait),
+            std::time::Duration::from_secs(900),
+            "a full fleet waits out a lapse, which is already in seconds"
+        );
+
+        let cooling = ActivationStatus {
+            fleet_exhausted: false,
+            seats_in_use: 1,
+            blocks_remaining: 30,
+            seconds_remaining: 0,
+            ..full
+        };
+        assert_eq!(
+            cooling.wait_before_activate(block_wait),
+            std::time::Duration::from_secs(60),
+            "a cooldown is in blocks and is converted"
+        );
+
+        let ready = ActivationStatus {
+            ready: true,
+            fleet_exhausted: false,
+            blocks_remaining: 30,
+            seconds_remaining: 900,
+            ..full
+        };
+        assert_eq!(
+            ready.wait_before_activate(block_wait),
+            std::time::Duration::ZERO,
+            "nothing to wait for, whatever the other numbers say"
+        );
+    }
+
     /// A hash that cannot parse is a settled answer, not a network hiccup:
     /// classified as retryable it would make every poller wait out its budget.
     #[test]
@@ -2363,6 +2804,7 @@ mod tests {
                 block_number: 42,
                 block_hash: "0xblock".to_string(),
                 to: None,
+                logs: Vec::new(),
             }
         }
 

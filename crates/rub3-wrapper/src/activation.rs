@@ -345,6 +345,16 @@ pub const EXIT_PRICE_ABOVE_POLICY: i32 = 22;
 /// that it is malicious.
 pub const EXIT_NOT_CANONICAL_CONTRACT: i32 = 23;
 
+/// Every seat this token grants is holding a live session (§3.4).
+///
+/// Its own code rather than a shade of [`EXIT_COOLDOWN_ACTIVE`], because the
+/// two are resolved differently and only one of them clears on its own: a
+/// cooldown is waited out in blocks, while a full fleet needs the orchestrator
+/// to scale down, release a seat it is done with, or buy another token. The
+/// detail line carries `token_id`, `seats_in_use`, `seats` and
+/// `seconds_remaining`, which is when the earliest seat lapses.
+pub const EXIT_FLEET_EXHAUSTED: i32 = 24;
+
 /// The exit-code table rendered for `--help`, so the contract is discoverable
 /// from the binary itself and not only from the docs.
 pub const EXIT_CODE_HELP: &str = "\
@@ -359,7 +369,10 @@ child is the child's status and not an activation failure.
   10  no usable signer (set RUB3_AGENT_KEY or RUB3_AGENT_KEYSTORE)
   11  insufficient funds for purchase + gas
   12  no token held and supply is sold out
-  13  cooldown active - stderr carries `blocks_remaining=N`
+  13  cooldown active - stderr carries `blocks_remaining=N`. This is a
+      *seat's* rate limit, not the token's: a token grants `seats`
+      concurrent sessions and lands at most that many activations per
+      cooldown window
   14  activate() reverted, or did not confirm in time - retryable: a
       re-run re-reads ownership, so a purchase this run may already have
       completed is activated rather than paid for twice
@@ -409,6 +422,22 @@ child is the child's status and not an activation failure.
           their own, so every field added later goes in front of it
       Neither is an accusation: the scan is a diagnostic, and a miss
       says the code is unrecognised here, not that it is malicious
+  24  fleet exhausted - every seat this token grants is holding a live
+      session. stderr carries `token_id=N seats_in_use=I seats=K
+      seconds_remaining=S`. Nothing was sent and nothing was spent.
+      Distinct from 13 because the two are resolved differently: a
+      cooldown clears on its own in blocks, while a full fleet needs
+      this orchestrator to scale down, release a seat it is done with,
+      or buy another token. `seconds_remaining` is when the earliest
+      seat lapses, which is the longest a run that does nothing waits
+
+Teardown:
+  --release-seat  hands this machine's seat back and exits without
+                  launching anything (§3.4). Only the session cached on
+                  this machine, never another instance's. Prints
+                  `rub3-detail: token_id=N session_id=M tx_hash=0x...`, or
+                  `token_id=N released=false` when there was nothing to
+                  hand back, which is also a success
 
 Signer sources, highest precedence first:
   RUB3_AGENT_KEY                        raw hex private key (dev / CI only)
@@ -449,8 +478,9 @@ Spend policy:
 
 #[cfg(feature = "headless")]
 pub use self::headless::{
-    ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome, PaymentRail, SpendPolicy,
-    SpendVerdict, DEFAULT_MAX_ETH_WEI, ENV_MAX_ETH_WEI, ENV_MAX_TOKEN_AMOUNT,
+    ensure_headless, release_headless, HeadlessContext, HeadlessError, HeadlessOutcome,
+    PaymentRail, ReleaseOutcome, SpendPolicy, SpendVerdict, DEFAULT_MAX_ETH_WEI, ENV_MAX_ETH_WEI,
+    ENV_MAX_TOKEN_AMOUNT,
 };
 
 #[cfg(feature = "headless")]
@@ -757,6 +787,21 @@ mod headless {
         PurchasedAndActivated { token_id: u64, paid: PaymentRail },
     }
 
+    /// What a `--release-seat` run actually did.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ReleaseOutcome {
+        /// A seat was handed back on-chain.
+        Released {
+            token_id: u64,
+            session_id: u64,
+            tx_hash: String,
+        },
+        /// There was nothing to hand back - the session had already lapsed, had
+        /// been released, or never took a seat at all. The local record is gone
+        /// either way, so this is a success and not a failure.
+        NoSeatHeld { token_id: u64 },
+    }
+
     /// Everything that can stop a headless activation, in a shape an
     /// orchestrator can branch on. Each variant maps to a distinct process exit
     /// code - see [`HeadlessError::exit_code`].
@@ -773,10 +818,27 @@ mod headless {
         },
         /// The signer holds no token and the contract has minted its cap.
         SoldOut { supply_cap: u64, minted: u64 },
-        /// `activate()` is rate-limited for this token for another N blocks.
+        /// `activate()` is rate-limited for this seat for another N blocks.
         CooldownActive {
             token_id: u64,
             blocks_remaining: u64,
+        },
+        /// Every seat this token grants is holding a live session (§3.4), so
+        /// there is none left to open another on.
+        ///
+        /// Its own outcome and its own exit code because it is the one an
+        /// orchestrator can actually act on: scale down, buy another token, or
+        /// release a seat it knows it is done with. Telling it apart from
+        /// [`HeadlessError::CooldownActive`] matters more than either message,
+        /// because the two are waited out in different units and only one of
+        /// them clears on its own. `seconds_remaining` is when the earliest
+        /// seat lapses, which is the longest an orchestrator that does nothing
+        /// has to wait.
+        FleetExhausted {
+            token_id: u64,
+            seats_in_use: u64,
+            seats: u64,
+            seconds_remaining: u64,
         },
         /// An `activate()` transaction reverted, or did not confirm inside
         /// the poll budget. Retryable, but not because nothing was spent: the
@@ -887,6 +949,17 @@ mod headless {
                     f,
                     "cooldown active on token {token_id}: retry in {blocks_remaining} blocks"
                 ),
+                HeadlessError::FleetExhausted {
+                    token_id,
+                    seats_in_use,
+                    seats,
+                    seconds_remaining,
+                } => write!(
+                    f,
+                    "fleet exhausted on token {token_id}: {seats_in_use} of {seats} seats in \
+                     use, and the next one frees in {seconds_remaining}s. Release a seat you \
+                     are done with, or buy another token"
+                ),
                 HeadlessError::ActivationFailed(e) => write!(f, "activation failed: {e}"),
                 HeadlessError::VerificationFailed(e) => {
                     write!(f, "session verification failed: {e}")
@@ -987,6 +1060,7 @@ mod headless {
                 HeadlessError::InsufficientFunds { .. } => EXIT_INSUFFICIENT_FUNDS,
                 HeadlessError::SoldOut { .. } => EXIT_SOLD_OUT,
                 HeadlessError::CooldownActive { .. } => EXIT_COOLDOWN_ACTIVE,
+                HeadlessError::FleetExhausted { .. } => EXIT_FLEET_EXHAUSTED,
                 HeadlessError::ActivationFailed(_) => EXIT_ACTIVATION_FAILED,
                 HeadlessError::VerificationFailed(_) => EXIT_VERIFICATION_FAILED,
                 HeadlessError::Rpc(_) => EXIT_RPC,
@@ -1018,6 +1092,19 @@ mod headless {
                     blocks_remaining,
                 } => Some(format!(
                     "token_id={token_id} blocks_remaining={blocks_remaining}"
+                )),
+                // Every number the decision turns on. An orchestrator branches
+                // on the exit code and then reads these to choose between
+                // waiting, releasing a seat, and buying another token - none of
+                // which it can pick from prose.
+                HeadlessError::FleetExhausted {
+                    token_id,
+                    seats_in_use,
+                    seats,
+                    seconds_remaining,
+                } => Some(format!(
+                    "token_id={token_id} seats_in_use={seats_in_use} seats={seats} \
+                     seconds_remaining={seconds_remaining}"
                 )),
                 // Only when the amounts are real: an orchestrator that read
                 // `required_wei=0` would top the wallet up by nothing.
@@ -1119,9 +1206,11 @@ mod headless {
     ///            │holds ≥1
     ///     pick the token
     ///            │
-    ///     cooldownReady? ─no─▶ CooldownActive { blocks_remaining }
-    ///            │yes
-    ///        activate() ─▶ wait for receipt ─▶ activeSessionId + identity model
+    ///  activationStatus? ─┬─cooling──▶ CooldownActive { blocks_remaining }
+    ///            │         └─full─────▶ reclaim our own stale seat, else
+    ///            │                      FleetExhausted { seats_in_use, seats }
+    ///            │ready
+    ///        activate() ─▶ wait for receipt ─▶ Activated log + identity model
     ///            │
     ///   sign the session message locally ─▶ verify_local ─▶ persist
     /// ```
@@ -1145,27 +1234,8 @@ mod headless {
             return Ok((session, HeadlessOutcome::Reused));
         }
 
-        // An unparseable address and the zero address mean the same thing: this
-        // build carries no usable contract. Both are build-time constants, so
-        // neither is worth a retry.
-        let contract: Address = ctx
-            .contract
-            .parse()
-            .map_err(|_| HeadlessError::NoContract)?;
-        if contract.is_zero() {
-            return Err(HeadlessError::NoContract);
-        }
-
-        // Signing for the wrong network is silent and expensive; catch it before
-        // the first transaction rather than after.
-        let node_chain_id =
-            rpc::chain_id(&ctx.rpc_url).map_err(|e| HeadlessError::Rpc(e.to_string()))?;
-        if node_chain_id != ctx.chain_id {
-            return Err(HeadlessError::ChainIdMismatch {
-                expected: ctx.chain_id,
-                actual: node_chain_id,
-            });
-        }
+        let contract = parse_contract(&ctx.contract)?;
+        preflight_chain_id(ctx)?;
 
         // ── Token selection, purchasing if the signer holds none ─────────────
         let owned = rpc::tokens_of_owner(&ctx.rpc_url, contract, wallet)
@@ -1194,13 +1264,33 @@ mod headless {
             }
         };
 
-        // ── Cooldown gate ────────────────────────────────────────────────────
-        let (ready, blocks_remaining) = rpc::cooldown_ready(&ctx.rpc_url, contract, token_id)
+        // ── Seat gate ────────────────────────────────────────────────────────
+        //
+        // One read answers both refusals, and they need different responses: a
+        // cooldown is waited out in blocks, while a full fleet is waited out in
+        // seconds - or resolved by an operator releasing something.
+        let mut status = rpc::activation_status(&ctx.rpc_url, contract, token_id)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
-        if !ready {
+
+        // Some exhaustion is this machine's own doing and it can undo it - see
+        // `reclaim_seat`. What is left is a fleet the operator has to act on.
+        if status.fleet_exhausted && reclaim_seat(signer, ctx, contract, token_id)? {
+            status = rpc::activation_status(&ctx.rpc_url, contract, token_id)
+                .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+        }
+
+        if !status.ready {
+            if status.fleet_exhausted {
+                return Err(HeadlessError::FleetExhausted {
+                    token_id,
+                    seats_in_use: status.seats_in_use,
+                    seats: status.seats,
+                    seconds_remaining: status.seconds_remaining,
+                });
+            }
             return Err(HeadlessError::CooldownActive {
                 token_id,
-                blocks_remaining,
+                blocks_remaining: status.blocks_remaining,
             });
         }
 
@@ -1238,6 +1328,9 @@ mod headless {
         }
 
         // ── Draft, sign, verify, persist ─────────────────────────────────────
+        let activation = rpc::activation_from_receipt(&receipt, contract, token_id)
+            .map_err(|e| HeadlessError::ActivationFailed(e.to_string()))?;
+
         let draft = crate::session::draft_from_activation(
             &ctx.rpc_url,
             contract,
@@ -1246,6 +1339,7 @@ mod headless {
             token_id,
             wallet,
             &receipt.block_hash,
+            activation,
             ctx.session_ttl_secs,
         )
         .map_err(HeadlessError::Rpc)?;
@@ -1372,6 +1466,205 @@ mod headless {
             "the copy that is disclosed must never outlive the copy that is used",
         );
     };
+
+    /// This build's licence contract as an address.
+    ///
+    /// An unparseable address and the zero address mean the same thing: this
+    /// build carries no usable contract. Both are build-time constants, so
+    /// neither is worth a retry.
+    fn parse_contract(contract: &str) -> Result<Address, HeadlessError> {
+        let contract: Address = contract.parse().map_err(|_| HeadlessError::NoContract)?;
+        if contract.is_zero() {
+            return Err(HeadlessError::NoContract);
+        }
+        Ok(contract)
+    }
+
+    /// Refuses to sign anything for a network this build was not made for.
+    ///
+    /// Signing for the wrong chain is silent and expensive; every path that
+    /// broadcasts runs this before its first transaction rather than after.
+    fn preflight_chain_id(ctx: &HeadlessContext) -> Result<(), HeadlessError> {
+        let node_chain_id =
+            rpc::chain_id(&ctx.rpc_url).map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+        if node_chain_id != ctx.chain_id {
+            return Err(HeadlessError::ChainIdMismatch {
+                expected: ctx.chain_id,
+                actual: node_chain_id,
+            });
+        }
+        Ok(())
+    }
+
+    /// Hands back the seat this machine's cached session holds, and launches
+    /// nothing.
+    ///
+    /// The teardown half of seats (§3.4). An orchestrator retiring an instance
+    /// calls this so the seat is available at once instead of after
+    /// `sessionTtlSeconds`, which is what makes the advice in
+    /// [`HeadlessError::FleetExhausted`] something a caller can act on rather
+    /// than only wait out.
+    ///
+    /// Releases only the session in this machine's own store, so it is never a
+    /// way for one instance to end another's - that would be the revocation
+    /// shape §2.4 rules out. The cached session is deleted whether or not the
+    /// chain had a seat to give back, because either way this machine is done
+    /// with it and a session left behind would be launched from on the next
+    /// run.
+    pub fn release_headless(
+        signer: &dyn Signer,
+        ctx: &HeadlessContext,
+    ) -> Result<ReleaseOutcome, HeadlessError> {
+        let contract = parse_contract(&ctx.contract)?;
+        preflight_chain_id(ctx)?;
+
+        let session = match ctx.token_id {
+            Some(token_id) => crate::session_store::load_session(&ctx.app_id, token_id)
+                .map_err(|e| HeadlessError::Persist(e.to_string()))?,
+            None => crate::session_store::load_latest_session(&ctx.app_id)
+                .map_err(|e| HeadlessError::Persist(e.to_string()))?,
+        };
+        let token_id = session.token_id;
+        let session_id = match session.session_id {
+            // A tier-0..2 session never took a seat, so there is nothing on
+            // chain to hand back and saying so is the whole answer.
+            None => {
+                forget_session(&ctx.app_id, token_id)?;
+                return Ok(ReleaseOutcome::NoSeatHeld { token_id });
+            }
+            Some(id) => id,
+        };
+
+        match rpc::session_seat(&ctx.rpc_url, contract, token_id, session_id) {
+            Ok((true, _)) => {}
+            Ok((false, _)) => {
+                forget_session(&ctx.app_id, token_id)?;
+                return Ok(ReleaseOutcome::NoSeatHeld { token_id });
+            }
+            Err(e) => return Err(HeadlessError::Rpc(e.to_string())),
+        }
+
+        let calldata = decode_calldata(&rpc::encode_release_calldata(token_id, session_id))?;
+        let tx_hash = tx::send(
+            &ctx.rpc_url,
+            signer,
+            &TxPlan {
+                to: contract,
+                value: U256::ZERO,
+                input: calldata,
+            },
+        )?;
+        let receipt = rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash)
+            .map_err(|e| HeadlessError::Rpc(format!("release() tx {tx_hash}: {e}")))?;
+        if !receipt.status {
+            return Err(HeadlessError::Rpc(format!(
+                "release() reverted on-chain (tx {tx_hash})"
+            )));
+        }
+
+        forget_session(&ctx.app_id, token_id)?;
+        Ok(ReleaseOutcome::Released {
+            token_id,
+            session_id,
+            tx_hash,
+        })
+    }
+
+    /// Drops the local session record for `token_id`.
+    fn forget_session(app_id: &str, token_id: u64) -> Result<(), HeadlessError> {
+        crate::session_store::delete_session(app_id, token_id)
+            .map_err(|e| HeadlessError::Persist(e.to_string()))
+    }
+
+    /// Hands back the seat this machine's own finished session is still
+    /// holding, when it holds one. Returns whether a seat was released.
+    ///
+    /// **Only ever this machine's own session, and that limit is the whole
+    /// function.** The session id comes from the local store and the chain is
+    /// asked whether it still holds a seat, so the worst a stale or hostile
+    /// file can do is name a session the contract says holds nothing. A wrapper
+    /// must never free a seat another live instance is using: that is one
+    /// machine ending another's session, which is the revocation shape §2.4
+    /// rules out even between two machines holding the same key.
+    ///
+    /// This is the common case on any build whose packed session TTL is shorter
+    /// than the contract's `sessionTtlSeconds`: the cached session lapses
+    /// locally while its seat is still live on-chain, and without this an
+    /// instance would report as full a fleet it was itself filling.
+    ///
+    /// A licence granting one seat needs none of this - the contract lets its
+    /// sole holder retake their own seat, so a single-seat build never reports
+    /// exhaustion and never reaches here. This is for fleets.
+    ///
+    /// The retake still costs the seat's own cooldown, because `release` never
+    /// clears the stamp - so this recovers a seat and never buys a faster churn
+    /// than `cooldownBlocks` allows.
+    ///
+    /// Best-effort by design: everything here recovers a seat that would
+    /// otherwise be waited out, so a failure to send or confirm returns "no
+    /// seat released" and lets the caller report the exhaustion it found.
+    fn reclaim_seat(
+        signer: &dyn Signer,
+        ctx: &HeadlessContext,
+        contract: Address,
+        token_id: u64,
+    ) -> Result<bool, HeadlessError> {
+        let session_id = match own_stale_session_id(ctx, contract, token_id)? {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+
+        let calldata = decode_calldata(&rpc::encode_release_calldata(token_id, session_id))?;
+        let tx_hash = match tx::send(
+            &ctx.rpc_url,
+            signer,
+            &TxPlan {
+                to: contract,
+                value: U256::ZERO,
+                input: calldata,
+            },
+        ) {
+            Ok(hash) => hash,
+            Err(_) => return Ok(false),
+        };
+
+        match rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash) {
+            Ok(receipt) => Ok(receipt.status),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// The id of a session this machine cached, has finished with, and which
+    /// the chain says still holds a seat.
+    fn own_stale_session_id(
+        ctx: &HeadlessContext,
+        contract: Address,
+        token_id: u64,
+    ) -> Result<Option<u64>, HeadlessError> {
+        let session = match crate::session_store::load_session(&ctx.app_id, token_id) {
+            Ok(session) => session,
+            Err(_) => return Ok(None),
+        };
+        // Only a session this wrapper could have written, for this contract.
+        if !session.contract.eq_ignore_ascii_case(&ctx.contract) {
+            return Ok(None);
+        }
+        let session_id = match session.session_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        // A session still usable is not stale, and taking its seat away would
+        // be this wrapper cancelling a launch it could have served.
+        if !crate::session::is_expired(&session) {
+            return Ok(None);
+        }
+
+        match rpc::session_seat(&ctx.rpc_url, contract, token_id, session_id) {
+            Ok((true, _)) => Ok(Some(session_id)),
+            Ok((false, _)) => Ok(None),
+            Err(e) => Err(HeadlessError::Rpc(e.to_string())),
+        }
+    }
 
     /// Buys a token for `wallet` and returns `(token_id, rail)`.
     ///
@@ -2431,6 +2724,7 @@ mod tests {
             EXIT_PURCHASE_UNCONFIRMED,
             EXIT_PRICE_ABOVE_POLICY,
             EXIT_NOT_CANONICAL_CONTRACT,
+            EXIT_FLEET_EXHAUSTED,
         ] {
             assert!(
                 EXIT_CODE_HELP.contains(&format!("  {code}  ")),
@@ -2452,6 +2746,56 @@ mod tests {
         assert!(detail.contains("token_id=3"), "{detail}");
         // The prose message must carry it too, for a human reading the logs.
         assert!(err.to_string().contains("42"));
+    }
+
+    /// **A full fleet is its own outcome, not a shade of the cooldown.** An
+    /// orchestrator branches on the exit code: one of these clears on its own
+    /// and the other needs it to act, so a shared code would leave it choosing
+    /// between waiting forever and scaling down for no reason.
+    #[test]
+    fn fleet_exhaustion_has_its_own_exit_code() {
+        let exhausted = HeadlessError::FleetExhausted {
+            token_id: 3,
+            seats_in_use: 4,
+            seats: 4,
+            seconds_remaining: 900,
+        };
+        let cooling = HeadlessError::CooldownActive {
+            token_id: 3,
+            blocks_remaining: 42,
+        };
+        assert_eq!(exhausted.exit_code(), EXIT_FLEET_EXHAUSTED);
+        assert_ne!(exhausted.exit_code(), cooling.exit_code());
+    }
+
+    /// Every number the decision turns on, in `key=value`, so an orchestrator
+    /// never has to read the sentence beside it.
+    #[test]
+    fn fleet_exhaustion_detail_names_the_seat_count() {
+        let err = HeadlessError::FleetExhausted {
+            token_id: 3,
+            seats_in_use: 4,
+            seats: 4,
+            seconds_remaining: 900,
+        };
+        let detail = err
+            .machine_detail()
+            .expect("fleet exhaustion must carry a detail line");
+        for key in [
+            "token_id=3",
+            "seats_in_use=4",
+            "seats=4",
+            "seconds_remaining=900",
+        ] {
+            assert!(detail.contains(key), "{key} missing from {detail}");
+        }
+        assert!(
+            !detail.contains('\n'),
+            "the detail is one line an orchestrator splits on spaces: {detail}"
+        );
+        // And a human reading the logs is told the same thing in words.
+        let message = err.to_string();
+        assert!(message.contains("4 of 4 seats"), "{message}");
     }
 
     #[test]

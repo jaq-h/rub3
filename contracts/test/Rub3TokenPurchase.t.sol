@@ -38,6 +38,7 @@ contract Rub3TokenPurchaseTest is Test {
     uint256 internal constant PRICE = 0.05 ether;
     uint256 internal constant USDC_PRICE = 5_000_000; // 5 USDC, 6 decimals
     uint256 internal constant COOLDOWN_BLOCKS = 15;
+    uint256 internal constant SESSION_TTL = 24 hours;
 
     address internal owner = address(0x00E);
     address internal submitter = address(0x5B417); // facilitator: pays gas, nothing else
@@ -64,6 +65,21 @@ contract Rub3TokenPurchaseTest is Test {
     }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────
+
+    /// Session terms with the single-seat default: one concurrent session per
+    /// token, which is the tier-3 licence seats generalise (§3.4).
+    function _session() internal pure returns (Rub3License.SessionTerms memory) {
+        return _session(1);
+    }
+
+    /// Session terms granting `seats` concurrent sessions per token.
+    function _session(uint256 seats) internal pure returns (Rub3License.SessionTerms memory) {
+        return Rub3License.SessionTerms({
+            cooldownBlocks: COOLDOWN_BLOCKS,
+            seatsPerToken: seats,
+            sessionTtlSeconds: SESSION_TTL
+        });
+    }
 
     function _identity(uint8 model, address tbaImplementation)
         internal
@@ -102,7 +118,7 @@ contract Rub3TokenPurchaseTest is Test {
             sale,
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             owner
         );
@@ -296,7 +312,7 @@ contract Rub3TokenPurchaseTest is Test {
             _sale(PRICE, address(usdc), USDC_PRICE),
             _noFee(),
             1,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             owner
         );

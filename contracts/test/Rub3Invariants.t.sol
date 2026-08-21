@@ -35,11 +35,27 @@ contract Rub3InvariantsTest is Test {
 
     uint256 internal constant PRICE = 0.05 ether;
     uint256 internal constant COOLDOWN_BLOCKS = 15;
+    uint256 internal constant SESSION_TTL = 24 hours;
 
     /// Stands in for USDC wherever an owner power over the stablecoin rail has
     /// to be shown not to reach an issued token. The rail's own behaviour is
     /// covered in `Rub3TokenPurchase.t.sol`.
     MockEIP3009Token internal usdc;
+
+    /// Session terms with the single-seat default: one concurrent session per
+    /// token, which is the tier-3 licence seats generalise (§3.4).
+    function _session() internal pure returns (Rub3License.SessionTerms memory) {
+        return _session(1);
+    }
+
+    /// Session terms granting `seats` concurrent sessions per token.
+    function _session(uint256 seats) internal pure returns (Rub3License.SessionTerms memory) {
+        return Rub3License.SessionTerms({
+            cooldownBlocks: COOLDOWN_BLOCKS,
+            seatsPerToken: seats,
+            sessionTtlSeconds: SESSION_TTL
+        });
+    }
 
     /// ETH-only sale terms - what every fixture below except the stablecoin
     /// suite deploys with.
@@ -57,7 +73,7 @@ contract Rub3InvariantsTest is Test {
             _sale(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             owner
         );
@@ -111,7 +127,7 @@ contract Rub3InvariantsTest is Test {
             _sale(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             predecessor_,
             owner
         );
@@ -140,7 +156,7 @@ contract Rub3InvariantsTest is Test {
             _sale(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             owner
         );
@@ -158,7 +174,7 @@ contract Rub3InvariantsTest is Test {
             _sale(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             owner
         );
@@ -173,7 +189,7 @@ contract Rub3InvariantsTest is Test {
             _sale(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             owner
         );
@@ -438,7 +454,7 @@ contract Rub3InvariantsTest is Test {
             _sale(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             next,
             owner
         );
@@ -730,7 +746,7 @@ contract Rub3InvariantsTest is Test {
             address(new Rub3Factory(250, address(0x7EA5), address(0)))
         ];
 
-        string[25] memory forbidden = [
+        string[30] memory forbidden = [
             // Burn - nothing may destroy an issued token.
             "burn(uint256)",
             "burn(address,uint256)",
@@ -770,7 +786,19 @@ contract Rub3InvariantsTest is Test {
             // never change after deploy" a property of the bytecode rather than
             // a promise.
             "setFeeBps(uint16)",
-            "setTreasury(address)"
+            "setTreasury(address)",
+            // Seats (§3.4). `seatsPerToken` and `sessionTtlSeconds` are
+            // immutable and there is no per-token seat state at all, so an
+            // owner who could lower a held token's concurrency does not exist.
+            // These are the setters that would create one.
+            "setSeatsPerToken(uint256)",
+            "setMaxConcurrentSessions(uint256,uint256)",
+            "setSessionTtl(uint256)",
+            // Admin eviction of a live session. A holder handing back their own
+            // seat is `release(uint256,uint256)` and is not revocation; anyone
+            // else ending a session would be.
+            "revokeSeat(uint256,uint256)",
+            "clearSeats(uint256)"
         ];
 
         for (uint256 t = 0; t < targets.length; t++) {
@@ -830,7 +858,8 @@ contract Rub3InvariantsTest is Test {
 
         assertEq(nft.ownerOf(id), alice);
         assertEq(nft.balanceOf(alice), 1);
-        assertEq(nft.activeSessionId(id), s1);
+        (bool live,) = nft.sessionSeat(id, s1);
+        assertTrue(live, "the session the holder opened must survive all of it");
 
         vm.roll(block.number + COOLDOWN_BLOCKS);
         vm.prank(alice);
@@ -839,6 +868,67 @@ contract Rub3InvariantsTest is Test {
         vm.prank(alice);
         nft.transferFrom(alice, bob, id);
         assertEq(nft.ownerOf(id), bob);
+    }
+
+    /// **Seats are not a revocation surface, and this is the behavioural half
+    /// of that claim** - the bytecode half is the five seat signatures in
+    /// {test_audit_noRevocationSurface}.
+    ///
+    /// The owner does everything it can, twice, and a live fleet is untouched:
+    /// every seat still held, every session still live, and the holder still the
+    /// only address that can hand one back.
+    function test_audit_ownerCannotReachASeat() public {
+        uint256 id = _mint(alice);
+        vm.prank(alice);
+        uint256 session = nft.activate(id);
+
+        vm.startPrank(owner);
+        nft.setPrice(type(uint256).max);
+        nft.addWrapperHash(HASH_V3);
+        nft.revokeWrapperHash(HASH_V1, "burned");
+        nft.setSuccessor(address(_deploySuccessor(address(nft))));
+        nft.transferOwnership(attacker);
+        vm.stopPrank();
+
+        vm.startPrank(attacker);
+        // Every seat-shaped call an owner might reach for. None of them is a
+        // function, so each one hits the missing fallback and reverts.
+        _assertNoSeatCall(abi.encodeWithSignature("setSeatsPerToken(uint256)", uint256(99)));
+        _assertNoSeatCall(
+            abi.encodeWithSignature("setMaxConcurrentSessions(uint256,uint256)", id, uint256(0))
+        );
+        _assertNoSeatCall(abi.encodeWithSignature("setSessionTtl(uint256)", uint256(1)));
+        _assertNoSeatCall(abi.encodeWithSignature("revokeSeat(uint256,uint256)", id, session));
+        _assertNoSeatCall(abi.encodeWithSignature("clearSeats(uint256)", id));
+
+        // And the one release that does exist is the holder's alone.
+        vm.expectRevert(abi.encodeWithSelector(Rub3License.NotTokenOwner.selector, attacker, alice));
+        nft.release(id, session);
+        vm.stopPrank();
+
+        (bool live, uint256 index) = nft.sessionSeat(id, session);
+        assertTrue(live, "the holder's session survives everything above");
+        assertEq(index, 0);
+        assertEq(nft.seatsInUse(id), 1);
+        assertEq(nft.seatsPerToken(), 1, "and the seat count is where it was deployed");
+    }
+
+    /// Seat count and session TTL are frozen at deploy, so what a buyer audits
+    /// before paying is what their token grants for as long as it exists.
+    function test_audit_seatTermsAreImmutable() public view {
+        assertEq(nft.seatsPerToken(), 1);
+        assertEq(nft.sessionTtlSeconds(), SESSION_TTL);
+        // The getters exist and no setter for either does - the same shape the
+        // fee terms have.
+        assertTrue(_bytecodeHasSelector(address(nft), bytes4(keccak256("seatsPerToken()"))));
+        assertTrue(_bytecodeHasSelector(address(nft), bytes4(keccak256("sessionTtlSeconds()"))));
+    }
+
+    /// @dev A seat-shaped call that is not a function on this contract. There is
+    ///      no fallback to swallow it, so absence shows up as a revert.
+    function _assertNoSeatCall(bytes memory payload) internal {
+        (bool ok,) = address(nft).call(payload);
+        assertFalse(ok, "no seat-writing function may exist");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -896,7 +986,7 @@ contract Rub3InvariantsTest is Test {
             _sale(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             alice,
             owner
         );
@@ -919,7 +1009,7 @@ contract Rub3InvariantsTest is Test {
             _sale(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             notALicense,
             owner
         );

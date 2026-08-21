@@ -45,6 +45,8 @@ const SCRIPT_VARS: &[&str] = &[
     "PRICE_AMOUNT",
     "SUPPLY_CAP",
     "COOLDOWN_BLOCKS",
+    "SEATS",
+    "SESSION_TTL",
     "OWNER",
     "PREDECESSOR",
     "FACTORY",
@@ -106,9 +108,32 @@ pub struct DeployArgs {
     #[arg(long, value_name = "N")]
     pub supply_cap: Option<u64>,
 
-    /// Blocks between activations of one token. The contract's floor is 15.
+    /// Blocks a seat must wait between activations. The contract's floor is 15.
+    ///
+    /// Per seat, not per token: a token grants --seats concurrent sessions and
+    /// lands at most that many activations per cooldown window, so seats
+    /// multiply concurrency and never the churn rate.
     #[arg(long, value_name = "N")]
     pub cooldown_blocks: Option<u64>,
+
+    /// Concurrent sessions one licence token grants (§3.4). Defaults to 1, the
+    /// single-session tier-3 licence; the contract's ceiling is 64.
+    ///
+    /// Frozen at deploy and per contract, not per token: nothing can lower a
+    /// held token's concurrency afterwards. Sell a second seat count by
+    /// deploying a second contract.
+    #[arg(long, value_name = "K")]
+    pub seats: Option<u64>,
+
+    /// Seconds a seat stays taken when nobody releases it. Defaults to 86400
+    /// (24h); the contract's range is 300 to 7776000 (90 days).
+    ///
+    /// This is what frees a seat when a fleet instance dies without releasing
+    /// it. A wrapper takes the shorter of this and its own packed session TTL,
+    /// so `rub3 pack --session-ttl` can only shorten a session, never outlive
+    /// the seat that admits it.
+    #[arg(long, value_name = "SECONDS")]
+    pub session_ttl: Option<u64>,
 
     /// Contract owner. Defaults to the deploying key.
     #[arg(long, value_name = "ADDRESS")]
@@ -340,6 +365,27 @@ impl DeployPlan {
         }
         if let Some(blocks) = args.cooldown_blocks {
             env.insert("COOLDOWN_BLOCKS".to_string(), blocks.to_string());
+        }
+        // Both bounds are enforced by the contract's constructor, which is the
+        // authority; refusing the obviously-wrong value here only saves a
+        // deployer a broadcast that would revert.
+        if let Some(seats) = args.seats {
+            if seats == 0 || seats > 64 {
+                return Err(DeployError::Config(format!(
+                    "--seats {seats} is outside the range the contract accepts: 1 to 64. \
+                     A fleet wider than 64 buys another token."
+                )));
+            }
+            env.insert("SEATS".to_string(), seats.to_string());
+        }
+        if let Some(ttl) = args.session_ttl {
+            if !(300..=7_776_000).contains(&ttl) {
+                return Err(DeployError::Config(format!(
+                    "--session-ttl {ttl} is outside the range the contract accepts: \
+                     300 to 7776000 seconds (5 minutes to 90 days)."
+                )));
+            }
+            env.insert("SESSION_TTL".to_string(), ttl.to_string());
         }
         if let Some(owner) = &args.owner {
             validate_address(owner)
@@ -610,5 +656,51 @@ mod tests {
         assert!(validate_hash(&format!("0x{}", "00".repeat(32))).is_err());
         assert!(validate_hash("0xabc").is_err());
         assert!(validate_hash(&"ab".repeat(32)).is_err());
+    }
+
+    /// **[`SCRIPT_VARS`] must name every variable the script reads, and a
+    /// missing entry is silent.** The list exists so the ones this command does
+    /// not set are *removed* from the child's environment; one left out is
+    /// inherited instead, and a stale value in an operator's shell becomes a
+    /// deploy input nobody typed. That is the failure the list was written to
+    /// prevent, so it is checked against the script rather than trusted.
+    ///
+    /// Reads `Deploy.s.sol` and pulls every `vm.env*("NAME"` out of it, which is
+    /// the only way the script can reach the environment at all.
+    #[test]
+    fn script_vars_names_every_variable_the_deploy_script_reads() {
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/script/Deploy.s.sol"),
+        )
+        .expect("the deploy script this command drives");
+
+        let mut missing: Vec<String> = Vec::new();
+        for (index, _) in script.match_indices("vm.env") {
+            let rest = &script[index..];
+            let Some(open) = rest.find('"') else { continue };
+            let Some(close) = rest[open + 1..].find('"') else {
+                continue;
+            };
+            let name = &rest[open + 1..open + 1 + close];
+            // The script reads a delimiter and a default alongside the name;
+            // only an upper-case identifier is a variable.
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            {
+                continue;
+            }
+            if !SCRIPT_VARS.contains(&name) && !missing.contains(&name.to_string()) {
+                missing.push(name.to_string());
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "Deploy.s.sol reads these variables and SCRIPT_VARS does not name them, so \
+             they would be inherited from the operator's environment rather than cleared: {}",
+            missing.join(", ")
+        );
     }
 }

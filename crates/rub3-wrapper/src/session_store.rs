@@ -69,6 +69,21 @@ pub fn save_session(session: &Session) -> Result<(), StoreError> {
     std::fs::write(&path, json).map_err(StoreError::Io)
 }
 
+/// Removes the cached session for `token_id`, if there is one.
+///
+/// Succeeds when there was nothing to remove: the caller wants the session
+/// gone, and it already is. Used by the seat teardown path (§3.4), where a
+/// record left behind would be launched from on the next run after the seat it
+/// names has been handed back.
+pub fn delete_session(app_id: &str, token_id: u64) -> Result<(), StoreError> {
+    let path = session_path(app_id, token_id)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(StoreError::Io(e)),
+    }
+}
+
 // ── Latest-session scan ───────────────────────────────────────────────────────
 
 /// Scans `~/.rub3/sessions/<app_id>/` for all valid, non-expired sessions and
