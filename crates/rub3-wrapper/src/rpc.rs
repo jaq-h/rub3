@@ -60,8 +60,8 @@ sol! {
         /// the ABI encoding, so it must match the Solidity struct exactly.
         ///
         /// The two refusals are told apart by `fleetExhausted`: a full fleet
-        /// waits `secondsRemaining` for a seat to lapse, while a cooldown waits
-        /// `blocksRemaining`. Neither number is meaningful for the other case,
+        /// waits `secondsRemaining` for a seat's occupancy to lapse, while a
+        /// cooldown waits `blocksRemaining`. Neither number is meaningful for the other case,
         /// which is why the contract answers both in one call rather than
         /// leaving a caller to infer which it is looking at. The flag is the
         /// contract's own answer rather than something derived from the seat
@@ -675,8 +675,11 @@ pub struct ActivationStatus {
     /// Blocks until the earliest free seat leaves its cooldown. Meaningful only
     /// when `!ready && seats_in_use < seats`.
     pub blocks_remaining: u64,
-    /// Seconds until the earliest occupied seat lapses. This is the wait when
-    /// the fleet is full.
+    /// Seconds until the earliest occupied seat's *occupancy* lapses, which is
+    /// a lower bound on the wait when the fleet is full rather than the whole
+    /// of it: a lapsed seat keeps its cooldown stamp, so the seat that frees
+    /// then may still owe blocks and refuse as a cooldown instead. Handing a
+    /// seat back elsewhere ends the wait sooner.
     pub seconds_remaining: u64,
 }
 
@@ -732,8 +735,10 @@ async fn read_activation_status(
 }
 
 impl ActivationStatus {
-    /// How long before the contract would take an `activate()`, given a
-    /// block-time estimate for the cooldown case.
+    /// How long before a seat is expected to be available, given a block-time
+    /// estimate for the cooldown case. On the full-fleet side that is when the
+    /// earliest seat's occupancy lapses, which its own cooldown may extend -
+    /// see [`ActivationStatus::seconds_remaining`].
     ///
     /// One place for the arithmetic, because the two refusals are measured in
     /// different units and a caller that got the unit wrong would arm a watch

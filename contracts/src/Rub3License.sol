@@ -450,7 +450,12 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         /// when one already has, and `0` when `fleetExhausted`.
         uint256 blocksRemaining;
         /// Seconds until the earliest *occupied* seat lapses. `0` when none is
-        /// occupied. This is the wait when `fleetExhausted`.
+        /// occupied.
+        ///
+        /// The wait when `fleetExhausted`, and a lower bound on it rather than
+        /// the whole of it: a lapsed seat keeps its `activatedAt` stamp - see
+        /// {sessionTtlSeconds} - so the seat that frees at that moment may
+        /// still owe blocks of its own cooldown and revert {CooldownActive}.
         uint256 secondsRemaining;
     }
 

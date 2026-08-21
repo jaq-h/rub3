@@ -664,6 +664,11 @@
   // own hold cannot disagree about when the wait ends.
   let cooldownEndsAt = 0;
 
+  // Which of the two waits the box above is counting down: a seat's session
+  // lapsing rather than a cooldown running out. The countdown reaches zero the
+  // same way either way, but only one of them ends with the contract ready.
+  let cooldownExhausted = false;
+
   // ── The cooldown countdown (§5.4) ─────────────────────────────────────────
   //
   // The page's only timer, and the cooldown screen is the only screen that
@@ -719,15 +724,17 @@
       return;
     }
 
-    // Zero. The contract will take the transaction now, and the wrapper's
-    // watcher comes off its hold at this same moment, so the screen becomes
-    // the one it would have rendered had the token been ready all along: the
-    // wait box goes, and the copy says what it says outside a wait. The same
-    // for both waits this box carries - a cooldown running out and the last
-    // seat lapsing are the same moment to this screen.
+    // Zero. A cooldown running out is the contract becoming ready, and the
+    // wrapper's watcher comes off its hold at the same moment, so the screen
+    // becomes the one it would have rendered had the token been ready all
+    // along: the wait box goes, and the copy says what it says outside a wait.
+    //
+    // A seat lapsing is not that. The seat frees, but it keeps its own
+    // cooldown stamp, so the contract may go on refusing - the copy says so
+    // rather than inheriting the sentence that belongs to a cooldown ending.
     cooldownEndsAt = 0;
     document.getElementById('cd-wait').classList.add('hidden');
-    setCooldownWatchCopy(false, false);
+    setCooldownWatchCopy(false, cooldownExhausted);
   }
 
   // The two lines the auto-detect panel carries on this screen, and the only
@@ -746,12 +753,14 @@
     const sub  = document.getElementById('cd-watch-sub');
     if (!waiting) {
       head.textContent = 'Waiting for your wallet to broadcast the tx…';
-      sub.textContent  = 'Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.';
+      sub.textContent  = exhausted
+        ? 'A seat has freed. It keeps its own cooldown, so the contract may still refuse for a while - send the transaction above when you are ready and we will pick it up on our own, or try again if it reverts.'
+        : 'Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.';
       return;
     }
     if (exhausted) {
       head.textContent = 'Waiting for a seat to free…';
-      sub.textContent  = 'Every seat this licence grants is holding a live session, so the contract will refuse the transaction until one frees. Send it once the countdown above ends: we start watching the chain as it runs out, and will pick it up on our own.';
+      sub.textContent  = 'Every seat this licence grants is holding a live session, so the contract will refuse the transaction until one frees. The countdown above is until the earliest session lapses; that seat keeps its own cooldown, so the contract may refuse for a while after it. We start watching the chain as the countdown runs out, and will pick it up on our own.';
       return;
     }
     head.textContent = 'Waiting for the cooldown to end…';
@@ -1048,6 +1057,7 @@
       const waiting    = cooling || exhausted;
       const waitSecs   = data.cooldownSecsRemaining || 0;
       cooldownEndsAt   = waiting ? Date.now() + waitSecs * 1000 : 0;
+      cooldownExhausted = exhausted;
       if (waiting) {
         waitBox.classList.remove('hidden');
         if (exhausted) {
@@ -1058,8 +1068,9 @@
           waitTitle.textContent = 'All Seats In Use';
           blocksNote.textContent =
             data.seatsInUse + ' of ' + data.seats + ' seat'
-            + (data.seats === 1 ? '' : 's') + ' in use. The next frees when the countdown ends, '
-            + 'or sooner if another instance releases one.';
+            + (data.seats === 1 ? '' : 's') + ' in use. The countdown is until the earliest '
+            + 'session lapses; that seat keeps its own cooldown, so the contract may refuse '
+            + 'for a while longer. It frees sooner if another instance releases one.';
         } else {
           waitTitle.textContent = 'Cooldown Active';
           // The blocks are the chain's own answer and the countdown above them

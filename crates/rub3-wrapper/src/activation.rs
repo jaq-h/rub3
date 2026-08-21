@@ -352,7 +352,9 @@ pub const EXIT_NOT_CANONICAL_CONTRACT: i32 = 23;
 /// cooldown is waited out in blocks, while a full fleet needs the orchestrator
 /// to scale down, release a seat it is done with, or buy another token. The
 /// detail line carries `token_id`, `seats_in_use`, `seats` and
-/// `seconds_remaining`, which is when the earliest seat lapses.
+/// `seconds_remaining`, which is when the earliest seat's occupancy lapses. A
+/// lower bound on the wait rather than the whole of it: a lapsed seat keeps its
+/// own cooldown stamp, so the seat that frees then may still owe blocks.
 pub const EXIT_FLEET_EXHAUSTED: i32 = 24;
 
 /// The exit-code table rendered for `--help`, so the contract is discoverable
@@ -429,7 +431,11 @@ child is the child's status and not an activation failure.
       cooldown clears on its own in blocks, while a full fleet needs
       this orchestrator to scale down, release a seat it is done with,
       or buy another token. `seconds_remaining` is when the earliest
-      seat lapses, which is the longest a run that does nothing waits
+      seat's *occupancy* lapses, which is a lower bound on the wait and
+      not the whole of it: a lapsed seat keeps its own cooldown stamp,
+      which is what stops seats from buying a faster churn, so the seat
+      that frees then may still owe blocks and answer 13 next. A run
+      that waits it out and retries is told what is left
 
 Teardown:
   --release-seat  hands this machine's seat back and exits without
@@ -838,9 +844,16 @@ mod headless {
         /// release a seat it knows it is done with. Telling it apart from
         /// [`HeadlessError::CooldownActive`] matters more than either message,
         /// because the two are waited out in different units and only one of
-        /// them clears on its own. `seconds_remaining` is when the earliest
-        /// seat lapses, which is the longest an orchestrator that does nothing
-        /// has to wait.
+        /// them clears on its own.
+        ///
+        /// **`seconds_remaining` is when the earliest seat's *occupancy*
+        /// lapses, and that is a lower bound on the wait rather than the whole
+        /// of it.** A lapsed seat keeps its `activatedAt` stamp - that is the
+        /// churn defence, not an oversight - so the seat that frees at that
+        /// moment may still owe blocks of its own cooldown and refuse with
+        /// [`HeadlessError::CooldownActive`] instead. An orchestrator that
+        /// sleeps this out and retries is told in blocks what is left; one
+        /// that releases a seat elsewhere does not wait at all.
         FleetExhausted {
             token_id: u64,
             seats_in_use: u64,

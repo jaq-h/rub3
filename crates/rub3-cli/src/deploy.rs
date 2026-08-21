@@ -676,8 +676,11 @@ mod tests {
     /// earlier `source .env` is a licence sold on terms the operator did not
     /// choose, and it would be silent.
     ///
-    /// Asserted against the `forge` invocation the plan actually produces,
-    /// parent environment polluted, rather than against the list.
+    /// Asserted against the `forge` invocation the plan actually produces:
+    /// every name is in its override map, either carrying the plan's value or
+    /// marked for removal. That map is the whole of what the child's
+    /// environment is built from, so it is the contract, and nothing here has
+    /// to touch this process's own environment to assert it.
     #[test]
     fn the_plan_clears_every_script_variable_it_did_not_set_itself() {
         use clap::Parser;
@@ -714,12 +717,6 @@ mod tests {
             "this test needs variables the plan leaves alone",
         );
 
-        // What an operator's shell might be carrying. Set on this process,
-        // which is the parent the child would inherit from.
-        std::env::set_var("SEATS", "64");
-        std::env::set_var("FACTORY", "0x000000000000000000000000000000000000dead");
-        std::env::set_var("PRICE", "999999999999999999");
-
         let command = forge_command(&plan, &repo_root.join("contracts"));
         let child_env: BTreeMap<String, Option<String>> = command
             .get_envs()
@@ -730,10 +727,6 @@ mod tests {
                 )
             })
             .collect();
-
-        std::env::remove_var("SEATS");
-        std::env::remove_var("FACTORY");
-        std::env::remove_var("PRICE");
 
         for var in SCRIPT_VARS {
             match plan.env.get(*var) {
