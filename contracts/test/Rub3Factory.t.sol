@@ -1135,8 +1135,8 @@ contract Rub3FactoryTest is Test {
         assertFalse(factory.isCanonicalPredecessor(address(shadow)));
     }
 
-    /// So are the deployer helpers, deliberately: they are permissionless and
-    /// record nothing, so a licence they produce carries no `isDeployed` row and
+    /// So is the deployer helper, deliberately: it is permissionless and
+    /// records nothing, so a licence it produces carries no `isDeployed` row and
     /// none of the standing the laundering route was after. The guard belongs
     /// where the registry row is granted, which is the factory.
     function test_predecessor_deployerHelperIsUnconstrainedAndUnrecorded() public {

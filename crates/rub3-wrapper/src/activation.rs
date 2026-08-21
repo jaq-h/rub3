@@ -331,8 +331,8 @@ pub const EXIT_PRICE_ABOVE_POLICY: i32 = 22;
 ///
 /// - `contract=0x... canonical=<name> sells_licences=false` - the code *is*
 ///   canonical rub3 code, but at an address that sells no licences (the
-///   factory, one of its deployer helpers, the code registry, or the
-///   discovery registry). The build is pointed at the wrong address; check
+///   factory, its deployer helper, the code registry, or the discovery
+///   registry). The build is pointed at the wrong address; check
 ///   what it was packed with.
 /// - `contract=0x... code_bytes=N registry=<who> exposed=<a>|<b>` - no
 ///   authority this build could reach vouched for the code. That is a modified

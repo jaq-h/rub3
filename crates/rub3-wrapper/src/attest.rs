@@ -129,7 +129,7 @@ use crate::rpc::{self, RpcError};
 /// What a canonical contract is *for*, which decides what may be done with it.
 ///
 /// A masked-hash match says the code is ours; it does not say the address sells
-/// licences. The factory, its two deployer helpers, the code registry and the
+/// licences. The factory, its deployer helper, the code registry and the
 /// discovery registry are canonical rub3 code and are pinned here so the table
 /// stays a total mirror of the published manifest, but buying from one is a
 /// category error, and
@@ -277,8 +277,12 @@ const RELEASE: &str = "2026-08, contracts at implementation.md §2.10 (one licen
 /// deploy a superseded fingerprint protects no holder, while it widens the set
 /// of code the wrapper will spend money on, which is the opposite of what this
 /// table is for; so the pre-exact-payment rows of the §2.3 contracts were
-/// dropped rather than carried. That was a one-off taken while the condition above was
-/// still false, not licence to prune the table again.
+/// dropped rather than carried, and §2.10's removal pruned two more. **What
+/// governs is the condition, not precedent:** while nothing is deployed the
+/// table is corrected in place to describe exactly the code that exists. At the
+/// first deploy on any chain the accumulate-only rule switches on permanently
+/// for that chain and for the contracts that deploy put on it, and from then on
+/// a row is only ever added.
 ///
 /// Rows are grouped by contract, newest release first, so a contract's history
 /// reads top to bottom.
@@ -1262,8 +1266,8 @@ pub enum Refusal {
     /// The code at the address was vouched for by nothing - not the pinned
     /// table, and not the registry if there was one to ask.
     Unrecognised(Unrecognised),
-    /// Canonical rub3 code, but not a licence contract - the factory, one of its
-    /// deployer helpers, the code registry, or the discovery registry. It sells
+    /// Canonical rub3 code, but not a licence contract - the factory, its
+    /// deployer helper, the code registry, or the discovery registry. It sells
     /// nothing, so buying from it is a mistake about the address rather than
     /// about the code.
     NotALicence {

@@ -1414,9 +1414,9 @@ sol! {
 ///
 /// The bootstrap for a masked-hash lookup: computing the hash needs a table, and
 /// finding the record needs the hash, so the candidate tables are fetched first
-/// in one call. The canonical set spans four layouts today: one per licence
-/// template, one for the factory, and the empty one its two deployer helpers
-/// and the registry share.
+/// in one call. The canonical set spans four layouts today: one each for
+/// `Rub3Access`, `Rub3Factory` and `Rub3Registry`, plus the empty one
+/// `Rub3AccessDeployer` and `Rub3CodeRegistry` share.
 ///
 /// The registry's own `latestOffsetTables` does the bounding, so the response
 /// this pays to transfer and decode is capped by the caller's `limit` rather

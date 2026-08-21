@@ -856,11 +856,14 @@ contract Rub3InvariantsTest is Test {
     /// in place before the callback, so `onERC721Received` can never observe a
     /// claimed token that does not yet say it was claimed.
     function test_mintOrdering_claimStateExistsBeforeRecipientCallback() public {
+        _mint(alice);
+
         MintCallbackProbe probe = new MintCallbackProbe();
         vm.deal(address(probe), 10 ether);
         probe.watch(nft);
         uint256 id = probe.buy(PRICE);
         assertTrue(probe.fired(), "the recipient callback must have run");
+        assertTrue(id != 0, "the claimed-from id must differ from an unwritten mapping slot");
 
         Rub3Access v2 = _deploySuccessor(address(nft));
         vm.prank(owner);

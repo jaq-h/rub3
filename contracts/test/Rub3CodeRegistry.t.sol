@@ -163,8 +163,8 @@ contract Rub3CodeRegistryTest is Test {
     }
 
     /// A contract with no immutables publishes an empty table, and that is a
-    /// real answer rather than a missing one: the deployer helpers have none,
-    /// and their code hashes directly.
+    /// real answer rather than a missing one: the deployer helper has none,
+    /// and its code hashes directly.
     function test_publish_acceptsAnEmptyOffsetTable() public {
         Rub3CodeRegistry.ByteRange[] memory none = new Rub3CodeRegistry.ByteRange[](0);
         vm.prank(owner);

@@ -93,8 +93,8 @@ contract Rub3CodeRegistry is Ownable2Step {
     /// @notice What a contract carrying this code is *for*, which decides what
     ///         may be done with it. Canonical rub3 code is not the same thing as
     ///         a contract that sells licences: a buyer pointed at the factory,
-    ///         at one of its deployer helpers, or at either registry has the
-    ///         wrong address, not the wrong code.
+    ///         at its deployer helper, or at either registry has the wrong
+    ///         address, not the wrong code.
     ///
     ///         The order is part of the ABI - the wrapper mirrors these values -
     ///         so new roles are appended and existing ones never renumbered.

@@ -551,7 +551,7 @@ because the two causes call for different responses:
 
 | Detail line | What happened | What to do |
 |---|---|---|
-| `contract=0x... canonical=NAME sells_licences=false` | The code **is** canonical rub3 code, at an address that sells no licences - the factory, one of its deployer helpers, the code registry, or the discovery registry | Wrong address. Check what the build is pointed at |
+| `contract=0x... canonical=NAME sells_licences=false` | The code **is** canonical rub3 code, at an address that sells no licences - the factory, its deployer helper, the code registry, or the discovery registry | Wrong address. Check what the build is pointed at |
 | `contract=0x... code_bytes=N registry=WHO exposed=A\|B` | No authority vouched for the code: a modified copy, or a release newer than every authority this build could reach | Verify the address, or use a build packed with that release |
 
 `registry` says what the second authority contributed, and is three-valued
