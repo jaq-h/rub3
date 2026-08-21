@@ -1124,8 +1124,9 @@ contract Rub3Registry is Ownable2Step {
     ///         **Discovery only, and this is the function where that matters
     ///         most.** It hides an entry from {rankedListings} and marks its
     ///         card. It does not, and cannot, touch a token, a session or a
-    ///         price - nothing in a licence contract reads this one. The worst a compromised owner key does here is make the
-    ///         discovery surface wrong until it is corrected.
+    ///         price - nothing in a licence contract reads this one. The worst
+    ///         a compromised owner key does here is make the discovery surface
+    ///         wrong until it is corrected.
     ///
     ///         Reversible with {reinstate}, unlike {Rub3CodeRegistry.deprecate}.
     ///         The asymmetry is the point: a deprecation describes code an agent
