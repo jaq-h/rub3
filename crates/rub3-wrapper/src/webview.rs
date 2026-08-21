@@ -146,6 +146,20 @@ impl AutoWatchKind {
             AutoWatchKind::Activate => "activate",
         }
     }
+
+    /// The same thing named as prose rather than as a wire value.
+    ///
+    /// Kept apart from [`AutoWatchKind::as_str`] because they answer different
+    /// questions: that one is a protocol token the page matches on and must not
+    /// drift, this one is a noun that appears in sentences a person reads. They
+    /// are also not interchangeable in English - "a activate" is what reading
+    /// the wire value aloud produces.
+    fn subject(self) -> &'static str {
+        match self {
+            AutoWatchKind::Mint => "purchase",
+            AutoWatchKind::Activate => "activation",
+        }
+    }
 }
 
 /// The one auto-detect watch a window may have running, the handle that stops
@@ -981,8 +995,8 @@ impl IpcState {
             return;
         }
         eprintln!(
-            "rub3: auto-detect stopped watching for a {}: {e}",
-            kind.as_str()
+            "rub3: auto-detect stopped watching for the {} transaction: {e}",
+            kind.subject()
         );
 
         let timed_out = matches!(e, RpcError::WatchEnded(WatchEnd::Timeout));
@@ -1247,10 +1261,7 @@ fn cooldown_wait(blocks_remaining: u64) -> std::time::Duration {
 /// invisible to anyone reading this function.
 #[cfg(feature = "onchain-write")]
 fn auto_watch_detail(kind: AutoWatchKind, timed_out: bool, cooling: bool) -> String {
-    let subject = match kind {
-        AutoWatchKind::Mint => "purchase",
-        AutoWatchKind::Activate => "activation",
-    };
+    let subject = kind.subject();
     match (timed_out, cooling) {
         (true, false) => format!(
             "We watched the chain for {} and did not see your {subject} transaction. \
