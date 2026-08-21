@@ -536,13 +536,13 @@ cast call <CANONICAL_FACTORY> "isDeployed(address)(bool)" <LICENCE> --rpc-url $R
 
 **Where `<CANONICAL_FACTORY>` comes from is [`contracts/deployments.json`](deployments.json)**, keyed by chain id - the one committed place that answers "which factory is canonical here", so the check above has a referent a verifier can reach without trusting whoever handed them an address. Every entry in it is `null` today, because nothing is deployed to a public network yet, and until one is populated "deployed through the factory" still has no verifiable referent outside a deployment you performed yourself. A `null` entry means there is no canonical factory on that chain; it never means "use any factory you were given".
 
-### Why the factory deploys through two helper contracts
+### Why the factory deploys through a helper contract
 
 `Rub3Factory` cannot `new` the licence contract itself: a contract's runtime code has to carry the creation code of everything it deploys, and `Rub3Access`'s alone is over 16 KB against a 24,576-byte runtime limit, which would leave the factory almost nothing for itself. A `new` reached only from a *constructor* lands in the creation code, which is discarded after deployment, so the factory builds one `Rub3AccessDeployer` in its own constructor and keeps its address as an immutable. Consequences worth knowing:
 
 - **The factory's own fingerprint does not pin the licence implementation.** Its runtime code does not contain it. An auditor confirms which implementation a factory deploys by fetching the code at `accessDeployer()` and comparing it against the manifest, then comparing a deployed licence against `Rub3Access`.
-- **The deployers are callable by anyone, and that is not a hole.** Calling one directly yields a licence contract the factory never recorded, which is exactly what deploying the template directly already gets you. Trust comes from `isDeployed`, never from who created the contract.
-- **The factory's initcode is bounded by EIP-3860 (49,152 bytes) and is not far off it.** `test_factory_initcodeFitsUnderEip3860` guards it, so growing the licence contracts fails a test rather than producing an undeployable factory.
+- **The deployer is callable by anyone, and that is not a hole.** Calling it directly yields a licence contract the factory never recorded, which is exactly what deploying the template directly already gets you. Trust comes from `isDeployed`, never from who created the contract.
+- **The factory's initcode is bounded by EIP-3860 (49,152 bytes) and is not far off it.** `test_factory_initcodeFitsUnderEip3860` guards it, so growing the licence contract fails a test rather than producing an undeployable factory.
 
 ## Managing the wrapper hash set after deployment
 

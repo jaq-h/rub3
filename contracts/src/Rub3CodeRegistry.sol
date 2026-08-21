@@ -45,8 +45,8 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 ///
 /// **{Status.Deprecated} means "not recommended for new purchases". It never
 /// means "stop honouring".** An agent that meets a deprecated hash warns and
-/// proceeds; a held token is untouched, its validation is untouched, and its
-/// renewal terms are untouched. A deprecation that could strand a paid licence
+/// proceeds; a held token is untouched and its validation is untouched. A
+/// deprecation that could strand a paid licence
 /// would be a revocation surface by the back door, which this project rules out
 /// for the whole of its contract surface (architecture.md -> "Ownership
 /// invariants"). It is unreachable here because nothing reads this contract on
@@ -427,9 +427,9 @@ contract Rub3CodeRegistry is Ownable2Step {
     ///         **This does not invalidate anything.** The record stays, the
     ///         offsets stay, and an agent that meets this code still recognises
     ///         it as genuine rub3 code - it is told to prefer a newer release,
-    ///         not to refuse this one. Tokens already held, their validation and
-    ///         their renewal terms are all untouched, because nothing on any
-    ///         path that serves a held licence reads this contract at all.
+    ///         not to refuse this one. Tokens already held and their validation
+    ///         are both untouched, because nothing on any path that serves a
+    ///         held licence reads this contract at all.
     ///
     ///         One-way: there is no undo, and a hash cannot be deprecated twice.
     ///
