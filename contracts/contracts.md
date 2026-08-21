@@ -542,7 +542,7 @@ cast call <CANONICAL_FACTORY> "isDeployed(address)(bool)" <LICENCE> --rpc-url $R
 
 - **The factory's own fingerprint does not pin the licence implementation.** Its runtime code does not contain it. An auditor confirms which implementation a factory deploys by fetching the code at `accessDeployer()` and comparing it against the manifest, then comparing a deployed licence against `Rub3Access`.
 - **The deployer is callable by anyone, and that is not a hole.** Calling it directly yields a licence contract the factory never recorded, which is exactly what deploying the template directly already gets you. Trust comes from `isDeployed`, never from who created the contract.
-- **The factory's initcode is bounded by EIP-3860 (49,152 bytes) and is not far off it.** `test_factory_initcodeFitsUnderEip3860` guards it, so growing the licence contract fails a test rather than producing an undeployable factory.
+- **The factory's initcode is bounded by EIP-3860 (49,152 bytes), because it carries the deployer's creation code - and so the licence's - inside it.** It is around 22 KB today, so there is headroom, and `test_factory_initcodeFitsUnderEip3860` guards the bound: growing the licence contract fails a test rather than producing an undeployable factory.
 
 ## Managing the wrapper hash set after deployment
 
