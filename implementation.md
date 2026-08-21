@@ -1142,7 +1142,7 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 - `tauri-plugin-rub3`: auto-heartbeat, session renewal in the app's own webview, `invoke('plugin:rub3|session')` JS API, `rub3://session-renewed` event.
 - `create-rub3-app` starter template preconfigured against Base Sepolia.
 
-### 5.4 - Polish `[not started]` *(was old Phase 4, minus deferred items)*
+### 5.4 - Polish `[partial]` *(was old Phase 4, minus deferred items)*
 - Background session renewal with OS notification before expiry
 - Windows support: MSVC target and WebView2 testing. The SDK channel's named-pipe half is written, and half of it is verified (§3.5): the SDK crate's client type-checks for `x86_64-pc-windows-msvc`, the wrapper's server has never been compiled anywhere in this project, and neither half has been executed - a Windows host or runner is what both are waiting for
 - Subscription renewal UI (view expiry, renew from tray/menu)

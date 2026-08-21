@@ -709,7 +709,6 @@
     // the way out of the page, and refuses to write here as well, so no third
     // way of leaving can leave it running against someone else's screen.
     if (currentScreen !== 'cooldown' || !cooldownEndsAt) {
-      stopCooldownTicker();
       return;
     }
 
