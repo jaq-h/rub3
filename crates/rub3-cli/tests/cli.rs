@@ -257,10 +257,19 @@ fn a_chain_id_the_manifest_does_not_answer_for_still_needs_a_factory() {
     let mut args = pack_args();
     let chain = args.iter().position(|a| *a == "base").unwrap();
     args[chain] = "31337";
+    // 31337 has no default endpoint either, and the RPC default resolves
+    // before the manifest lookup, so supply one: without it this fails on the
+    // RPC error and proves nothing about the manifest.
+    args.push("--rpc-url");
+    args.push("http://127.0.0.1:8545");
     let output = rub3(repo.path(), &args);
 
     assert_ne!(output.status.code(), Some(0), "{}", stdout(&output));
-    assert!(stderr(&output).contains("31337"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("has no record for chain 31337"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

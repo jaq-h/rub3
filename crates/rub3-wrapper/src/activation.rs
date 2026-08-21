@@ -331,8 +331,9 @@ pub const EXIT_PRICE_ABOVE_POLICY: i32 = 22;
 ///
 /// - `contract=0x... canonical=<name> sells_licences=false` - the code *is*
 ///   canonical rub3 code, but at an address that sells no licences (the
-///   factory, one of its deployer helpers, or the code registry). The build is
-///   pointed at the wrong address; check what it was packed with.
+///   factory, one of its deployer helpers, the code registry, or the
+///   discovery registry). The build is pointed at the wrong address; check
+///   what it was packed with.
 /// - `contract=0x... code_bytes=N registry=<who> exposed=<a>|<b>` - no
 ///   authority this build could reach vouched for the code. That is a modified
 ///   copy, or a release newer than every authority it asked. `registry` says
@@ -389,8 +390,9 @@ child is the child's status and not an activation failure.
       carries:
         `contract=0x... canonical=NAME sells_licences=false` - the code
           IS canonical rub3 code, at an address that sells no licences
-          (the factory, a deployer helper, or the code registry).
-          Wrong address: check what this build is pointed at
+          (the factory, a deployer helper, the code registry, or the
+          discovery registry). Wrong address: check what this build is
+          pointed at
         `contract=0x... code_bytes=N registry=WHO exposed=A|B` - no
           authority this build could reach vouched for the code: a
           modified copy, or a template release newer than every

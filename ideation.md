@@ -61,7 +61,7 @@ Humans complete the same loop through the wrapper's native activation window. Th
 
 ## Business Model
 
-The intent: open-source the rails; own the factory, registry, and marketplace; take 2–3% of a payment flow that only the wrapper can meter, priced low enough that no agent bothers to route around it. Only the factory and its on-chain fee split exist today; the registry, marketplace and metered billing below are not built, and the contracts are not deployed to mainnet or declared ready for use until the registry is ready.
+The intent: open-source the rails; own the factory, registry, and marketplace; take 2–3% of a payment flow that only the wrapper can meter, priced low enough that no agent bothers to route around it. The factory, its on-chain fee split and the registry exist today; the marketplace and metered billing below are not built, and the contracts are deployed nowhere: they do not reach mainnet or get declared ready for use until the factory and the registry launch together.
 
 - **Protocol fee** - 2–3% on `purchase()` and `renew()`, split on-chain by factory-deployed contracts. Immutable per contract: a developer's fee can never be raised after deploy. rub3 changes fees by shipping a new factory version, affecting only future deploys.
 - **Metered billing** - the wrapper gates every launch, which makes it the only viable choke point for charging per-use on locally executed software. x402 meters API calls because the server is a choke point; nothing has ever been able to meter local execution. `Rub3Metered` turns the wrapper into a payment terminal: per-launch or per-session micropayments in USDC - same take rate, much higher-frequency flow.

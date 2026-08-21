@@ -538,7 +538,7 @@ activation failure.
 | 20 | `--token-id` names a token this signer does not hold | Fix the id, or drop the flag to purchase |
 | 21 | Purchase broadcast but not confirmed - timed out, or the receipt query kept failing | Do not retry blindly - resolve the `tx_hash` on the detail line, then re-run once it has mined or been dropped |
 | 22 | The listed price is above the configured spend ceiling for the rail it was listed on. On the stablecoin rail the ceiling is weighed before anything is signed, so the rail was not exercised and this is no evidence it is otherwise usable; on the ETH rail it is weighed before the transaction is sent, so no gas was spent | Terminal - raise the variable the message names (`RUB3_AGENT_MAX_TOKEN_AMOUNT` or `RUB3_AGENT_MAX_ETH_WEI`) if the price is acceptable, or do not buy |
-| 23 | This build will not buy a licence from the contract at that address, either because the code is canonical rub3 code at an address that sells none (the factory, a deployer helper, or the code registry) or because no authority it could reach vouches for it. Checked before anything is signed, so no transaction was sent and nothing was spent | Terminal - the same address holds the same code. The detail line below says which case it is: verify the address, or use a build packed with the release that contract came from |
+| 23 | This build will not buy a licence from the contract at that address, either because the code is canonical rub3 code at an address that sells none (the factory, a deployer helper, the code registry, or the discovery registry) or because no authority it could reach vouches for it. Checked before anything is signed, so no transaction was sent and nothing was spent | Terminal - the same address holds the same code. The detail line below says which case it is: verify the address, or use a build packed with the release that contract came from |
 
 Failures with structured parameters also print one parseable line, carrying only
 parameters the wrapper actually measured:
@@ -553,7 +553,7 @@ because the two causes call for different responses:
 
 | Detail line | What happened | What to do |
 |---|---|---|
-| `contract=0x... canonical=NAME sells_licences=false` | The code **is** canonical rub3 code, at an address that sells no licences - the factory, one of its deployer helpers, or the code registry | Wrong address. Check what the build is pointed at |
+| `contract=0x... canonical=NAME sells_licences=false` | The code **is** canonical rub3 code, at an address that sells no licences - the factory, one of its deployer helpers, the code registry, or the discovery registry | Wrong address. Check what the build is pointed at |
 | `contract=0x... code_bytes=N registry=WHO exposed=A\|B` | No authority vouched for the code: a modified copy, or a release newer than every authority this build could reach | Verify the address, or use a build packed with that release |
 
 `registry` says what the second authority contributed, and is three-valued
@@ -688,14 +688,14 @@ the authority on what each covers, what it cost, and what comes next.
 - **Deploy scripts** - `forge script` deploys either licence contract to any EVM chain from env vars, directly or through a factory; `DeployFactory.s.sol` deploys the factory itself
 - **`rub3 pack` and `rub3 deploy` (§2.5)** - one command builds the wrapper, the application and the configuration into a single distributable, with the canonical factory read out of `contracts/deployments.json` and compiled in beside the contract and chain id; another deploys the licence contract through that factory by driving the existing forge script. A `null` manifest entry is a hard error at both, so both refuse for every chain until launch. `fetch` and `register` are deliberately unbuilt: the sections they belong to (§3.1, §3.2) do not exist yet
 
-**Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), the CLI's `fetch` and `register` subcommands, content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, metered billing, marketplace. Human-surface polish (WalletConnect tabs, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
+**Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), the CLI's `fetch` and `register` subcommands, content-addressed distribution, concurrent-seat licensing, metered billing, marketplace. Human-surface polish (WalletConnect tabs, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
 
 ## Direction
 
 The plan is agent-first (July 2026 revision - see [implementation.md](implementation.md)):
 
 - **Let machines buy, verify, and resell software without asking anyone's permission.** The adoption unit is one closed loop an agent completes end to end: discover → pay → fetch → verify → run → resell.
-- **Open-source the rails; own the factory, registry, and marketplace.** Revenue is intended to be a 2–3% fee on a payment flow only the wrapper can meter, priced low enough that routing around it is not worth the trouble. Only the factory and its on-chain fee split are built; the registry and marketplace are not, and the contracts are not deployed to mainnet or declared ready for use until the registry is ready. No token.
+- **Open-source the rails; own the factory, registry, and marketplace.** Revenue is intended to be a 2–3% fee on a payment flow only the wrapper can meter, priced low enough that routing around it is not worth the trouble. The factory, its on-chain fee split and the registry are built; the marketplace is not, and the contracts are deployed nowhere: nothing reaches mainnet or is declared ready for use until the factory and the registry launch together. No token.
 - **The token is the invariant; everything else is versioned.** Evolution only ever changes what is offered going forward (price, successor contracts, registry listings), never what was granted (held tokens, their validation, their renewal terms). No proxies, no revocation surface - structurally, not by promise.
 
 First target market: wallet-gated MCP servers - paid MCP servers have no licensing primitive today, and agents are their natural customers.

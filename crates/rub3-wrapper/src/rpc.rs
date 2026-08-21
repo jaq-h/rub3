@@ -1361,7 +1361,8 @@ pub struct CodeRange {
 pub struct CodeRegistryRecord {
     /// `0` unknown, `1` active, `2` deprecated.
     pub status: u8,
-    /// `0` licence, `1` factory, `2` deployer helper, `3` code registry.
+    /// `0` licence, `1` factory, `2` deployer helper, `3` code registry,
+    /// `4` discovery registry.
     pub role: u8,
     /// Solidity contract name.
     pub contract_name: String,
