@@ -76,11 +76,12 @@ rub3/
 │       │   ├── agent_env.rs          # Names of the `RUB3_AGENT_*` credential vars: read by `signer`, stripped by `supervisor`
 │       │   ├── signer.rs             # `Signer` trait + `LocalSigner` - the only holder of raw key material (feature `headless`)
 │       │   ├── tx.rs                 # EIP-1559 build / sign / broadcast for headless (feature `headless`)
-│       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner, chainId, getCode) via alloy
+│       │   ├── rpc.rs                # On-chain queries (ownerOf, price, tokensOfOwner, chainId, getCode) via alloy, plus the §5.1a watch loops (`watch_for_mint`, `watch_for_activate`)
 │       │   ├── attest.rs             # Pre-purchase contract attestation: masked code hash vs the pinned canonical table, then vs Rub3CodeRegistry on a miss (feature `onchain-read`, tier 2+)
 │       │   ├── webview.rs            # Native activation window (wry/tao), IPC message handling (feature `webview`)
-│       │   ├── webview/session_flow.rs # Test-only: the §1.8 activation flows driven at the IPC seam, three of them anvil-gated (`#[cfg(test)]`, never shipped)
-│       │   ├── webview/session_flow/onchain.rs # Test-only: the anvil harness behind those three (spawn/deploy/mine helpers, port 8551)
+│       │   ├── webview/session_flow.rs # Test-only: the §1.8 activation flows driven at the IPC seam, five of them anvil-gated (`#[cfg(test)]`, never shipped)
+│       │   ├── webview/session_flow/onchain.rs # Test-only: the anvil harness behind those five (spawn/deploy/mine helpers, port 8551)
+│       │   ├── webview/session_flow/auto_detect.rs # Test-only: the §5.1a auto-detect front door at the same seam, driven against a stub node
 │       │   ├── supervisor.rs         # Child process lifecycle, SIGTERM forwarding, `RUB3_AGENT_*` stripped from the child, SDK channel lifetime
 │       │   ├── sdk.rs                # Wrapper half of the SDK channel: local socket / named pipe serving heartbeat + session (feature `sdk`)
 │       │   ├── session.rs            # Session schema, message hash, verify_local, is_expired
@@ -90,7 +91,7 @@ rub3/
 │       │   ├── bin/rub3-sdk-probe.rs # Worked SDK integration and the e2e suite's child application (feature `sdk`)
 │       │   └── test_support.rs       # Test-only scaffolding shared by more than one module (`#[cfg(test)]`, never shipped)
 │       ├── assets/
-│       │   └── activation.html       # Activation UI (address input, token select, signature)
+│       │   └── activation.html       # Activation UI (address input, token select, signature, and the §5.1a Auto-detect / Manual confirmation tabs)
 │       └── tests/
 │           ├── helpers/mod.rs        # Shared test utilities (wallet gen, signing, license creation)
 │           ├── integration.rs        # Wrapper binary tests (exit codes, args, missing binary)
@@ -671,7 +672,7 @@ the authority on what each covers, what it cost, and what comes next.
 
 - **Wrapper runtime** - process supervision, SIGTERM forwarding, `RUB3_AGENT_*` stripped from the child's environment
 - **Sessions** - schema, local sign and verify, TTL, per-token persistence, and tier-3 on-chain re-verification on a sampled fraction of cold starts
-- **Interactive front door** - native activation window: address input, token enumeration and selection, purchase and cooldown screens, signature paste
+- **Interactive front door** - native activation window: address input, token enumeration and selection, purchase and cooldown screens, signature paste. Those two screens confirm a transaction through an Auto-detect tab that watches the chain for it (§5.1a) or a Manual tab that takes a pasted tx hash; Manual is always reachable
 - **Headless front door (§2.1)** - `--headless` runs enumerate → purchase → activate → sign → verify → persist → launch in one call, with stable exit codes and a `Signer` trait for KMS- or enclave-backed keys
 - **On-chain reads** - `ownerOf`, price on both rails, supply, enumeration, cooldown, session id, receipt polling, via alloy
 - **Identity models** - `access` and `account`, with local ERC-6551 TBA derivation signed into the session preimage
@@ -687,7 +688,7 @@ the authority on what each covers, what it cost, and what comes next.
 - **Deploy scripts** - `forge script` deploys either licence contract to any EVM chain from env vars, directly or through a factory; `DeployFactory.s.sol` deploys the factory itself
 - **`rub3 pack` and `rub3 deploy` (§2.5)** - one command builds the wrapper, the application and the configuration into a single distributable, with the canonical factory read out of `contracts/deployments.json` and compiled in beside the contract and chain id; another deploys the licence contract through that factory by driving the existing forge script. A `null` manifest entry is a hard error at both, so both refuse for every chain until launch. `fetch` and `register` are deliberately unbuilt: the sections they belong to (§3.1, §3.2) do not exist yet
 
-**Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), the CLI's `fetch` and `register` subcommands, content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, metered billing, marketplace. Human-surface polish (WalletConnect tabs, auto-detect, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
+**Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), the CLI's `fetch` and `register` subcommands, content-addressed distribution, registry with ERC-8004-style agent cards, concurrent-seat licensing, metered billing, marketplace. Human-surface polish (WalletConnect tabs, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
 
 ## Direction
 

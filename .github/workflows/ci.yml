@@ -564,7 +564,8 @@ jobs:
             --test headless_e2e -- --ignored --nocapture 2>&1 | tee "$log"
           scripts/assert-e2e-ran.sh "$log" "$EXPECTED_TESTS"
 
-      # The human front door's flows (implementation.md §1.8). These are lib
+      # The human front door's flows (implementation.md §1.8), plus the §5.1a
+      # auto-detect arms that ride on the same seam. These are lib
       # tests rather than an integration suite because the seam they drive -
       # the activation window's IPC handler - is private to `src/webview.rs`,
       # so `--lib` plus a module-path filter is what selects them. The filter is
@@ -579,7 +580,7 @@ jobs:
         if: always()
         env:
           # Update when a test is added to or removed from this suite.
-          EXPECTED_TESTS: 3
+          EXPECTED_TESTS: 5
         run: |
           set -o pipefail
           log="${RUNNER_TEMP:-/tmp}/webview_session_flow.log"

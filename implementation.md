@@ -142,7 +142,7 @@ surfaces it to the user, and polls the receipt they paste back.
 
 **Deferred**
 - Refactor `activation.html` to Preact (vendored `preact.mjs` + `htm.mjs`, custom-protocol handler via `include_dir` - no Node/build step). Tracked as §5.2.
-- Replace the "paste your tx hash" box with auto-detect + WalletConnect tabs while keeping manual paste as the fallback floor. Tracked as §5.1.
+- Replace the "paste your tx hash" box with auto-detect + WalletConnect tabs while keeping manual paste as the fallback floor. Tracked as §5.1, which carries the per-mode status: auto-detect shipped there, WalletConnect is still outstanding.
 
 **Verification**
 - `cargo test -p rub3-wrapper --lib` (default tier-2): 57 pass (up from 51)
@@ -188,7 +188,7 @@ function cooldownReady(uint256 tokenId)
 - ActivateTxSent handler: spawns a background polling thread (10 × 3s; 30s total timeout) calling `get_tx_receipt`; on confirmation asserts `receipt.to == contract` and `status == true`, reads `activeSessionId`, mints a `new_nonce()`, computes `expires_at` from `SESSION_TTL_SECS`, builds the session message, and emits `onTxConfirmed`
 - SessionSigned handler: assembles `Session` (tier-3 fields populated from echoed state), calls `verify_local`, sends `ActivationResult::SessionSuccess`
 - `activation.rs::ensure` - tries three paths in order: (1) tier-3 session fast path (`load_latest_session` → `verify_local`), (2) legacy proof fast path, (3) webview. Takes a new `session_ttl_secs` param threaded through from `main.rs` (`SESSION_TTL_SECS = 7 days`). On `SessionSuccess` persists via `session_store::save_session`.
-- `assets/activation.html` new screens: `cooldown` (shows calldata + tx-hash input with per-block-remaining banner when cooldown is active), `sign-session` (shows tx hash / block / session id / session message, captures signature). JS tracks `pendingSessionCtx` across the cooldown → tx-confirm → sign-session flow and echoes it back in `session_signed`. The tx-hash input is the "manual paste" path today; the richer auto-detect and WalletConnect tabs layered on top are tracked as §5.1.
+- `assets/activation.html` new screens: `cooldown` (shows calldata + tx-hash input with per-block-remaining banner when cooldown is active), `sign-session` (shows tx hash / block / session id / session message, captures signature). JS tracks `pendingSessionCtx` across the cooldown → tx-confirm → sign-session flow and echoes it back in `session_signed`. The tx-hash input is the "manual paste" path, and it remains the floor; the richer tabs layered on top are tracked as §5.1.
 
 **Phase C - verification hardening `[complete]`**
 - `session::verify_onchain(session, rpc_url)` (gated on `cooldown`) - fetches the activation tx receipt and confirms `status == true`, `receipt.to` matches `session.contract`, `receipt.block_hash` matches `session.activation_block_hash`. Each failure mode has a dedicated `VerifyError` variant (`MissingTxHash`, `MissingBlockHash`, `Rpc`, `ReceiptNotFound`, `TxReverted`, `ContractMismatch`, `BlockHashMismatch`)
@@ -1061,28 +1061,28 @@ Goal: the payment flows only rub3 can host.
 
 The interactive path stays fully supported - manual tx-hash paste is the floor today and remains reachable forever. Polish lands after the agent path.
 
-### 5.1 - Frictionless tx confirmation `[not started]`
+### 5.1 - Frictionless tx confirmation `[partial]`
 
-Demoted from Phase 1, where it was specified as §1.10 before the agent-first revision; the spec below applies unchanged when picked up. The manual-paste floor already works and stays reachable forever, so richer confirmation modes are human-surface polish rather than a gap.
+Demoted from Phase 1, where it was specified as §1.10 before the agent-first revision; the spec below is the one that was picked up, with the four places auto-detect had to depart from it recorded under §5.1a "As built". The manual-paste floor already works and stays reachable forever, so richer confirmation modes are human-surface polish rather than a gap.
 
-The purchase (§1.7) and activate (§1.8) flows currently ask the user to paste a transaction hash back into the webview after sending from their wallet. That manual-paste path is our robust fallback - it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
+The purchase (§1.7) and activate (§1.8) flows originally asked the user to paste a transaction hash back into the webview after sending from their wallet, and still do whenever the Manual tab is the one in use. That manual-paste path is our robust fallback - it works with any wallet / any tool / any chain, requires no JS dependencies, and has no external points of failure. But it is not the UX we want people to see first. This section layers two richer confirmation modes on top, while leaving manual paste as the always-available floor.
 
 **Three modes, in order of preference:**
 
-| Mode | Project ID | JS bundle | Offline tolerant | Relies on |
-|---|---|---|---|---|
-| `wallet-connect` | required (dev-supplied) | ~255 KB vendored | no | Reown relay + chain RPC |
-| `auto-detect` | none | none | no | chain RPC only |
-| `manual` (§1.7, §1.8) | none | none | yes (paste later) | user copy/paste |
+| Mode | Status | Project ID | JS bundle | Offline tolerant | Relies on |
+|---|---|---|---|---|---|
+| `wallet-connect` | `[not started]` (§5.1b) | required (dev-supplied) | ~255 KB vendored | no | Reown relay + chain RPC |
+| `auto-detect` | `[complete]` (§5.1a) | none | none | no | chain RPC only |
+| `manual` (§1.7, §1.8) | `[complete]` | none | none | yes (paste later) | user copy/paste |
 
-The three modes surface as three tabs on the cooldown / purchase screens. The default tab at render time is the highest-capability one available for the current build:
-- WalletConnect tab visible when the `wallet-connect` feature is compiled in **and** the developer supplied a non-placeholder `wc_project_id`
-- Auto-detect tab visible when `onchain-write` is on (always true for tier 3+, which is the only tier that reaches these screens)
-- Manual tab always visible
+The three modes surface as three tabs on the cooldown / purchase screens. Two of the three are built, so a tier-3 build shows a two-tab strip today. The default tab at render time is the highest-capability one available for the current build:
+- WalletConnect tab visible when the `wallet-connect` feature is compiled in **and** the developer supplied a non-placeholder `wc_project_id`. Neither exists yet: no tab, no vendored bundle, no project id anywhere in the tree.
+- Auto-detect tab visible when `onchain-write` is on (always true for tier 3+, which is the only tier that reaches these screens). The screen payload carries `autoWatchSecs` only where a watch can run, and the page reads its presence as the tab's availability test - the same mechanism the WalletConnect tab will use for `wcProjectId`.
+- Manual tab always visible. The strip itself is hidden when only one mode is available, because a strip offering no choice is decoration; the manual panel is shown either way.
 
 Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate_tx_sent`) - the downstream poller/finalize path from §1.7 and §1.8 Phase B is untouched. This keeps auto-detect and WalletConnect as pure front-door improvements rather than new branches in the session pipeline.
 
-#### 5.1a - RPC auto-detect `[not started]`
+#### 5.1a - RPC auto-detect `[complete]`
 
 **Rationale.** Many embedded-app developers will never configure WalletConnect - they may not want the relay dependency, may not want to register with Reown, or may be shipping internal / CLI-adjacent tools. Auto-detect gives those deployments a one-click confirm path without adding any JS or external service.
 
@@ -1103,6 +1103,15 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 - Tabs in `#screen-purchase` and `#screen-cooldown`: `[WalletConnect] [Auto-detect] [Manual]`. The auto-detect body is a spinner + "Waiting for your wallet to broadcast the tx…" copy and a "Switch to manual" link.
 
 **Gating.** `onchain-write` (already required by §1.7 / §1.8). No new Cargo feature. Pure additive - tier 3+ builds pick it up automatically.
+
+**As built.** Four details differ from the sketch above, each because building it exposed something the sketch could not have known:
+
+- `deadline` is an `rpc::Deadline`, which carries the budget *and* an `rpc::Cancel` flag. Cancellation and expiry are the same question asked of a person and of a clock, and a watch consulting only one of them would either outlive its screen or ignore its budget. Bundling them means no call site can pass a budget and forget the flag. `Cancel` is checked in 50 ms slices between polls, so a cancelled watch stops well inside the 3 s cadence rather than leaving a request in flight.
+- The two ways a watch ends without a match are `RpcError::WatchEnded(WatchEnd::Timeout | WatchEnd::Cancelled)`. Nothing failed in either case, which is why the screen falls back rather than reporting an error, and why they are distinguishable from an endpoint that stopped answering. Beyond the budget, five consecutive retryable failures also end a watch: fifteen seconds of silence is an endpoint that will not answer, and spending the remaining budget on it only delays the paste that would have worked. The two reads a watch has to make before it can start - the head block it counts from, and the cooldown it may have to wait out - go through the same policy (`rpc::retry_read`) rather than failing on their first bad answer, because one 429 on the first request of the flow would otherwise end auto-detect a second after the screen rendered while the identical 429 one poll later is absorbed in silence.
+- **`watch_for_activate` does not use the `eth_getBlockByNumber` + receipt scan specified above. That mechanism was abandoned during the build because it cannot run on Base at all.** Reading a transaction's `to` without fetching a receipt for it means asking for the block with its transactions inlined, and a Base block carries the OP-stack deposit transaction, whose `0x7e` type the wrapper's Ethereum transaction types refuse to decode; there is no `op-alloy` dependency in the workspace, so the block does not deserialize and the scan never reaches a `to` to compare. Falling back to one `eth_getTransactionReceipt` per transaction is hundreds of sequential requests per poll on a Base block, with one failure among them restarting the whole scan against an endpoint that is likely already rate limiting. What is used instead is the `Activated(uint256 indexed tokenId, ...)` log the contract already emits, fetched with one `eth_getLogs` pinned to the single block `lastActivationBlock` named - one request on any chain, and the same shape `watch_for_mint` uses. Of the two receipt fields the sketch matches on: `from == wallet` has no counterpart in the signature §5.1a gives this function, which carries no wallet, and the indexed token id it does carry is the sharper discriminator, naming the token this screen waits on rather than the account that paid the gas; `to == contract` is not dropped but moved into the filter, which pins `address == contract`, so a match is an event this contract emitted, a stronger statement than a transaction merely addressed to it. A reverted activation emits no log, so the revert check comes for free.
+- An activation watch **holds until the cooldown ends** before it spends a second of its budget (`rpc::Deadline::starting_in`). The sketch has the budget start when the screen renders, which works only where the cooldown is shorter than the budget; the default is 1800 blocks, roughly an hour on Base, so an armed-immediately watch would poll for two minutes and hand back to the manual tab fifty-eight minutes before the contract would accept an `activate()` at all - auto-detect could never succeed on that screen. Holding loses nothing, because a watch reads state rather than events and still sees a transaction broadcast during the hold on its first poll, and cancellation is honoured throughout it. The wait is estimated once, in `webview::cooldown_wait`, and the same estimate drives the screen's own sentence and the bar that drains beside it.
+
+**Where it is tested.** `rpc::watch_loop_tests` drives the loop with the network taken out (budget, cancellation, the retry threshold); `rpc::watch_rpc_tests` drives both watchers against a mocked node (the filter that goes out, the decoding that comes back); `webview::session_flow::auto_detect` proves at the IPC seam that a found hash and a pasted hash produce call-for-call the same flow, and that a watch stops when its screen does; and two `#[ignore]`d arms in `webview::session_flow::onchain` run both watchers against a live anvil.
 
 #### 5.1b - WalletConnect v2 `[not started]`
 
@@ -1138,6 +1147,7 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 - Windows support: MSVC target and WebView2 testing. The SDK channel's named-pipe half is written, and half of it is verified (§3.5): the SDK crate's client type-checks for `x86_64-pc-windows-msvc`, the wrapper's server has never been compiled anywhere in this project, and neither half has been executed - a Windows host or runner is what both are waiting for
 - Subscription renewal UI (view expiry, renew from tray/menu)
 - Multi-wallet delegation (hardware wallet owns, hot wallet signs sessions - EIP-7702 or delegation registry; exploratory)
+- Cooldown screen dwell: the cooldown screen never announces that the wait has ended. Deferred from §5.1a and tracked separately as `rub3-cooldown-screen-dwell`
 
 ---
 

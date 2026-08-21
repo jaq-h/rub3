@@ -344,18 +344,18 @@ Session files are keyed on both app_id and token_id: `~/.rub3/sessions/<app_id>/
 
 Tiers 3-4 require at least one on-chain tx (purchase and/or activate) during the activation flow. In **interactive mode** the wrapper never holds keys and never broadcasts txs itself - it encodes calldata, surfaces it to the user, and waits for the tx to confirm. In **headless mode** (built, implementation.md §2.1) the operator supplies a signer explicitly - env key, keystore, or KMS-backed `Signer` impl - and the wrapper signs and broadcasts directly; there is no confirmation UI because there is no user round-trip.
 
-For interactive builds, how the "wait" happens is an orthogonal concern. **Today there is exactly one implementation: Manual.** Both the purchase and the cooldown screens ask the user to copy a tx hash back into the wrapper, and nothing else is offered.
+For interactive builds, how the "wait" happens is an orthogonal concern. **Two implementations ship today: Manual and Auto-detect.** Both the purchase and the cooldown screens offer them as tabs, with Manual always present.
 
 | Mode | Status | Reliance | Tolerant of offline activation | JS bundle |
 |---|---|---|---|---|
-| **Manual** | **the only interactive path today** | User copies a tx hash back into the wrapper | yes (paste later) | none |
-| **Auto-detect** | planned, implementation.md §5.1a | Chain RPC (filter `eth_getLogs` / read `lastActivationBlock`) | no | none |
+| **Manual** | built, implementation.md §1.7 / §1.8 | User copies a tx hash back into the wrapper | yes (paste later) | none |
+| **Auto-detect** | built, implementation.md §5.1a | Chain RPC (filter `eth_getLogs` / read `lastActivationBlock`) | no | none |
 | **WalletConnect** | planned, implementation.md §5.1b | Reown relay + chain RPC | no | ~255 KB vendored |
 | **Headless** | built, implementation.md §2.1 | operator-supplied signer + chain RPC | n/a - no user round-trip | none |
 
 Manual is the floor and stays available whatever else lands: no dependencies, and the one path that still works when the user's machine is offline as they open the wrapper but they want to send the tx from a hardware wallet elsewhere and paste the hash later.
 
-The design commitment behind the two planned modes is that they are **additive tabs on the same screens, not replacements**. Whichever tab produces a tx hash hands off to the same receipt poller, which validates `status == true`, asserts `receipt.to == contract`, and recovers the minted tokenId (purchase) or the `activeSessionId` (activate). The rest of the session pipeline does not care which tab the hash came from, so adding a mode cannot change what a confirmed activation means. Availability would be decided at build and deploy time: Auto-detect requires `onchain-write` (always present in tiers 3-4); WalletConnect requires the `wallet-connect` Cargo feature and a non-placeholder `wc_project_id` in the packed wrapper, since the Reown project id is developer-supplied per deployment rather than a shared rub3 credential. Both are demoted to Phase 5 (implementation.md §5.1).
+The design commitment behind the richer modes is that they are **additive tabs on the same screens, not replacements**. Whichever tab produces a tx hash hands off to the same receipt poller, which validates `status == true`, asserts `receipt.to == contract`, and recovers the minted tokenId (purchase) or the `activeSessionId` (activate). The rest of the session pipeline does not care which tab the hash came from, so adding a mode cannot change what a confirmed activation means. Availability is decided at build and deploy time: Auto-detect requires `onchain-write` (always present in tiers 3-4); WalletConnect requires the `wallet-connect` Cargo feature and a non-placeholder `wc_project_id` in the packed wrapper, since the Reown project id is developer-supplied per deployment rather than a shared rub3 credential. WalletConnect remains a Phase 5 item (implementation.md §5.1b).
 
 ---
 

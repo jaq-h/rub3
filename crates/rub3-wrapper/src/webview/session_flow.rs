@@ -33,13 +33,17 @@ use super::{ActivationResult, Cmd, IpcState};
 #[cfg(feature = "cooldown")]
 mod onchain;
 
+/// The §5.1a auto-detect front door, driven at the same seam.
+#[cfg(feature = "onchain-write")]
+mod auto_detect;
+
 /// How long to wait on a message produced by a background thread. Generous:
 /// this bounds a hang, it is not a latency assertion.
 const RECV_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One outbound call, split into the `window.rub3` method name and its single
 /// JSON argument.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Call {
     name: String,
     arg: serde_json::Value,
@@ -74,6 +78,8 @@ impl Window {
                 session_ttl_secs: ttl_secs,
                 cmd_tx,
                 result_tx,
+                #[cfg(feature = "onchain-write")]
+                auto_watch: super::AutoWatch::default(),
             },
             cmd_rx,
             result_rx,
@@ -139,6 +145,39 @@ impl Window {
                     }
                     if call.name == name {
                         return call.arg;
+                    }
+                }
+                Ok(Cmd::Close) => self.closed.set(true),
+                Err(e) => panic!("waiting for window.rub3.{name}: {e}"),
+            }
+        }
+    }
+
+    /// Every call from now until one named `name`, that one included.
+    ///
+    /// [`Self::wait_for`] answers "did it get there"; this answers "by what
+    /// route", which is the question when two front doors are supposed to
+    /// produce the same one.
+    #[cfg_attr(not(feature = "onchain-write"), allow(dead_code))]
+    fn calls_until(&self, name: &str) -> Vec<Call> {
+        let deadline = Instant::now() + RECV_TIMEOUT;
+        let mut calls = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !left.is_zero(),
+                "timed out waiting for window.rub3.{name}, got {calls:?}",
+            );
+            match self.cmd_rx.recv_timeout(left) {
+                Ok(Cmd::Eval(script)) => {
+                    let call = parse_call(&script);
+                    let last = call.name == name;
+                    if call.name == "onError" {
+                        panic!("waiting for {name}, but the flow errored: {}", call.arg);
+                    }
+                    calls.push(call);
+                    if last {
+                        return calls;
                     }
                 }
                 Ok(Cmd::Close) => self.closed.set(true),
