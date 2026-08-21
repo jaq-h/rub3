@@ -112,16 +112,12 @@ contract Rub3RegistryTest is Test {
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
     /// Session terms with the single-seat default: one concurrent session per
-    /// token, which is the tier-3 licence seats generalise (§3.4).
+    /// token, which is the tier-3 licence seats generalise (§3.4). The
+    /// multi-seat fixtures live in `Rub3Seats.t.sol`, which deploys its own.
     function _session() internal pure returns (Rub3License.SessionTerms memory) {
-        return _session(1);
-    }
-
-    /// Session terms granting `seats` concurrent sessions per token.
-    function _session(uint256 seats) internal pure returns (Rub3License.SessionTerms memory) {
         return Rub3License.SessionTerms({
             cooldownBlocks: COOLDOWN_BLOCKS,
-            seatsPerToken: seats,
+            seatsPerToken: 1,
             sessionTtlSeconds: SESSION_TTL
         });
     }

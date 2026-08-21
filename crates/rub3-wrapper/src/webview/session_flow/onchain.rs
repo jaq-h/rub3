@@ -194,8 +194,13 @@ fn start_anvil() -> AnvilGuard {
 /// sessionTtlSeconds)` - with the single seat these flows are about; the seat
 /// count itself is proven in `contracts/test/Rub3Seats.t.sol`.
 fn deploy_access() -> String {
+    deploy_access_with_seats(1)
+}
+
+/// The same fixture granting `seats` concurrent sessions per token.
+fn deploy_access_with_seats(seats: u64) -> String {
     let sale = format!("({PRICE_WEI},{ZERO_ADDR},0)");
-    let session = format!("({COOLDOWN_BLOCKS},1,{SEAT_TTL_SECS})");
+    let session = format!("({COOLDOWN_BLOCKS},{seats},{SEAT_TTL_SECS})");
     let output = Command::new("forge")
         .current_dir(contracts_dir())
         .args([
@@ -427,7 +432,12 @@ struct Holder {
 
 impl Holder {
     fn set_up() -> Self {
-        let contract = deploy_access();
+        Self::set_up_with_seats(1)
+    }
+
+    /// The same holder on a contract granting `seats` concurrent sessions.
+    fn set_up_with_seats(seats: u64) -> Self {
+        let contract = deploy_access_with_seats(seats);
         let wallet = Wallet::new();
         // Gas only - the fixture mints for free.
         fund(&wallet.address, "1ether");
@@ -965,6 +975,54 @@ fn auto_detect_finds_the_activation_and_the_session_completes_e2e() {
     assert_eq!(session.activation_tx.as_deref(), Some(tx_hash.as_str()));
     assert_eq!(session.token_id, holder.token_id);
     crate::session::verify_local(&session).expect("the issued session must verify");
+}
+
+/// **Above one seat the cooldown screen offers no Auto-detect tab at all.**
+/// The watch resolves an `activate()` from the chain alone - the block
+/// `lastActivationBlock` names, filtered to this contract and this token - and
+/// a fleet instance activating the same token in the same block puts a second
+/// log in that filter which nothing separates from the person's own, since
+/// every instance signs with the holder's key. The session would then be signed
+/// over another instance's `sessionId` and `seatIndex`: two live sessions on
+/// one seat, in silence. The screen asks for a pasted hash instead, which is
+/// unambiguously the user's.
+///
+/// The absence of `autoWatchSecs` is what the page reads to decide which tabs
+/// exist, so this is the mechanism and not a proxy for it.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn a_multi_seat_licence_offers_no_auto_detect_tab_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let holder = Holder::set_up_with_seats(4);
+    let window = holder.window(SESSION_TTL_SECS);
+
+    let cooldown = holder.connect(&window);
+    assert_eq!(cooldown["seats"], 4);
+    assert_eq!(cooldown["ready"], true);
+    assert!(
+        cooldown.get("autoWatchSecs").is_none(),
+        "a licence with a fleet must offer the Manual tab alone: {cooldown}",
+    );
+
+    // And the manual path is untouched: the screen's own calldata still opens a
+    // session for the person who broadcast it.
+    let calldata = cooldown["calldata"].as_str().expect("calldata is a string");
+    let tx_hash = wallet_sends(&holder.wallet, &holder.contract, calldata)
+        .expect("the chain should accept the screen's calldata");
+    let confirmed = holder.confirm(&window, &tx_hash);
+    assert_eq!(confirmed["txHash"], tx_hash);
+    holder.sign(&window, &confirmed);
+    match window.result() {
+        ActivationResult::SessionSuccess { session } => {
+            crate::session::verify_local(&session).expect("the issued session must verify");
+        }
+        other => panic!("expected SessionSuccess, got {}", describe(&other)),
+    }
 }
 
 /// Auto-detect finds the mint a `purchase()` produced, and the purchase poller

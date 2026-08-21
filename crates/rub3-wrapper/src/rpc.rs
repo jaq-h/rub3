@@ -778,6 +778,13 @@ pub fn session_seat(
 ///
 /// `None` when the seat is free - never taken, released, or lapsed - so a
 /// caller cannot mistake a stale record for an occupant.
+///
+/// **A lapsed seat is free, and only the chain's clock can say so.** `seatAt`
+/// returns the raw record, and a seat whose TTL ran out with nobody calling
+/// `release` still carries the session id and expiry it was written with; the
+/// contract's own `activate()` treats it as free from `expiresAt` onwards
+/// (§3.4). This compares against the head block's timestamp for that reason,
+/// rather than against the local clock, which the contract never consults.
 pub fn occupied_seat(
     rpc_url: &str,
     contract: Address,
@@ -786,13 +793,23 @@ pub fn occupied_seat(
 ) -> Result<Option<(u64, u64)>, RpcError> {
     block_on(async move {
         let provider = build_provider(rpc_url)?;
-        let instance = IRub3License::new(contract, provider);
+        let instance = IRub3License::new(contract, &provider);
         let r = instance
             .seatAt(U256::from(token_id), U256::from(index))
             .call()
             .await
             .map_err(|e| classify_call_error(&e))?;
         if r.expiresAt == 0 || r.sessionId.is_zero() {
+            return Ok(None);
+        }
+        let now = provider
+            .get_block(alloy::eips::BlockId::latest())
+            .await
+            .map_err(RpcError::transport)?
+            .ok_or_else(|| RpcError::transport("the node returned no latest block"))?
+            .header
+            .timestamp;
+        if r.expiresAt <= now {
             return Ok(None);
         }
         Ok(Some((saturating_u64(r.sessionId), r.expiresAt)))

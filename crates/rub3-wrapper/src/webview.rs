@@ -696,8 +696,23 @@ impl IpcState {
         // then spends it. The page draws its bar the same way, from this budget
         // and the cooldown above, so the bar running out and the watch giving up
         // stay one moment.
+        //
+        // **Above one seat there is no watch that can run, so the key is
+        // absent and Manual is the only tab.** Auto-detect resolves an
+        // `activate()` from the chain alone: the block `lastActivationBlock`
+        // names, filtered to this contract and this token. At one seat that
+        // block holds one activation of this token and it is the one the
+        // person on this screen just sent. Above one seat a fleet instance
+        // activating the same token in the same block produces a second log
+        // the filter cannot tell from theirs - and every instance shares the
+        // holder's address, so no topic separates them. Signing a session over
+        // another instance's `sessionId` and `seatIndex` is two live sessions
+        // on one seat, which is exactly the over-admission seats exist to
+        // prevent, and it would happen in silence. A pasted transaction hash
+        // is unambiguously the user's, so above one seat that is what the
+        // screen asks for.
         #[cfg(feature = "onchain-write")]
-        {
+        if status.seats == 1 {
             payload["autoWatchSecs"] = crate::rpc::WATCH_BUDGET.as_secs().into();
         }
         self.eval(format!("window.rub3.onShowCooldown({})", payload));

@@ -250,8 +250,18 @@ fn run_release_seat(token_id: Option<u64>) -> i32 {
         // is a success. The `released=false` key is how it tells the two apart
         // without parsing the sentence above it.
         Ok(ReleaseOutcome::NoSeatHeld { token_id }) => {
-            eprintln!("rub3: no seat held for token {token_id}; nothing to release");
-            eprintln!("rub3-detail: token_id={token_id} released=false");
+            match token_id {
+                Some(token_id) => {
+                    eprintln!("rub3: no seat held for token {token_id}; nothing to release");
+                    eprintln!("rub3-detail: token_id={token_id} released=false");
+                }
+                None => {
+                    eprintln!(
+                        "rub3: this machine holds no seat on this contract; nothing to release"
+                    );
+                    eprintln!("rub3-detail: released=false");
+                }
+            }
             activation::EXIT_OK
         }
         Err(e) => {

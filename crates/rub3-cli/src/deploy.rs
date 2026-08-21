@@ -531,14 +531,19 @@ impl DeployPlan {
     }
 }
 
-/// Runs a resolved plan: `forge script`, from `contracts/`.
-pub fn execute(plan: &DeployPlan, repo: &Repo) -> Result<(), DeployError> {
-    let contracts: PathBuf = repo.path("contracts");
+/// The `forge script` invocation a plan resolves to, environment and all.
+///
+/// Built apart from running it so the environment the child would actually get
+/// is observable without a deploy: every variable in [`SCRIPT_VARS`] is either
+/// set to what the plan decided or removed outright, and "removed" is the half
+/// that is otherwise invisible until an inherited value has already deployed
+/// something nobody typed.
+fn forge_command(plan: &DeployPlan, contracts: &std::path::Path) -> Command {
     let mut command = Command::new("forge");
     command
         .args(&plan.forge_args)
         .args(&plan.passthrough)
-        .current_dir(&contracts);
+        .current_dir(contracts);
     // Set what the plan decided, and clear the rest. An inherited value is a
     // deploy input nobody typed.
     for var in SCRIPT_VARS {
@@ -547,6 +552,13 @@ pub fn execute(plan: &DeployPlan, repo: &Repo) -> Result<(), DeployError> {
             None => command.env_remove(var),
         };
     }
+    command
+}
+
+/// Runs a resolved plan: `forge script`, from `contracts/`.
+pub fn execute(plan: &DeployPlan, repo: &Repo) -> Result<(), DeployError> {
+    let contracts: PathBuf = repo.path("contracts");
+    let mut command = forge_command(plan, &contracts);
 
     let status = command.status().map_err(|e| {
         DeployError::Forge(format!(
@@ -658,49 +670,85 @@ mod tests {
         assert!(validate_hash(&"ab".repeat(32)).is_err());
     }
 
-    /// **[`SCRIPT_VARS`] must name every variable the script reads, and a
-    /// missing entry is silent.** The list exists so the ones this command does
-    /// not set are *removed* from the child's environment; one left out is
-    /// inherited instead, and a stale value in an operator's shell becomes a
-    /// deploy input nobody typed. That is the failure the list was written to
-    /// prevent, so it is checked against the script rather than trusted.
+    /// **A deploy input nobody typed must not reach the script.** Every name in
+    /// [`SCRIPT_VARS`] is either what this command decided or absent from the
+    /// child's environment outright; a `SEATS` or a `PRICE` left over from an
+    /// earlier `source .env` is a licence sold on terms the operator did not
+    /// choose, and it would be silent.
     ///
-    /// Reads `Deploy.s.sol` and pulls every `vm.env*("NAME"` out of it, which is
-    /// the only way the script can reach the environment at all.
+    /// Asserted against the `forge` invocation the plan actually produces,
+    /// parent environment polluted, rather than against the list.
     #[test]
-    fn script_vars_names_every_variable_the_deploy_script_reads() {
-        let script = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../contracts/script/Deploy.s.sol"),
-        )
-        .expect("the deploy script this command drives");
+    fn the_plan_clears_every_script_variable_it_did_not_set_itself() {
+        use clap::Parser;
 
-        let mut missing: Vec<String> = Vec::new();
-        for (index, _) in script.match_indices("vm.env") {
-            let rest = &script[index..];
-            let Some(open) = rest.find('"') else { continue };
-            let Some(close) = rest[open + 1..].find('"') else {
-                continue;
-            };
-            let name = &rest[open + 1..open + 1 + close];
-            // The script reads a delimiter and a default alongside the name;
-            // only an upper-case identifier is a variable.
-            if !name
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-            {
-                continue;
-            }
-            if !SCRIPT_VARS.contains(&name) && !missing.contains(&name.to_string()) {
-                missing.push(name.to_string());
-            }
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            deploy: DeployArgs,
         }
 
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = Manifest::read(&repo_root).expect("the committed manifest");
+        // `--direct` because nothing is deployed to any public network yet, so
+        // no chain in the committed manifest names a factory to go through.
+        let cli = Cli::parse_from([
+            "deploy",
+            "--name",
+            "My App License",
+            "--symbol",
+            "MAL",
+            "--price-eth",
+            "0.05",
+            "--chain",
+            "base",
+            "--direct",
+        ]);
+        let plan = DeployPlan::resolve(&cli.deploy, &manifest).expect("a direct deploy resolves");
         assert!(
-            missing.is_empty(),
-            "Deploy.s.sol reads these variables and SCRIPT_VARS does not name them, so \
-             they would be inherited from the operator's environment rather than cleared: {}",
-            missing.join(", ")
+            plan.env.contains_key("PRICE"),
+            "this test needs one variable the plan sets",
         );
+        assert!(
+            !plan.env.contains_key("SEATS") && !plan.env.contains_key("FACTORY"),
+            "this test needs variables the plan leaves alone",
+        );
+
+        // What an operator's shell might be carrying. Set on this process,
+        // which is the parent the child would inherit from.
+        std::env::set_var("SEATS", "64");
+        std::env::set_var("FACTORY", "0x000000000000000000000000000000000000dead");
+        std::env::set_var("PRICE", "999999999999999999");
+
+        let command = forge_command(&plan, &repo_root.join("contracts"));
+        let child_env: BTreeMap<String, Option<String>> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+
+        std::env::remove_var("SEATS");
+        std::env::remove_var("FACTORY");
+        std::env::remove_var("PRICE");
+
+        for var in SCRIPT_VARS {
+            match plan.env.get(*var) {
+                Some(value) => assert_eq!(
+                    child_env.get(*var),
+                    Some(&Some(value.clone())),
+                    "{var} must reach the script as the value this command decided",
+                ),
+                None => assert_eq!(
+                    child_env.get(*var),
+                    Some(&None),
+                    "{var} is not this deploy's to set, so it must be removed from the \
+                     child's environment rather than inherited",
+                ),
+            }
+        }
     }
 }

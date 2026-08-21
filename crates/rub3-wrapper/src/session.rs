@@ -208,7 +208,17 @@ pub fn verify_local(session: &Session) -> Result<(), VerifyError> {
     if is_expired(session) {
         return Err(VerifyError::Expired);
     }
+    verify_signature(session)
+}
 
+/// The signature half of [`verify_local`], with no view on expiry.
+///
+/// For the one caller that has to reason about a session it would never
+/// launch from: the seat teardown path (§3.4) needs to know whether a lapsed
+/// record is one this machine wrote, because that is what makes it evidence of
+/// a seat this machine took. Everything that decides whether to *run* wants
+/// [`verify_local`].
+pub fn verify_signature(session: &Session) -> Result<(), VerifyError> {
     let msg = session_message(
         &session.app_id,
         session.token_id,

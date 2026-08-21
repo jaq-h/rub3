@@ -437,7 +437,10 @@ Teardown:
                   this machine, never another instance's. Prints
                   `rub3-detail: token_id=N session_id=M tx_hash=0x...`, or
                   `token_id=N released=false` when there was nothing to
-                  hand back, which is also a success
+                  hand back, which is also a success. The `token_id=`
+                  key is absent from that second line in the one case
+                  with no token to name: no `--token-id` was given and
+                  this machine holds no session for this contract
 
 Signer sources, highest precedence first:
   RUB3_AGENT_KEY                        raw hex private key (dev / CI only)
@@ -796,10 +799,14 @@ mod headless {
             session_id: u64,
             tx_hash: String,
         },
-        /// There was nothing to hand back - the session had already lapsed, had
-        /// been released, or never took a seat at all. The local record is gone
-        /// either way, so this is a success and not a failure.
-        NoSeatHeld { token_id: u64 },
+        /// There was nothing to hand back - the seat had already been released,
+        /// the session never took one, or this machine has no record naming a
+        /// seat on this contract at all. A success and not a failure: it is the
+        /// state the caller asked for.
+        ///
+        /// `token_id` is `None` in the one case where there is no token to
+        /// name: nothing was asked for by id and the store holds nothing.
+        NoSeatHeld { token_id: Option<u64> },
     }
 
     /// Everything that can stop a headless activation, in a shape an
@@ -1505,12 +1512,21 @@ mod headless {
     /// [`HeadlessError::FleetExhausted`] something a caller can act on rather
     /// than only wait out.
     ///
-    /// Releases only the session in this machine's own store, so it is never a
+    /// Releases only the session in this machine's own store, and only one
+    /// written against the contract this build is packed for, so it is never a
     /// way for one instance to end another's - that would be the revocation
     /// shape §2.4 rules out. The cached session is deleted whether or not the
     /// chain had a seat to give back, because either way this machine is done
     /// with it and a session left behind would be launched from on the next
     /// run.
+    ///
+    /// **The cached session is resolved without regard to its local expiry.**
+    /// A session that has lapsed locally still holds its seat until the
+    /// contract's own `sessionTtlSeconds` runs out, which is the ordinary state
+    /// of a retiring instance on any build whose packed TTL is the shorter
+    /// one, which is the case this exists for. Nothing left to hand back is
+    /// [`ReleaseOutcome::NoSeatHeld`] and a success, never an error: a
+    /// teardown that has already happened is the state the caller asked for.
     pub fn release_headless(
         signer: &dyn Signer,
         ctx: &HeadlessContext,
@@ -1518,19 +1534,38 @@ mod headless {
         let contract = parse_contract(&ctx.contract)?;
         preflight_chain_id(ctx)?;
 
-        let session = match ctx.token_id {
-            Some(token_id) => crate::session_store::load_session(&ctx.app_id, token_id)
-                .map_err(|e| HeadlessError::Persist(e.to_string()))?,
-            None => crate::session_store::load_latest_session(&ctx.app_id)
-                .map_err(|e| HeadlessError::Persist(e.to_string()))?,
+        let stored = match ctx.token_id {
+            Some(token_id) => crate::session_store::load_session(&ctx.app_id, token_id),
+            None => crate::session_store::load_latest_session_any_expiry(&ctx.app_id),
+        };
+        let session = match stored {
+            Ok(session) => session,
+            Err(crate::session_store::StoreError::NotFound) => {
+                return Ok(ReleaseOutcome::NoSeatHeld {
+                    token_id: ctx.token_id,
+                })
+            }
+            Err(e) => return Err(HeadlessError::Persist(e.to_string())),
         };
         let token_id = session.token_id;
+        // A record written against another contract names a seat on that
+        // contract, not on this one. Session ids start at 1 on every deploy, so
+        // a successor migration under the same `app_id` (§2.4) can hold a
+        // record whose (token, session) pair also exists here and is live -
+        // releasing it would be this wrapper ending another instance's session.
+        if !session.contract.eq_ignore_ascii_case(&ctx.contract) {
+            return Ok(ReleaseOutcome::NoSeatHeld {
+                token_id: Some(token_id),
+            });
+        }
         let session_id = match session.session_id {
             // A tier-0..2 session never took a seat, so there is nothing on
             // chain to hand back and saying so is the whole answer.
             None => {
                 forget_session(&ctx.app_id, token_id)?;
-                return Ok(ReleaseOutcome::NoSeatHeld { token_id });
+                return Ok(ReleaseOutcome::NoSeatHeld {
+                    token_id: Some(token_id),
+                });
             }
             Some(id) => id,
         };
@@ -1539,7 +1574,9 @@ mod headless {
             Ok((true, _)) => {}
             Ok((false, _)) => {
                 forget_session(&ctx.app_id, token_id)?;
-                return Ok(ReleaseOutcome::NoSeatHeld { token_id });
+                return Ok(ReleaseOutcome::NoSeatHeld {
+                    token_id: Some(token_id),
+                });
             }
             Err(e) => return Err(HeadlessError::Rpc(e.to_string())),
         }
@@ -2637,7 +2674,7 @@ mod tests {
             refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
                 code_len: 4096,
                 // `burn(address,uint256)` carries a comma of its own, which is
-                // the whole point: 6 of the 25 forbidden signatures do, so a
+                // the whole point: 8 of the 30 forbidden signatures do, so a
                 // comma-separated list is not recoverable by the orchestrator
                 // the detail line exists for.
                 exposed: vec!["seize(uint256)", "burn(address,uint256)", "pause()"],

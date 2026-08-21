@@ -537,6 +537,60 @@ fn mine(n: u32) {
     );
 }
 
+/// Moves the chain's clock forward by `secs` and mines the block that carries
+/// it, so a seat's TTL can lapse without waiting it out.
+///
+/// The block is what makes the new timestamp readable: `evm_increaseTime`
+/// offsets the *next* block, so a seat compared against the head block's
+/// timestamp is unmoved until one is mined.
+fn advance_time(secs: u64) {
+    let output = Command::new("cast")
+        .args([
+            "rpc",
+            "evm_increaseTime",
+            &format!("0x{secs:x}"),
+            "--rpc-url",
+            &rpc_url(),
+        ])
+        .output()
+        .expect("failed to run cast rpc evm_increaseTime");
+    assert!(
+        output.status.success(),
+        "test setup failed: evm_increaseTime could not be sent:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let before = block_timestamp();
+    mine(1);
+    let after = block_timestamp();
+    assert!(
+        after >= before + secs,
+        "test setup failed: the clock moved from {before} to {after}, short of the \
+         {secs}s this was meant to skip",
+    );
+}
+
+/// The head block's timestamp, read through `cast`. The chain's own clock, and
+/// the only one a seat's expiry is compared against.
+fn block_timestamp() -> u64 {
+    let output = Command::new("cast")
+        .args([
+            "block",
+            "latest",
+            "--field",
+            "timestamp",
+            "--rpc-url",
+            &rpc_url(),
+        ])
+        .output()
+        .expect("failed to run cast block");
+    assert!(output.status.success(), "cast block latest failed");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("cast block did not return a timestamp")
+}
+
 /// The current block height, read through `cast`.
 fn block_number() -> u64 {
     let output = Command::new("cast")
@@ -3474,11 +3528,16 @@ fn headless_release_seat_frees_it_for_another_instance_e2e() {
         session_store::load_session(APP_ID, first.token_id).is_err(),
         "the released session must not be left on disk"
     );
-    // And asking again is a success with nothing to do rather than an error.
-    assert!(matches!(
-        release_headless(agent.signer.as_ref(), &ctx(&contract, None)),
-        Ok(ReleaseOutcome::NoSeatHeld { .. }) | Err(HeadlessError::Persist(_))
-    ));
+    // And asking again is a success with nothing to do rather than an error:
+    // a teardown that has already happened is the state the caller asked for,
+    // which is what `released=false` and exit 0 promise.
+    match release_headless(agent.signer.as_ref(), &ctx(&contract, None)) {
+        Ok(ReleaseOutcome::NoSeatHeld { token_id }) => assert_eq!(
+            token_id, None,
+            "nothing was asked for by id and the store holds nothing to name"
+        ),
+        other => panic!("expected NoSeatHeld, got {other:?}"),
+    }
 
     // The waiting machine can now start.
     std::env::set_var("RUB3_SESSION_DIR", _third_machine.path());
@@ -3592,4 +3651,178 @@ fn headless_session_never_outlives_the_seat_that_admits_it_e2e() {
     // The session verifies over that expiry, so the clamp is inside what the
     // wallet signed rather than something written beside it.
     session::verify_local(&session).expect("the clamped session must verify");
+}
+
+/// **A retiring instance can hand back a seat its local session has outlived.**
+/// The contract's `sessionTtlSeconds` is what holds the seat, and any build
+/// whose packed TTL is the shorter one reaches its teardown with a session that
+/// lapsed locally hours before the seat does - which is the ordinary state of
+/// the instance `--release-seat` exists for. Resolving that session through the
+/// launch path's scan finds nothing, sends no `release()`, and leaves the seat
+/// held for the rest of the contract's TTL.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_release_seat_frees_a_session_that_lapsed_locally_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let contract = deploy_access_with_seats(PRICE_WEI, ZERO_ADDR, "0", "0", "15", 2);
+    let contract_addr: Address = contract
+        .parse()
+        .expect("forge returned a malformed address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    // A one-second packed TTL against a contract granting a day, which is the
+    // same relationship as an hour against ninety days and reaches the state
+    // this test is about without waiting for it.
+    let short = HeadlessContext {
+        session_ttl_secs: 1,
+        ..ctx(&contract, None)
+    };
+    let (session, _) = ensure_headless(agent.signer.as_ref(), &short).expect("activation");
+    let session_id = session.session_id.expect("a tier-3 session takes a seat");
+
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        session_store::load_latest_session(APP_ID).is_err(),
+        "this test is only meaningful while the cached session has lapsed locally"
+    );
+    let (live, _) = rpc::session_seat(&rpc_url(), contract_addr, session.token_id, session_id)
+        .expect("sessionSeat read");
+    assert!(
+        live,
+        "the seat outlives the local session, which is the point"
+    );
+
+    match release_headless(agent.signer.as_ref(), &short).expect("the seat is still releasable") {
+        ReleaseOutcome::Released {
+            token_id,
+            session_id: released,
+            ..
+        } => {
+            assert_eq!(token_id, session.token_id);
+            assert_eq!(released, session_id);
+        }
+        other => panic!("expected Released, got {other:?}"),
+    }
+
+    let (still_live, _) =
+        rpc::session_seat(&rpc_url(), contract_addr, session.token_id, session_id)
+            .expect("sessionSeat read");
+    assert!(!still_live, "the seat is back");
+}
+
+/// **A wrapper never releases a seat on a contract its cached session was not
+/// written for.** A §2.4 successor migration keeps the packed `APP_ID`, so one
+/// machine's store can hold a record naming the predecessor while this build
+/// points at the successor - and session ids start at 1 on every deploy, so
+/// that record's `(token, session)` pair can also name a live session here,
+/// belonging to another instance. Ending it would be one machine ending
+/// another's session, which §2.4 rules out even between two machines holding
+/// the same key.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_release_seat_refuses_a_session_written_for_another_contract_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let successor = deploy_access(PRICE_WEI, "0", "15");
+    let predecessor = deploy_access(PRICE_WEI, "0", "15");
+    let successor_addr: Address = successor
+        .parse()
+        .expect("forge returned a malformed address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    // The instance whose session must survive: it runs against the successor.
+    let _live_machine = next_machine();
+    let (live, _) =
+        ensure_headless(agent.signer.as_ref(), &ctx(&successor, None)).expect("the live instance");
+    let live_session = live.session_id.expect("a tier-3 session takes a seat");
+
+    // The retiring instance, whose only cached session names the predecessor.
+    let _retiring = next_machine();
+    let (stale, _) = ensure_headless(agent.signer.as_ref(), &ctx(&predecessor, None))
+        .expect("a session on the predecessor");
+    assert_eq!(
+        stale.session_id, live.session_id,
+        "the collision this guards against needs the two ids to match"
+    );
+    assert_eq!(stale.token_id, live.token_id);
+
+    // Retired while packed for the successor. The only record on this machine
+    // names the predecessor, so there is nothing here to hand back.
+    match release_headless(agent.signer.as_ref(), &ctx(&successor, None))
+        .expect("a foreign record is nothing to release, not a failure")
+    {
+        ReleaseOutcome::NoSeatHeld { token_id } => assert_eq!(token_id, Some(stale.token_id)),
+        other => panic!("expected NoSeatHeld, got {other:?}"),
+    }
+
+    let (still_live, _) =
+        rpc::session_seat(&rpc_url(), successor_addr, live.token_id, live_session)
+            .expect("sessionSeat read");
+    assert!(
+        still_live,
+        "the other instance's session must survive a release aimed at this contract"
+    );
+
+    // And the record is still there to release against the contract it names.
+    match release_headless(agent.signer.as_ref(), &ctx(&predecessor, None))
+        .expect("the predecessor's own seat is this machine's to hand back")
+    {
+        ReleaseOutcome::Released { session_id, .. } => {
+            assert_eq!(Some(session_id), stale.session_id)
+        }
+        other => panic!("expected Released, got {other:?}"),
+    }
+}
+
+/// **A lapsed seat is a free seat, and `occupied_seat` must say so.** `seatAt`
+/// answers with the raw record, which keeps its session id and expiry until
+/// something overwrites it, so a helper that reads occupancy off the two
+/// non-zero fields reports an occupant on a seat the contract's own `activate()`
+/// would hand to the next caller.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_a_lapsed_seat_reads_as_free_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let contract = deploy_access(PRICE_WEI, "0", "15");
+    let contract_addr: Address = contract
+        .parse()
+        .expect("forge returned a malformed address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    let (session, _) =
+        ensure_headless(agent.signer.as_ref(), &ctx(&contract, None)).expect("activation");
+    let occupied = rpc::occupied_seat(&rpc_url(), contract_addr, session.token_id, 0)
+        .expect("seatAt read")
+        .expect("the seat this run took is occupied");
+    assert_eq!(occupied.0, session.session_id.unwrap());
+
+    // Past the contract's own TTL, with the record left exactly where it was:
+    // nothing sweeps a seat, so the session id and expiry are still there.
+    advance_time(SEAT_TTL_SECS + 1);
+    assert!(
+        rpc::occupied_seat(&rpc_url(), contract_addr, session.token_id, 0)
+            .expect("seatAt read")
+            .is_none(),
+        "a seat the contract would hand to the next caller is free"
+    );
 }

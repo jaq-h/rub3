@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use crate::session::{is_expired, verify_local, Session};
+use crate::session::{is_expired, verify_signature, Session};
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -92,6 +92,23 @@ pub fn delete_session(app_id: &str, token_id: u64) -> Result<(), StoreError> {
 /// Solves the "don't know token_id at startup" problem: the fast path doesn't
 /// need to know which token to load - it just asks for the best available session.
 pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
+    latest_session_where(app_id, |s| !is_expired(s))
+}
+
+/// The most recently issued session for `app_id`, **expired or not**.
+///
+/// For the seat teardown path (§3.4), which is asking a different question
+/// from every other caller here: not "may this session launch" but "which seat
+/// did this machine take". A session whose local expiry has passed still holds
+/// its seat until the contract's own `sessionTtlSeconds` runs out, and on any
+/// build whose packed TTL is the shorter one that is the ordinary state of an
+/// instance being retired - the case `--release-seat` exists for. Filtering it
+/// out here would leave the seat held for the rest of the contract's TTL with
+/// nothing left on disk naming it.
+///
+/// The signature is still checked: a record this machine did not write is not
+/// evidence of a seat it took.
+pub fn load_latest_session_any_expiry(app_id: &str) -> Result<Session, StoreError> {
     latest_session_where(app_id, |_| true)
 }
 
@@ -104,13 +121,17 @@ pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
 /// back on-chain while its own cached session sits unused one file over.
 ///
 /// `wallet` is compared case-insensitively against the session's signed
-/// `wallet` field, which `verify_local` has already tied to the signature.
+/// `wallet` field, which the scan's signature check has already tied to the
+/// signature.
 pub fn load_latest_session_for_wallet(app_id: &str, wallet: &str) -> Result<Session, StoreError> {
-    latest_session_where(app_id, |s| s.wallet.eq_ignore_ascii_case(wallet))
+    latest_session_where(app_id, |s| {
+        !is_expired(s) && s.wallet.eq_ignore_ascii_case(wallet)
+    })
 }
 
-/// Shared scan: every valid, non-expired session for `app_id` that `keep`
-/// accepts, newest first.
+/// Shared scan: every locally valid session for `app_id` that `keep` accepts,
+/// newest first. Expiry is `keep`'s to decide, since the teardown path wants a
+/// session the launch paths would refuse.
 fn latest_session_where(
     app_id: &str,
     keep: impl Fn(&Session) -> bool,
@@ -130,7 +151,7 @@ fn latest_session_where(
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
         .filter_map(|s| serde_json::from_str::<Session>(&s).ok())
-        .filter(|s| !is_expired(s) && verify_local(s).is_ok())
+        .filter(|s| verify_signature(s).is_ok())
         .filter(|s| keep(s))
         .collect();
 
@@ -262,6 +283,51 @@ mod tests {
 
         let err = load_latest_session("com.rub3.test").unwrap_err();
         assert!(matches!(err, StoreError::NotFound));
+
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
+    /// **The seat teardown path has to see the session the launch paths hide.**
+    /// A locally expired session still names the seat this machine took, and on
+    /// a build whose packed TTL is shorter than the contract's that is the
+    /// state every retiring instance is in. A scan that skips it leaves the
+    /// seat held with nothing on disk naming it.
+    #[test]
+    fn the_expiry_agnostic_scan_finds_a_session_the_launch_scan_refuses() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        let expired = signed_session("com.rub3.test", 7, "2000-01-01T00:00:00Z");
+        save_session(&expired).unwrap();
+
+        assert!(matches!(
+            load_latest_session("com.rub3.test"),
+            Err(StoreError::NotFound)
+        ));
+        let found = load_latest_session_any_expiry("com.rub3.test")
+            .expect("the seat this machine took is still nameable");
+        assert_eq!(found.token_id, 7);
+
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
+    /// A record this machine did not write is not evidence of a seat it took,
+    /// expiry or no expiry.
+    #[test]
+    fn the_expiry_agnostic_scan_still_refuses_an_unverifiable_record() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        let mut tampered = signed_session("com.rub3.test", 8, "2000-01-01T00:00:00Z");
+        tampered.token_id = 9;
+        save_session(&tampered).unwrap();
+
+        assert!(matches!(
+            load_latest_session_any_expiry("com.rub3.test"),
+            Err(StoreError::NotFound)
+        ));
 
         std::env::remove_var("RUB3_SESSION_DIR");
     }
