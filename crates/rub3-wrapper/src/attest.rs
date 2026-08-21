@@ -1310,8 +1310,9 @@ pub enum Refusal {
     /// table, and not the registry if there was one to ask.
     Unrecognised(Unrecognised),
     /// Canonical rub3 code, but not a licence contract - the factory, one of its
-    /// deployer helpers, or the code registry itself. It sells nothing, so
-    /// buying from it is a mistake about the address rather than about the code.
+    /// deployer helpers, the code registry, or the discovery registry. It sells
+    /// nothing, so buying from it is a mistake about the address rather than
+    /// about the code.
     NotALicence {
         contract: String,
         /// `None` for a role a registry published that this build has no name
