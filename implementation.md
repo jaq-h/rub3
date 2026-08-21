@@ -1147,6 +1147,7 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 - Windows support: MSVC target and WebView2 testing. The SDK channel's named-pipe half is written, and half of it is verified (§3.5): the SDK crate's client type-checks for `x86_64-pc-windows-msvc`, the wrapper's server has never been compiled anywhere in this project, and neither half has been executed - a Windows host or runner is what both are waiting for
 - Subscription renewal UI (view expiry, renew from tray/menu)
 - Multi-wallet delegation (hardware wallet owns, hot wallet signs sessions - EIP-7702 or delegation registry; exploratory)
+- Cooldown screen dwell: the cooldown screen never announces that the wait has ended. Deferred from §5.1a and tracked separately as `rub3-cooldown-screen-dwell`
 
 ---
 
