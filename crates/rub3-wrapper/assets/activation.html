@@ -114,6 +114,14 @@
     .token-box .tl { font-size: 11px; color: #555; margin-bottom: 3px; text-transform: uppercase; }
     .token-box .tv { font-family: monospace; font-size: 13px; }
 
+    /* The cooldown wait box. The countdown is the only thing on this screen
+       that moves, so it is sized to be the thing that reads first, with the
+       chain's own block count kept under it as the fact the estimate is
+       derived from. Monospace via .tv, so the digits do not jitter as they
+       tick. */
+    #cd-countdown { font-size: 21px; line-height: 1.2; letter-spacing: 0.5px; }
+    #cd-blocks-note { font-size: 11px; color: #c08c8c; margin-top: 6px; }
+
     .hint { font-size: 11px; color: #444; margin-top: 12px; text-align: center; }
 
     .spinner {
@@ -460,7 +468,8 @@
     </div>
     <div id="cd-wait" class="token-box hidden" style="background:#2a1a1a;border-color:#4a2a2a">
       <div class="tl" style="color:#a65a5a">Cooldown Active</div>
-      <div class="tv" id="cd-blocks-remaining" style="color:#f0a0a0">-</div>
+      <div class="tv" id="cd-countdown" style="color:#f0a0a0">-</div>
+      <div id="cd-blocks-note">-</div>
     </div>
     <div class="field">
       <label>Send this tx from your wallet <span style="color:#444;font-size:10px;text-transform:none">(to the contract above)</span></label>
@@ -572,6 +581,9 @@
     // the last message wins: reset first and the outgoing screen's cancel would
     // stop the watch the incoming screen had just started.
     if (TAB_SCREENS.indexOf(name) !== -1) resetTabs(name, tabSecs);
+    // The countdown is entered and left here for the same reason the watch is:
+    // one screen owns it, and no call site should have to remember that.
+    if (name === 'cooldown') startCooldownTicker();
   }
 
   function setError(id, msg) {
@@ -608,17 +620,15 @@
     return whole.toString() + '.' + fracStr;
   }
 
-  // A wait in the unit someone would actually use for it. "~3600 seconds" is
-  // the same fact as "~1 hour" and nobody reads it as one, and the cooldown this
-  // formats defaults to 1800 blocks.
-  function approxDuration(secs) {
-    if (secs < 90) return '~' + secs + ' seconds';
-    const mins = Math.round(secs / 60);
-    if (mins < 60) return '~' + mins + ' minutes';
-    const hours = Math.floor(mins / 60);
-    const rest  = mins % 60;
-    const hoursPart = '~' + hours + ' hour' + (hours === 1 ? '' : 's');
-    return rest ? hoursPart + ' ' + rest + ' min' : hoursPart;
+  // A wait as a clock a person can watch move: m:ss, growing an hours field
+  // only once there is one. The cooldown this formats defaults to 1800 blocks,
+  // so it starts at 1:00:00 and spends most of its life in m:ss.
+  function clockDuration(secs) {
+    const hours = Math.floor(secs / 3600);
+    const mins  = Math.floor(secs / 60) % 60;
+    const rest  = secs % 60;
+    const minsPart = hours ? String(mins).padStart(2, '0') : String(mins);
+    return (hours ? hours + ':' : '') + minsPart + ':' + String(rest).padStart(2, '0');
   }
 
   // ── Confirmation modes (§5.1) ─────────────────────────────────────────────
@@ -653,6 +663,95 @@
   // does its own arithmetic on blocks, so the sentence, the bar and the watch's
   // own hold cannot disagree about when the wait ends.
   let cooldownEndsAt = 0;
+
+  // ── The cooldown countdown (§5.4) ─────────────────────────────────────────
+  //
+  // The page's only timer, and the cooldown screen is the only screen that
+  // earns one: it is the one a person can sit in front of for the better part
+  // of an hour. Everything on it used to be written once at render - a static
+  // estimate, a bar deliberately held full, and no signal at all at the moment
+  // the contract starts accepting the transaction - so an hour of waiting
+  // looked identical to a hung window.
+  //
+  // It counts `cooldownEndsAt` down rather than being told when the hold ends.
+  // That stamp is the single source for when this wait is over: the sentence,
+  // the drain bar's delay and the watch's own hold are all already read from
+  // it, and a message carrying the end would be a second one to keep in step.
+  let cooldownTicker = null;
+
+  function stopCooldownTicker() {
+    if (cooldownTicker !== null) {
+      clearTimeout(cooldownTicker);
+      cooldownTicker = null;
+    }
+  }
+
+  // Started by show() on entering the screen, so no future path to it can
+  // forget - the same reason leaveScreen() is where the watch is cancelled.
+  function startCooldownTicker() {
+    stopCooldownTicker();
+    if (!cooldownEndsAt) return;
+    tickCooldown();                             // paint now, then keep time
+  }
+
+  // Lands just past the second boundary the display is about to cross, so the
+  // number changes when the second does. A flat 1000 ms interval drifts out of
+  // phase with the stamp and shows the same value twice before jumping two.
+  function scheduleCooldownTick() {
+    const ms = cooldownEndsAt - Date.now();
+    cooldownTicker = setTimeout(tickCooldown, (((ms % 1000) + 1000) % 1000) + 20);
+  }
+
+  function tickCooldown() {
+    cooldownTicker = null;
+    // A timer that outlives its screen is a timer writing into a screen that
+    // is no longer there. It is stopped on the way out of the screen and on
+    // the way out of the page, and refuses to write here as well, so no third
+    // way of leaving can leave it running against someone else's screen.
+    if (currentScreen !== 'cooldown' || !cooldownEndsAt) {
+      return;
+    }
+
+    const left = Math.max(0, Math.ceil((cooldownEndsAt - Date.now()) / 1000));
+    document.getElementById('cd-countdown').textContent = clockDuration(left);
+    if (left > 0) {
+      scheduleCooldownTick();
+      return;
+    }
+
+    // Zero. The contract will take the transaction now, and the wrapper's
+    // watcher comes off its hold at this same moment, so the screen becomes
+    // the one it would have rendered had the token been ready all along: the
+    // wait box goes, and the copy says what it says outside a cooldown.
+    cooldownEndsAt = 0;
+    document.getElementById('cd-wait').classList.add('hidden');
+    setCooldownWatchCopy(false);
+  }
+
+  // The two lines the auto-detect panel carries on this screen, and the only
+  // place either sentence is written - the countdown hands the screen back to
+  // the second pair at zero, and a copy per caller would be a pair to keep in
+  // step.
+  //
+  // Inside the cooldown the contract refuses the tx, so "send it and we'll
+  // spot it" would be telling someone to do something that cannot work yet -
+  // and a watch armed now would be looking for a transaction the chain is
+  // guaranteed not to have. Both wait: the wrapper holds its watch until the
+  // cooldown ends, and the copy says so rather than promising to be looking
+  // already.
+  function setCooldownWatchCopy(cooling) {
+    document.getElementById('cd-watch-head').textContent = cooling
+      ? 'Waiting for the cooldown to end…'
+      : 'Waiting for your wallet to broadcast the tx…';
+    document.getElementById('cd-watch-sub').textContent = cooling
+      ? 'The contract will accept the transaction once the cooldown above ends. Send it then: we start watching the chain as the cooldown runs out, and will pick it up on our own.'
+      : 'Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.';
+  }
+
+  // The window closing tears the page down and every timer with it, but only
+  // once it is actually unloaded. This is the hook that fires first, and it
+  // costs one line to not depend on that.
+  window.addEventListener('pagehide', stopCooldownTicker);
 
   function screenEl(screen) {
     return document.getElementById('screen-' + screen);
@@ -704,6 +803,7 @@
       post({ type: 'auto_watch_cancel' });
       activeTab[screen] = null;
     }
+    if (screen === 'cooldown') stopCooldownTicker();
   }
 
   function startAutoWatch(screen) {
@@ -927,33 +1027,28 @@
       document.getElementById('cd-tx-input').value = '';
       clearError('cd-error');
 
-      const waitBox       = document.getElementById('cd-wait');
-      const blocksDisplay = document.getElementById('cd-blocks-remaining');
-      const cooling       = !data.ready && data.blocksRemaining > 0;
-      const waitSecs      = data.cooldownSecsRemaining || 0;
-      cooldownEndsAt      = cooling ? Date.now() + waitSecs * 1000 : 0;
+      const waitBox    = document.getElementById('cd-wait');
+      const blocksNote = document.getElementById('cd-blocks-note');
+      const cooling    = !data.ready && data.blocksRemaining > 0;
+      const waitSecs   = data.cooldownSecsRemaining || 0;
+      cooldownEndsAt   = cooling ? Date.now() + waitSecs * 1000 : 0;
       if (cooling) {
         waitBox.classList.remove('hidden');
-        blocksDisplay.textContent =
-          data.blocksRemaining + ' block' + (data.blocksRemaining === 1 ? '' : 's')
-          + ' (' + approxDuration(waitSecs) + ' on Base)';
+        // The blocks are the chain's own answer and the countdown above them
+        // is this page's reading of it, so the note says which is which. The
+        // count is not ticked down beside the clock: re-deriving blocks from
+        // the clock would be the page inventing a number the chain never gave
+        // it, and it is only ever an estimate away from the one it did.
+        blocksNote.textContent =
+          'Estimated from ' + data.blocksRemaining
+          + ' block' + (data.blocksRemaining === 1 ? '' : 's') + ' remaining on Base';
       } else {
         waitBox.classList.add('hidden');
       }
+      setCooldownWatchCopy(cooling);
 
-      // Inside the cooldown the contract refuses the tx, so "send it and we'll
-      // spot it" would be telling someone to do something that cannot work yet -
-      // and a watch armed now would be looking for a transaction the chain is
-      // guaranteed not to have. Both wait: the wrapper holds its watch until the
-      // cooldown ends, and the copy says so rather than promising to be looking
-      // already.
-      document.getElementById('cd-watch-head').textContent = cooling
-        ? 'Waiting for the cooldown to end…'
-        : 'Waiting for your wallet to broadcast the tx…';
-      document.getElementById('cd-watch-sub').textContent = cooling
-        ? 'The contract will accept the transaction once the cooldown above ends. Send it then: we start watching the chain as the cooldown runs out, and will pick it up on our own.'
-        : 'Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.';
-
+      // show() starts the countdown, which paints the clock from the stamp set
+      // above and flips the copy back the moment it reaches zero.
       show('cooldown', data.autoWatchSecs);
     },
 
