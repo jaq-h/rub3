@@ -654,3 +654,26 @@ What was looked at, at the window's own 480x640 viewport:
 - the logged JSON across a screen change: one `auto_watch_cancel` for the screen
   being left, then one `auto_watch_start` for the one arriving, once each and in
   that order
+
+The cooldown screen's countdown (§5.4) was driven in the same run, since it is
+the other half of that screen with no Rust-side seam: `webview::tests` covers the
+`cooldownSecsRemaining` the payload carries, and the ticking of it is the page's.
+Two payloads, the ten-second one above and a realistic `blocksRemaining: 1800`
+with `cooldownSecsRemaining: 3600`:
+
+- the clock reads `1:00:00` on the realistic payload and `59:59` a second later,
+  so the hours field appears only while there is an hour of wait, and under it
+  "Estimated from 1800 blocks remaining on Base" names the chain's own figure the
+  estimate came from
+- the ten-second payload counted `0:05`, `0:04`, `0:03` and on to zero, at which
+  point the red wait box disappears and the head and the sentence under it flip
+  to the broadcast-now wording, leaving the screen identical to the one a
+  `ready: true` payload renders
+- one second per second: showing the cooldown screen twice in quick succession
+  and reading the clock 3.1 s later had it 3 s lower, not 6, so the second render
+  replaces the timer rather than racing a second one against it
+- the clock freezing on `window.rub3.onProcessing('…')` and never resuming, which
+  is the timer being cancelled on the way out of the screen the way the auto
+  detect watch is
+- a `ready: true` payload starting no clock at all: the wait box stays hidden and
+  the value under it does not move

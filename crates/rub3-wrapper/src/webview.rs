@@ -1706,6 +1706,85 @@ mod tests {
         }
     }
 
+    // ── The cooldown countdown (§5.4) ────────────────────────────────────────
+
+    /// A node whose `cooldownReady` answers exactly this.
+    ///
+    /// Two words, the `bool ready` and the `uint256 blocksRemaining` the view
+    /// returns.
+    #[cfg(feature = "cooldown")]
+    fn cooldown_node(ready: bool, blocks: u64) -> StubNode {
+        let ready = u8::from(ready);
+        StubNode::routed(move |method, _params| match method {
+            "eth_call" => serde_json::json!(format!("0x{ready:064x}{blocks:064x}")),
+            _ => serde_json::json!(null),
+        })
+    }
+
+    /// The argument of the one `onShowCooldown` call, parsed.
+    #[cfg(feature = "cooldown")]
+    fn cooldown_payload(rx: &mpsc::Receiver<Cmd>) -> serde_json::Value {
+        let scripts = scripts(rx);
+        let script = scripts
+            .last()
+            .unwrap_or_else(|| panic!("the window was told nothing"));
+        let arg = script
+            .strip_prefix("window.rub3.onShowCooldown(")
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("expected the cooldown screen, got: {script}"));
+        serde_json::from_str(arg).expect("the payload handed to the window is valid JSON")
+    }
+
+    /// The number the countdown on the cooldown screen runs on, and the only
+    /// one it has.
+    ///
+    /// The page turns `cooldownSecsRemaining` into a wall-clock stamp at render
+    /// and then ticks that stamp down: the clock, the drain bar's delay and the
+    /// hold before the watch arms are three readings of the one value. Nothing
+    /// tells the page when the hold is over - deliberately, because a message
+    /// carrying the end would be a second source for it - so a payload that
+    /// dropped this field or disagreed with the blocks beside it would leave a
+    /// person watching a clock that never moves, which is the state this
+    /// replaced rather than a degraded version of it.
+    #[test]
+    #[cfg(feature = "cooldown")]
+    fn the_cooldown_screen_is_handed_the_seconds_its_countdown_runs_on() {
+        const BLOCKS: u64 = 1800;
+        let node = cooldown_node(false, BLOCKS);
+        let (state, rx) = state_for(&node.url);
+
+        state.show_cooldown(BUYER, 7);
+
+        let payload = cooldown_payload(&rx);
+        assert_eq!(payload["ready"], false, "payload: {payload}");
+        assert_eq!(payload["blocksRemaining"], BLOCKS);
+        assert_eq!(
+            payload["cooldownSecsRemaining"],
+            serde_json::json!(BLOCKS * ESTIMATED_BLOCK_SECS),
+            "the countdown has to be handed the same wait the blocks describe: {payload}",
+        );
+    }
+
+    /// And a token that is ready is handed a zero, not a countdown.
+    ///
+    /// The page reads it as "no cooldown to wait out", starts no timer, and
+    /// shows the wording the countdown would otherwise flip it back to. A
+    /// non-zero here would open a wait on a token the contract would already
+    /// accept a transaction for.
+    #[test]
+    #[cfg(feature = "cooldown")]
+    fn a_ready_token_opens_no_countdown() {
+        let node = cooldown_node(true, 0);
+        let (state, rx) = state_for(&node.url);
+
+        state.show_cooldown(BUYER, 7);
+
+        let payload = cooldown_payload(&rx);
+        assert_eq!(payload["ready"], true, "payload: {payload}");
+        assert_eq!(payload["blocksRemaining"], 0, "payload: {payload}");
+        assert_eq!(payload["cooldownSecsRemaining"], 0, "payload: {payload}");
+    }
+
     // ── The gate ─────────────────────────────────────────────────────────────
 
     /// The refusal a person is most likely to meet: a contract is there, and it

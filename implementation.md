@@ -1147,7 +1147,7 @@ Each tab drives the same two outbound IPC events (`purchase_tx_sent` / `activate
 - Windows support: MSVC target and WebView2 testing. The SDK channel's named-pipe half is written, and half of it is verified (§3.5): the SDK crate's client type-checks for `x86_64-pc-windows-msvc`, the wrapper's server has never been compiled anywhere in this project, and neither half has been executed - a Windows host or runner is what both are waiting for
 - Subscription renewal UI (view expiry, renew from tray/menu)
 - Multi-wallet delegation (hardware wallet owns, hot wallet signs sessions - EIP-7702 or delegation registry; exploratory)
-- Cooldown screen dwell: the cooldown screen never announces that the wait has ended. Deferred from §5.1a and tracked separately as `rub3-cooldown-screen-dwell`
+- Cooldown screen dwell `[complete]`: the cooldown screen counts down. It ticks the `cooldownEndsAt` stamp it already builds from `cooldownSecsRemaining`, and at zero hides the wait box and hands the auto-detect copy back to its out-of-cooldown wording, so the end of the wait is an observable moment. That stamp stays the single source for when the hold ends - the alternative, a message from the watcher when its own hold expires, would have been exact but would have left the hour itself static, and would have been a second source for the same fact. One timer, entered in `show()` and cancelled in `leaveScreen()` beside the auto-detect watch, so the two share one lifetime rule
 
 ---
 
