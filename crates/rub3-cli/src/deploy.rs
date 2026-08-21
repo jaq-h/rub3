@@ -36,7 +36,6 @@ use crate::repo::Repo;
 /// inherited. A `PRICE` left over from an earlier `source .env` is a deploy
 /// nobody asked for.
 const SCRIPT_VARS: &[&str] = &[
-    "CONTRACT_TYPE",
     "TOKEN_NAME",
     "TOKEN_SYMBOL",
     "IDENTITY_MODEL",
@@ -48,7 +47,6 @@ const SCRIPT_VARS: &[&str] = &[
     "COOLDOWN_BLOCKS",
     "OWNER",
     "PREDECESSOR",
-    "PERIOD",
     "FACTORY",
     "WRAPPER_HASH",
     "WRAPPER_HASHES",
@@ -57,11 +55,6 @@ const SCRIPT_VARS: &[&str] = &[
 /// Deploy a licence contract through the canonical Rub3Factory.
 #[derive(Debug, clap::Args)]
 pub struct DeployArgs {
-    /// Which licence contract: `access` (bought once, valid while held) or
-    /// `subscription` (time-bounded, renewable).
-    #[arg(long = "type", value_name = "KIND", default_value = "access")]
-    pub contract_type: String,
-
     /// ERC-721 collection name, such as "My App License".
     #[arg(long, value_name = "NAME")]
     pub name: String,
@@ -116,10 +109,6 @@ pub struct DeployArgs {
     /// Blocks between activations of one token. The contract's floor is 15.
     #[arg(long, value_name = "N")]
     pub cooldown_blocks: Option<u64>,
-
-    /// Subscription length in seconds. Required by --type subscription.
-    #[arg(long, value_name = "SECONDS")]
-    pub period: Option<u64>,
 
     /// Contract owner. Defaults to the deploying key.
     #[arg(long, value_name = "ADDRESS")]
@@ -251,15 +240,6 @@ impl DeployPlan {
                 .map_err(|detail| DeployError::Config(format!("--factory {detail}")))?;
         }
 
-        let contract_type = match args.contract_type.as_str() {
-            kind @ ("access" | "subscription") => kind,
-            other => {
-                return Err(DeployError::Config(format!(
-                    "unknown --type `{other}`: expected access or subscription"
-                )))
-            }
-        };
-
         let identity_model = match args.identity.as_str() {
             "access" => 0u8,
             "account" => 1u8,
@@ -272,7 +252,6 @@ impl DeployPlan {
         };
 
         let mut env = BTreeMap::new();
-        env.insert("CONTRACT_TYPE".to_string(), contract_type.to_string());
         env.insert("TOKEN_NAME".to_string(), args.name.clone());
         env.insert("TOKEN_SYMBOL".to_string(), args.symbol.clone());
         env.insert("IDENTITY_MODEL".to_string(), identity_model.to_string());
@@ -373,27 +352,6 @@ impl DeployPlan {
             env.insert("PREDECESSOR".to_string(), predecessor.clone());
         }
 
-        match (contract_type, args.period) {
-            ("subscription", Some(period)) if period > 0 => {
-                env.insert("PERIOD".to_string(), period.to_string());
-            }
-            ("subscription", _) => {
-                return Err(DeployError::Config(
-                    "--type subscription needs --period <seconds>: the renewal length is \
-                     immutable on the deployed contract, like every other renewal term."
-                        .into(),
-                ))
-            }
-            (_, Some(_)) => {
-                return Err(DeployError::Config(
-                    "--period belongs to --type subscription. An access licence is bought once \
-                     and does not expire."
-                        .into(),
-                ))
-            }
-            _ => {}
-        }
-
         if !args.wrapper_hashes.is_empty() {
             for hash in &args.wrapper_hashes {
                 validate_hash(hash)
@@ -457,7 +415,6 @@ impl DeployPlan {
     /// deploy prints before it starts.
     pub fn render(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!("type:      {}\n", self.env["CONTRACT_TYPE"]));
         out.push_str(&format!(
             "name:      {} ({})\n",
             self.env["TOKEN_NAME"], self.env["TOKEN_SYMBOL"]

@@ -45,8 +45,8 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 ///
 /// **{Status.Deprecated} means "not recommended for new purchases". It never
 /// means "stop honouring".** An agent that meets a deprecated hash warns and
-/// proceeds; a held token is untouched, its validation is untouched, and its
-/// renewal terms are untouched. A deprecation that could strand a paid licence
+/// proceeds; a held token is untouched and its validation is untouched. A
+/// deprecation that could strand a paid licence
 /// would be a revocation surface by the back door, which this project rules out
 /// for the whole of its contract surface (architecture.md -> "Ownership
 /// invariants"). It is unreachable here because nothing reads this contract on
@@ -93,8 +93,8 @@ contract Rub3CodeRegistry is Ownable2Step {
     /// @notice What a contract carrying this code is *for*, which decides what
     ///         may be done with it. Canonical rub3 code is not the same thing as
     ///         a contract that sells licences: a buyer pointed at the factory,
-    ///         at one of its deployer helpers, or at either registry has the
-    ///         wrong address, not the wrong code.
+    ///         at its deployer helper, or at either registry has the wrong
+    ///         address, not the wrong code.
     ///
     ///         The order is part of the ABI - the wrapper mirrors these values -
     ///         so new roles are appended and existing ones never renumbered.
@@ -170,8 +170,8 @@ contract Rub3CodeRegistry is Ownable2Step {
     ///      needs a table to compute the hash it is about to look up, so the set
     ///      of candidates has to be fetchable in one call before any lookup -
     ///      this is the answer to that bootstrap. Today's canonical set spans
-    ///      four tables: one each for {Rub3Access}, {Rub3Subscription} and
-    ///      {Rub3Factory}, plus the empty one the two deployer helpers and this
+    ///      four tables: one each for {Rub3Access}, {Rub3Factory} and
+    ///      {Rub3Registry}, plus the empty one {Rub3AccessDeployer} and this
     ///      registry share.
     ByteRange[][] private _offsetTables;
 
@@ -427,9 +427,9 @@ contract Rub3CodeRegistry is Ownable2Step {
     ///         **This does not invalidate anything.** The record stays, the
     ///         offsets stay, and an agent that meets this code still recognises
     ///         it as genuine rub3 code - it is told to prefer a newer release,
-    ///         not to refuse this one. Tokens already held, their validation and
-    ///         their renewal terms are all untouched, because nothing on any
-    ///         path that serves a held licence reads this contract at all.
+    ///         not to refuse this one. Tokens already held and their validation
+    ///         are both untouched, because nothing on any path that serves a
+    ///         held licence reads this contract at all.
     ///
     ///         One-way: there is no undo, and a hash cannot be deprecated twice.
     ///

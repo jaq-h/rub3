@@ -33,10 +33,10 @@ import {Rub3License} from "./Rub3License.sol";
 ///
 /// **Nothing this contract can do affects a token, a session, or a payment.**
 /// Delisting removes the badge and the listing. It does not, and structurally
-/// cannot, invalidate an issued token, end a live session, block a renewal, or
-/// change what a licence contract charges. The proof is an absence rather than a
-/// promise: no licence contract in this project reads this contract, holds its
-/// address, or has any function that could be made to. `ownerOf`, `isValid` and
+/// cannot, invalidate an issued token, end a live session, or change what a
+/// licence contract charges. The proof is an absence rather than a promise: no
+/// licence contract in this project reads this contract, holds its address, or
+/// has any function that could be made to. `ownerOf`, `honorsContract` and
 /// `activate` run on state that lives in the licence contract, and this contract
 /// has no path into it - every external call it makes is a `view`.
 ///
@@ -147,7 +147,7 @@ import {Rub3License} from "./Rub3License.sol";
 ///
 /// Ranking is discovery, so it is bound by the same invariant as delisting: an
 /// entry that drops to the bottom of the list has lost placement and nothing
-/// else. Its tokens, its sessions and its renewals are untouched.
+/// else. Its tokens and its sessions are untouched.
 contract Rub3Registry is Ownable2Step {
     /// @notice Where a listing is in its lifecycle. `Unknown` is the zero value,
     ///         so an address nobody registered reads as unknown rather than as
@@ -1032,7 +1032,7 @@ contract Rub3Registry is Ownable2Step {
     /// @notice Withdraw your own listing.
     ///
     ///         **Discovery only.** Every token this contract has issued stays
-    ///         owned, valid, activatable and renewable, and every live session
+    ///         owned, valid and activatable, and every live session
     ///         stays live. See the contract docs for why that is structural
     ///         rather than a promise.
     ///
@@ -1091,9 +1091,9 @@ contract Rub3Registry is Ownable2Step {
     ///         list, which is a power this registry has no reason to hold.
     ///
     ///         Un-recognising a token demotes every entry quoting it on the next
-    ///         read. It takes nothing away from any of them: their tokens, their
-    ///         sessions and their renewals are untouched, and their owners can
-    ///         quote something else whenever they like.
+    ///         read. It takes nothing away from any of them: their tokens and
+    ///         their sessions are untouched, and their owners can quote
+    ///         something else whenever they like.
     function setTokenRecognised(address token, bool recognised) external onlyOwner {
         if (token == address(0)) revert NativeRailIsAlwaysRecognised();
         if (_recognisedToken[token] == recognised) {
@@ -1123,10 +1123,10 @@ contract Rub3Registry is Ownable2Step {
     ///
     ///         **Discovery only, and this is the function where that matters
     ///         most.** It hides an entry from {rankedListings} and marks its
-    ///         card. It does not, and cannot, touch a token, a session, a
-    ///         renewal or a price - nothing in a licence contract reads this
-    ///         one. The worst a compromised owner key does here is make the
-    ///         discovery surface wrong until it is corrected.
+    ///         card. It does not, and cannot, touch a token, a session or a
+    ///         price - nothing in a licence contract reads this one. The worst
+    ///         a compromised owner key does here is make the discovery surface
+    ///         wrong until it is corrected.
     ///
     ///         Reversible with {reinstate}, unlike {Rub3CodeRegistry.deprecate}.
     ///         The asymmetry is the point: a deprecation describes code an agent

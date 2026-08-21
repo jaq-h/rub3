@@ -52,7 +52,7 @@ One block is exempt, via the formatter's own `// forgefmt: disable-next-item` ma
 
 Prefer that marker, scoped to one item, over a config change, whenever a single block needs to keep its shape.
 
-One block keeps its shape without a marker and must go on doing so: the `string[30] memory forbidden` list in `test/Rub3Invariants.t.sol`. `prefer_compact = "none"` and `line_length = 100` leave it one signature per line, and that is the layout the wrapper's mirror test parses when it checks `attest::FORBIDDEN_SIGNATURES` against the Solidity list. A `[fmt]` change that repacked the array would turn that Rust test red rather than drift in silence, but the coupling is worth knowing before touching the settings. The sibling `string[10]` in `test/Rub3CodeRegistry.t.sol` has the same shape and no such reader.
+One block keeps its shape without a marker and must go on doing so: the `string[25] memory forbidden` list in `test/Rub3Invariants.t.sol`. `prefer_compact = "none"` and `line_length = 100` leave it one signature per line, and that is the layout the wrapper's mirror test parses when it checks `attest::FORBIDDEN_SIGNATURES` against the Solidity list. A `[fmt]` change that repacked the array would turn that Rust test red rather than drift in silence, but the coupling is worth knowing before touching the settings. The sibling `string[10]` in `test/Rub3CodeRegistry.t.sol` has the same shape and no such reader.
 
 ## Local testing with Anvil
 
@@ -90,30 +90,11 @@ Deploy `Rub3Access`:
 ```bash
 cd contracts
 
-CONTRACT_TYPE=access \
 TOKEN_NAME="My App License" \
 TOKEN_SYMBOL=MAL \
 IDENTITY_MODEL=0 \
 WRAPPER_HASHES=0x9f2c8b1d3e4a5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8 \
 PRICE=50000000000000000 \
-forge script script/Deploy.s.sol \
-  --rpc-url http://127.0.0.1:8545 \
-  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
-  --broadcast
-```
-
-Deploy `Rub3Subscription` (30-day period):
-
-```bash
-cd contracts
-
-CONTRACT_TYPE=subscription \
-TOKEN_NAME="My App Sub" \
-TOKEN_SYMBOL=MAS \
-IDENTITY_MODEL=0 \
-WRAPPER_HASHES=0x9f2c8b1d3e4a5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8 \
-PRICE=10000000000000000 \
-PERIOD=2592000 \
 forge script script/Deploy.s.sol \
   --rpc-url http://127.0.0.1:8545 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
@@ -149,7 +130,6 @@ Simulate deployment without spending gas:
 ```bash
 source .env
 
-CONTRACT_TYPE=access \
 TOKEN_NAME="My App License" \
 TOKEN_SYMBOL=MAL \
 IDENTITY_MODEL=0 \
@@ -164,7 +144,6 @@ forge script script/Deploy.s.sol \
 ```bash
 source .env
 
-CONTRACT_TYPE=access \
 TOKEN_NAME="My App License" \
 TOKEN_SYMBOL=MAL \
 IDENTITY_MODEL=0 \
@@ -182,7 +161,6 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 
 | Variable | Required | Description |
 |---|---|---|
-| `CONTRACT_TYPE` | yes | `access` or `subscription` |
 | `TOKEN_NAME` | yes | ERC-721 name (e.g. `"My App License"`) |
 | `TOKEN_SYMBOL` | yes | ERC-721 symbol (e.g. `MAL`) |
 | `IDENTITY_MODEL` | yes | `0` = wallet is user_id; `1` = TBA is user_id |
@@ -195,7 +173,6 @@ The contract address appears in the output and at `broadcast/Deploy.s.sol/<chain
 | `SUPPLY_CAP` | no | Max mintable tokens; `0` = uncapped (default). Immutable once deployed |
 | `COOLDOWN_BLOCKS` | no | Blocks between activations per token (default `1800` ≈ 1 hr on Base; floor `15` ≈ 30 s is enforced on-chain) |
 | `OWNER` | no | Contract owner address; defaults to broadcaster |
-| `PERIOD` | subscription only | Subscription length in seconds |
 | `FACTORY` | no | `Rub3Factory` to deploy through. Set it to the **published canonical address** to stamp the protocol fee and get an `isDeployed` row. It also constrains `PREDECESSOR`, which has to be canonical on this path. Unset or `0x0` (**the default**) deploys directly: fee-free and **unrecorded**, free to name any predecessor, and nothing fails to tell you so. The canonical address for a chain is published in [`deployments.json`](deployments.json), and is unpopulated on every chain until launch. See [The protocol fee](#the-protocol-fee) and [A factory deploy may only succeed a canonical predecessor](#a-factory-deploy-may-only-succeed-a-canonical-predecessor) |
 
 `script/DeployFactory.s.sol` deploys the factory itself and takes three variables of its own:
@@ -212,7 +189,7 @@ A contract deployed with `PRICE_TOKEN` sells on two rails at once. `purchase(add
 
 ### Both rails require the exact listed price
 
-**The ETH rail takes the listed price to the wei and nothing else.** `purchase` and `renew` revert `IncorrectPayment(sent, required)` unless `msg.value` equals the price they are charging - `price()` for a purchase, `renewPrice(tokenId)` for a renewal. Over reverts exactly as under does, and **there is no refund path**: the transaction fails rather than settling and paying anything back.
+**The ETH rail takes the listed price to the wei and nothing else.** `purchase` reverts `IncorrectPayment(sent, required)` unless `msg.value` equals `price()`. Over reverts exactly as under does, and **there is no refund path**: the transaction fails rather than settling and paying anything back.
 
 That rule exists for one event: a price that moves between the read and the transaction. An agent reads `price()`, the developer calls `setPrice`, and the agent's transaction lands against terms it never saw. A price *rise* was always rejected. A price *cut* used to go through silently - the buyer paid the stale higher amount, kept nothing back, and the protocol fee was charged on the excess as well.
 
@@ -269,7 +246,7 @@ configures nothing still buys on a bounded rail rather than an unbounded one.
 Nothing here changes what the *contract* accepts - either rail is always
 spendable by anyone who submits a valid transaction.
 
-Change what is offered to *future* buyers (owner only; it reaches nothing already issued, and a subscription snapshots both rails per token at mint):
+Change what is offered to *future* buyers (owner only; it reaches nothing already issued, because a licence is bought once and `ownerOf` is the whole entitlement from then on):
 
 ```bash
 cast send <CONTRACT_ADDRESS> "setTokenPrice(address,uint256)" <USDC> 5000000 \
@@ -345,13 +322,11 @@ cast send <CONTRACT_ADDRESS> \
   --rpc-url $RPC --private-key $SUBMITTER_KEY
 ```
 
-Renewing a subscription is the same shape against `renewAuthorizationNonce(uint256,bytes32)` and `renewWithAuthorization(uint256,(...))`, charging that token's frozen `renewPriceAmount` of its frozen `renewPriceToken` - never the current listing.
-
 ### Why `receiveWithAuthorization`
 
 `signature` is opaque bytes rather than split `(v, r, s)`, which is what lets an EIP-1271 smart-contract wallet buy on the same entry point as an EOA - see [Which payment tokens work](#which-payment-tokens-work) for what that costs.
 
-EIP-3009 defines two ways to spend the same six signed fields. `transferWithAuthorization` may be submitted by anyone *to the token*, which would let an observer move a buyer's USDC into the licence contract without the mint, burning the nonce and leaving the buyer paid-up with nothing. `receiveWithAuthorization` requires `msg.sender == to`, so the licence contract is the only address that can spend the authorization at all, and spending it always mints. Everything else that could be redirected is pinned the same way: the recipient (and, for renewals, the token id) is bound into the derived nonce, replay is the token's single-use nonce, and the licence contract additionally checks that its balance really rose by the price before minting.
+EIP-3009 defines two ways to spend the same six signed fields. `transferWithAuthorization` may be submitted by anyone *to the token*, which would let an observer move a buyer's USDC into the licence contract without the mint, burning the nonce and leaving the buyer paid-up with nothing. `receiveWithAuthorization` requires `msg.sender == to`, so the licence contract is the only address that can spend the authorization at all, and spending it always mints. Everything else that could be redirected is pinned the same way: the recipient is bound into the derived nonce, replay is the token's single-use nonce, and the licence contract additionally checks that its balance really rose by the price before minting.
 
 ### Withdrawing proceeds
 
@@ -430,7 +405,6 @@ FACTORY_INPUT=0xYourLocalFactoryFromStep1
 
 FACTORY_ADDR=$(printf '%s' "$FACTORY_INPUT" | grep -Ex '0x[0-9a-fA-F]{40}' | grep -Ev '^0x0{40}$')
 
-CONTRACT_TYPE=access \
 TOKEN_NAME="My App License" \
 TOKEN_SYMBOL=MAL \
 IDENTITY_MODEL=0 \
@@ -481,7 +455,7 @@ A Safe that cannot receive on either rail is a mainnet factory that can never co
 
 ### How the split works
 
-The fee runs on-chain inside `purchase()` and `renew()`, on **both** payment rails, and it is the same rule on each: `feeBps` of *what arrived* to the treasury, the remainder to the developer.
+The fee runs on-chain inside `purchase()`, on **both** payment rails, and it is the same rule on each: `feeBps` of *what arrived* to the treasury, the remainder to the developer.
 
 - **On the amount received.** ETH: `msg.value`, which the rail requires to equal the listed price exactly (see "Both rails require the exact listed price" above). Stablecoin: the measured balance delta, against a `value` that is the listed amount read at execution. Neither rail lets a buyer choose to pay more than the price, so for any buyer-chosen payment the fee base is the listed price and a listing at zero has no revenue to hide in it. A payment token that credits more than it was asked for is the one remaining way the balance delta can exceed the listed amount, and charging what arrived is the correct reading of that.
 - **Rounding favours the developer.** Integer division, so a fee below one wei (or one of the token's smallest units) is zero and the whole payment is the developer's.
@@ -502,7 +476,7 @@ The two fee sweeps are permissionless because their destination is immutable: th
 
 ### What the fee covers, and what it does not
 
-So a developer knows exactly where they stand: **the fee is charged on value that arrives through the contract's payment functions** - `purchase`, `purchaseWithAuthorization`, `renew`, `renewWithAuthorization`. Value that reaches the contract any other way is never accrued against, and `withdraw` / `withdrawToken` release it in full to the developer. Concretely, that means a direct ERC-20 `transfer` to the licence contract, a `selfdestruct` beneficiary, and a coinbase payout: nothing was taken on them, so all of it is the developer's.
+So a developer knows exactly where they stand: **the fee is charged on value that arrives through the contract's payment functions** - `purchase` and `purchaseWithAuthorization`. Value that reaches the contract any other way is never accrued against, and `withdraw` / `withdrawToken` release it in full to the developer. Concretely, that means a direct ERC-20 `transfer` to the licence contract, a `selfdestruct` beneficiary, and a coinbase payout: nothing was taken on them, so all of it is the developer's.
 
 This is a decided position on where the fee's scope ends, not an implementation gap: charging on unaccounted balance would take a cut of mistaken transfers and airdrops, which are not revenue. `test_token_unaccruedBalanceSweepsEntirelyToTheDeveloper` pins the behaviour. The argument for treating the fee as economic rather than technical is in `architecture.md` → "Why the fee split is shaped this way"; what the factory row buys today versus what is still planned is in "The accepted position on fee-free deployment" below.
 
@@ -518,7 +492,7 @@ A `ProtocolFeeAccrued(address token, uint256 amount, uint256 fee, uint256 develo
 
 `claimFromPredecessor` charges nothing, on purpose: migration must never be taxed. Left unconstrained, `PREDECESSOR` would therefore be a way to launder an entire sale through the registry - sell every licence on a fee-free direct deploy, then deploy the successor **through the factory** naming that contract as predecessor, and every holder claims onto a fee-bearing, `isDeployed`-listed contract with the treasury never paid.
 
-So `deployAccess` and `deploySubscription` accept a predecessor only when it is **canonical**:
+So `deployAccess` accepts a predecessor only when it is **canonical**:
 
 - `address(0)` (no migrations accepted), or
 - a contract in this factory's `isDeployed`, or
@@ -536,7 +510,7 @@ cast call <FACTORY> "isCanonicalPredecessor(address)(bool)" <PREDECESSOR> --rpc-
 
 **The consequence, stated plainly: a pre-factory contract cannot migrate its holders onto a canonical contract through the factory path.** A contract deployed before any factory existed, or deployed directly, is not in any factory's `isDeployed`, so a successor to it cannot be deployed through a factory. That is the cost of closing the route and it is accepted rather than worked around - the alternative is a registry row available at the far end of any fee-free sale. The launch sequencing keeps the cost small: the contracts are not deployed to mainnet or declared ready for use until the registry is ready, so at launch there is no installed base of mainnet holders whose migration onto a canonical successor is being blocked, and a Base Sepolia pilot could never have been a canonical predecessor of a mainnet deploy under any rule, since `isDeployed` is per factory and per chain. It also means every factory deploy at launch names `PREDECESSOR=0x0`, which is the ordinary case and is unaffected by this rule. Migration itself is untouched: deploy the successor **directly** with `PREDECESSOR=<OLD_CONTRACT>`, and holders claim exactly as described in [Migrating holders to a new contract](#migrating-holders-to-a-new-contract). What that successor does not get is a row in `isDeployed`, which is the same thing any direct deploy does not get.
 
-**The check lives on `Rub3Factory` only, not on the deployer helpers.** `Rub3AccessDeployer.deploy` and `Rub3SubscriptionDeployer.deploy` are permissionless and record nothing, so a licence they produce carries no `isDeployed` row and none of the standing the laundering route was after - it is equivalent to deploying the open-source template yourself, which is already free and already fine. Constraining them would restrict a path that grants nothing, while the guard's whole subject is the registry row. It belongs where the registry row is granted. `test_predecessor_deployerHelperIsUnconstrainedAndUnrecorded` pins that split, and `test_predecessor_launderingThroughTheFactoryReverts` is the closed route itself.
+**The check lives on `Rub3Factory` only, not on the deployer helper.** `Rub3AccessDeployer.deploy` is permissionless and records nothing, so a licence it produces carries no `isDeployed` row and none of the standing the laundering route was after - it is equivalent to deploying the open-source template yourself, which is already free and already fine. Constraining it would restrict a path that grants nothing, while the guard's whole subject is the registry row. It belongs where the registry row is granted. `test_predecessor_deployerHelperIsUnconstrainedAndUnrecorded` pins that split, and `test_predecessor_launderingThroughTheFactoryReverts` is the closed route itself.
 
 ### The accepted position on fee-free deployment
 
@@ -552,7 +526,7 @@ Stated plainly, because it is a decided trade-off rather than a gap:
 
 **The fee does not go live ahead of the registry.** The contracts are not deployed to mainnet, and are not declared ready for use, until the registry is ready: the factory and the registry launch together. So there is no window in which a developer pays a live fee for a carrot that does not exist yet.
 
-**Bytecode identity is never evidence of canonical deployment.** Anyone may call a factory's `accessDeployer()` / `subscriptionDeployer()` directly, pass the canonical factory's own `FeeTerms`, and obtain a licence contract whose runtime code is byte-identical to a genuine factory deploy - and which the factory never recorded. Anyone may also deploy their own `Rub3Factory` with their own treasury and any `feeBps` in [200, 300]; its contracts read as fee-bearing and are `isDeployed` **on that factory**. So a verifier must check `isDeployed` on a specific, known factory address, and must never conclude anything from a matching fingerprint or from a non-zero `feeBps()`.
+**Bytecode identity is never evidence of canonical deployment.** Anyone may call a factory's `accessDeployer()` directly, pass the canonical factory's own `FeeTerms`, and obtain a licence contract whose runtime code is byte-identical to a genuine factory deploy - and which the factory never recorded. Anyone may also deploy their own `Rub3Factory` with their own treasury and any `feeBps` in [200, 300]; its contracts read as fee-bearing and are `isDeployed` **on that factory**. So a verifier must check `isDeployed` on a specific, known factory address, and must never conclude anything from a matching fingerprint or from a non-zero `feeBps()`.
 
 ```bash
 # The only check that means anything. <CANONICAL_FACTORY> is not interchangeable
@@ -562,13 +536,13 @@ cast call <CANONICAL_FACTORY> "isDeployed(address)(bool)" <LICENCE> --rpc-url $R
 
 **Where `<CANONICAL_FACTORY>` comes from is [`contracts/deployments.json`](deployments.json)**, keyed by chain id - the one committed place that answers "which factory is canonical here", so the check above has a referent a verifier can reach without trusting whoever handed them an address. Every entry in it is `null` today, because nothing is deployed to a public network yet, and until one is populated "deployed through the factory" still has no verifiable referent outside a deployment you performed yourself. A `null` entry means there is no canonical factory on that chain; it never means "use any factory you were given".
 
-### Why the factory deploys through two helper contracts
+### Why the factory deploys through a helper contract
 
-`Rub3Factory` cannot `new` both licence contracts itself: a contract's runtime code has to carry the creation code of everything it deploys, and the two together are over 30 KB against a 24,576-byte runtime limit. A `new` reached only from a *constructor* lands in the creation code, which is discarded after deployment, so the factory builds one `Rub3AccessDeployer` and one `Rub3SubscriptionDeployer` in its own constructor and keeps their addresses as immutables. Consequences worth knowing:
+`Rub3Factory` cannot `new` the licence contract itself: a contract's runtime code has to carry the creation code of everything it deploys, and `Rub3Access`'s alone is over 16 KB against a 24,576-byte runtime limit, which would leave the factory almost nothing for itself. A `new` reached only from a *constructor* lands in the creation code, which is discarded after deployment, so the factory builds one `Rub3AccessDeployer` in its own constructor and keeps its address as an immutable. Consequences worth knowing:
 
-- **The factory's own fingerprint does not pin the licence implementations.** Its runtime code contains neither. An auditor confirms which implementations a factory deploys by fetching the code at `accessDeployer()` and `subscriptionDeployer()` and comparing those against the manifest, then comparing a deployed licence against `Rub3Access` / `Rub3Subscription`.
-- **The deployers are callable by anyone, and that is not a hole.** Calling one directly yields a licence contract the factory never recorded, which is exactly what deploying the template directly already gets you. Trust comes from `isDeployed`, never from who created the contract.
-- **The factory's initcode is bounded by EIP-3860 (49,152 bytes) and is not far off it.** `test_factory_initcodeFitsUnderEip3860` guards it, so growing the licence contracts fails a test rather than producing an undeployable factory.
+- **The factory's own fingerprint does not pin the licence implementation.** Its runtime code does not contain it. An auditor confirms which implementation a factory deploys by fetching the code at `accessDeployer()` and comparing it against the manifest, then comparing a deployed licence against `Rub3Access`.
+- **The deployer is callable by anyone, and that is not a hole.** Calling it directly yields a licence contract the factory never recorded, which is exactly what deploying the template directly already gets you. Trust comes from `isDeployed`, never from who created the contract.
+- **The factory's initcode is bounded by EIP-3860 (49,152 bytes), because it carries the deployer's creation code - and so the licence's - inside it.** It is around 22 KB today, so there is headroom, and `test_factory_initcodeFitsUnderEip3860` guards the bound: growing the licence contract fails a test rather than producing an undeployable factory.
 
 ## Managing the wrapper hash set after deployment
 
@@ -596,7 +570,7 @@ cast send <CONTRACT_ADDRESS> \
 
 Revocation is terminal - a revoked hash can never be re-added, which is what makes the set auditable. Correct a mistaken revocation by publishing a fresh build and adding its hash.
 
-**Revoking a binary hash never affects token validity.** `ownerOf`, `isValid`, and `activate` do not read the hash set. The holder downloads a patched build and their same license works.
+**Revoking a binary hash never affects token validity.** `ownerOf`, `honorsContract` and `activate` do not read the hash set. The holder downloads a patched build and their same license works.
 
 Read the set:
 
@@ -610,7 +584,7 @@ cast call <CONTRACT_ADDRESS> "revocationReason(bytes32)(string)" <H> --rpc-url $
 
 For contract bugs, paid major versions, and chain migration. Both sides opt in, and the holder does the moving.
 
-1. Deploy the successor with `PREDECESSOR=<OLD_CONTRACT>` (immutable - a contract deployed without it accepts no claims). Through a factory, the predecessor must also be canonical - see [A factory deploy may only succeed a canonical predecessor](#a-factory-deploy-may-only-succeed-a-canonical-predecessor); a direct deploy may name any predecessor at all. The successor must be the same model as the predecessor: `CONTRACT_TYPE=access` with a subscription predecessor, or `CONTRACT_TYPE=subscription` with an access one, reverts at deploy with `IncompatiblePredecessor(address)`. Cross-model succession is impossible by construction, not a judgement call - both constructors probe `period()` as the discriminator, the subscription requiring the predecessor to answer it and the access license requiring it to fail.
+1. Deploy the successor with `PREDECESSOR=<OLD_CONTRACT>` (immutable - a contract deployed without it accepts no claims). Through a factory, the predecessor must also be canonical - see [A factory deploy may only succeed a canonical predecessor](#a-factory-deploy-may-only-succeed-a-canonical-predecessor); a direct deploy may name any predecessor at all. An address that has no code, or that cannot answer `successor()`, reverts at deploy with `IncompatiblePredecessor(address)`: `predecessor` is immutable, so a mistyped one would brick every holder's claim forever with redeployment the only remedy.
 2. Point the old contract at it:
 
    ```bash
@@ -625,14 +599,7 @@ For contract bugs, paid major versions, and chain migration. Both sides opt in, 
      --rpc-url $RPC --private-key $HOLDER_KEY
    ```
 
-   Subscription holders should read the successor's terms first, because the claim is the moment they accept them:
-
-   ```bash
-   cast call <NEW_CONTRACT> "period()(uint256)" --rpc-url $RPC
-   cast call <NEW_CONTRACT> "price()(uint256)"  --rpc-url $RPC
-   ```
-
-Nobody else can do step 3 - not the old contract's owner, not the new one's. The old token is not burned or moved (there is no way to do either); the holder ends up with both, and the old contract keeps validating its tokens forever. Subscriptions carry their remaining time and their snapshotted `renewPrice` across, but **not** `period`, which is immutable per contract: the successor's own `period` decides what the carried price buys from then on, so a successor with a shorter period raises the effective rate without the price moving. That takes nothing already granted - the old token keeps validating at its original terms forever - which is why step 3 is the holder's decision and why they should read the successor's `period` and `price` first.
+Nobody else can do step 3 - not the old contract's owner, not the new one's. The old token is not burned or moved (there is no way to do either); the holder ends up with both, and the old contract keeps validating its tokens forever. A claim carries no terms across, because a licence has none to carry: it is bought once, and holding it is the whole entitlement on either contract. Claiming is still the holder's decision alone, and nobody's licence changes if they never make it.
 
 Because this is a snapshot-claim rather than burn-to-mint, **migration can duplicate a seat**, and that is accepted rather than fixed. The holder can claim onto v2, sell the v1 token, and both stay honored via `honorsContract`, so the number of concurrently honored seats is not bounded by either contract's `supplyCap`. Burn-to-mint would bound it, but only by making the predecessor expose a burn - the revocation surface that must not exist - so the no-revocation guarantee takes priority and nothing in the contracts bounds, tracks, or invalidates the duplicate. Size a successor's `SUPPLY_CAP` with that in mind, or deploy v2 with no `PREDECESSOR` at all (a paid major version), which accepts no claims.
 
@@ -666,11 +633,11 @@ Each entry is a `{"start": <byte offset into the runtime code>, "length": <bytes
 
 Step 2 is not optional and it is not a refinement. Skipping it fails 100% of the time.
 
-Measured on this branch, `Rub3Access` declares seven immutables inherited from `Rub3License` (`identityModel`, `tbaImplementation`, `supplyCap`, `predecessor`, `cooldownBlocks`, and the §2.3 fee terms `feeBps` and `treasury`), and `Rub3Subscription` declares those seven plus its own `period`, eight in total. Because a single immutable is read at several places in the runtime code, the slot count is higher than the variable count: `Rub3Access` carries 18 ranges (576 bytes) and `Rub3Subscription` 22 (704 bytes). Those numbers move whenever the code that reads an immutable moves, which is also whenever the fingerprint moves, so the manifest records both together and the drift gate compares both.
+Measured on this branch, `Rub3Access` declares seven immutables, all inherited from `Rub3License`: `identityModel`, `tbaImplementation`, `supplyCap`, `predecessor`, `cooldownBlocks`, and the §2.3 fee terms `feeBps` and `treasury`. Because a single immutable is read at several places in the runtime code, the slot count is higher than the variable count: `Rub3Access` carries 18 ranges, 576 bytes. Those numbers move whenever the code that reads an immutable moves, which is also whenever the fingerprint moves, so the manifest records both together and the drift gate compares both.
 
-`Rub3Factory` is fingerprinted too, with five immutables of its own (`feeBps`, `treasury`, `accessDeployer`, `subscriptionDeployer`, and `previousFactory`) across 12 ranges. `Rub3Registry`, the §3.2 discovery registry, carries one immutable (`factory`, the canonical factory whose deploys it will list) across 3 ranges, because a single immutable read at three places in the runtime code reserves a slot at each. `Rub3AccessDeployer`, `Rub3SubscriptionDeployer` and `Rub3CodeRegistry` have none, so their `immutable_ranges` are empty and their runtime code hashes directly - which is what makes the two deployer helpers the thing to compare a factory's declared deployers against.
+`Rub3Factory` is fingerprinted too, with four immutables of its own (`feeBps`, `treasury`, `accessDeployer` and `previousFactory`) across 10 ranges. `Rub3Registry`, the §3.2 discovery registry, carries one immutable (`factory`, the canonical factory whose deploys it will list) across 3 ranges, because a single immutable read at three places in the runtime code reserves a slot at each. `Rub3AccessDeployer` and `Rub3CodeRegistry` have none, so their `immutable_ranges` are empty and their runtime code hashes directly - which is what makes the deployer helper the thing to compare a factory's declared `accessDeployer()` against.
 
-Zeroing an immutable range destroys the constructor argument it held, which is the point: the fingerprint answers "is this the code I expect", not "was this deployed with the terms I expect". Read the terms separately from the contract's own getters (`supplyCap()`, `period()`, `predecessor()`, and the rest), which is where they are authoritative anyway.
+Zeroing an immutable range destroys the constructor argument it held, which is the point: the fingerprint answers "is this the code I expect", not "was this deployed with the terms I expect". Read the terms separately from the contract's own getters (`supplyCap()`, `predecessor()`, `cooldownBlocks()`, and the rest), which is where they are authoritative anyway.
 
 The wrapper performs exactly this comparison before it buys: `crates/rub3-wrapper/src/attest.rs` pins these fingerprints and ranges in the binary and refuses to purchase on a miss. The manual form of the same three steps is under "Auditing the invariants before buying" below; [../implementation.md](../implementation.md) §2.6 records what is built.
 
@@ -744,7 +711,7 @@ Splitting that into a separate commit or pull request defeats the gate, which ex
 
 New contracts under `contracts/src/` are picked up automatically, at any depth and including a second contract declared inside an existing file. Discovery never reads Solidity: it walks the artifacts `forge build --force` just wrote and keeps every one whose `.metadata.settings.compilationTarget` names a file under `contracts/src/`, which is also where the manifest's `source` field comes from. That set is the build's own account of what it compiled, so a declaration written in an unusual style cannot go unfingerprinted, a contract in `test/` or `script/` cannot leak in, and a contract deleted in the same commit cannot linger (the `--force` build clears the artifact directory first). Abstract bases such as `Rub3License` and interfaces such as `IRub3Predecessor` appear there too, but compile to an empty `deployedBytecode` object and are dropped on that basis rather than by looking for the `abstract` keyword.
 
-Libraries are excluded as well, and deliberately so: the manifest covers the deployable contracts an agent verifies - the licence contracts, since §2.3 `Rub3Factory` and its two deployer helpers, and since §2.9 `Rub3CodeRegistry`, whose row is what lets a wrapper check the registry before believing it - and a library is not one. It also could not be published honestly here. A library compiles to real runtime code whose leading 20 bytes are a zeroed self-address placeholder that the deployer patches with the library's own address, and that placeholder is not an immutable, so it would appear in no `immutable_ranges` list and the three-step comparison above would fail every time with nothing in the manifest to explain it. An empty `deployedBytecode` object does not catch this case, so the gate reads each artifact's AST and drops anything whose `contractKind` is `library`. That is what `ast = true` in [`foundry.toml`](foundry.toml) is for. It selects extra output rather than changing a compilation input: it is absent from solc's `.metadata.settings`, and enabling it moved no fingerprint, measured rather than assumed. If the AST is ever missing the gate stops rather than guessing, since guessing would mean publishing a library.
+Libraries are excluded as well, and deliberately so: the manifest covers the deployable contracts an agent verifies - the licence contracts, since §2.3 `Rub3Factory` and its deployer helper, and since §2.9 `Rub3CodeRegistry`, whose row is what lets a wrapper check the registry before believing it - and a library is not one. It also could not be published honestly here. A library compiles to real runtime code whose leading 20 bytes are a zeroed self-address placeholder that the deployer patches with the library's own address, and that placeholder is not an immutable, so it would appear in no `immutable_ranges` list and the three-step comparison above would fail every time with nothing in the manifest to explain it. An empty `deployedBytecode` object does not catch this case, so the gate reads each artifact's AST and drops anything whose `contractKind` is `library`. That is what `ast = true` in [`foundry.toml`](foundry.toml) is for. It selects extra output rather than changing a compilation input: it is absent from solc's `.metadata.settings`, and enabling it moved no fingerprint, measured rather than assumed. If the AST is ever missing the gate stops rather than guessing, since guessing would mean publishing a library.
 
 The manifest keys contracts by name, so a name declared in two different files under `contracts/src/` fails the gate, naming both files, rather than being silently collapsed to whichever one sorted last. Give every contract under `contracts/src/` a unique name; the migration path is a new deploy of a differently named contract behind the successor pointer, not a second `Rub3Access` in a `v2/` directory.
 
@@ -758,7 +725,7 @@ The manifest keys contracts by name, so a name declared in two different files u
 
 - **A record says the code is a genuine rub3 release. It says nothing about a deployment.** Which address runs that code, who deployed it, what the immutables behind the mask were set to, and how the owner will behave are all outside it. "Was this deployed through the canonical factory" is `Rub3Factory.isDeployed` on a specific factory address, and the two questions must not be run together.
 - **`Deprecated` means "not recommended for new purchases". It never means "stop honouring".** The record stays whole, offsets included, and a held token is untouched - the registry has no status that could invalidate one, and nothing on any launch path reads it. An agent meeting a deprecated hash warns and buys.
-- **Nothing can be removed, overwritten, or moved backwards.** `publish` reverts on a hash that already has a record, deprecated ones included. There is no proxy, no removal, and no un-deprecate. A compromise of the owner key can therefore only *add*, and every addition is a permanent public `Published` event. `test/Rub3CodeRegistry.t.sol` asserts the removal and rewrite surfaces are absent from the deployed runtime bytecode, the way the licence contracts' forbidden selectors are - with its own 10-name list, because the shared 30-name list is about tokens and says nothing about a registry.
+- **Nothing can be removed, overwritten, or moved backwards.** `publish` reverts on a hash that already has a record, deprecated ones included. There is no proxy, no removal, and no un-deprecate. A compromise of the owner key can therefore only *add*, and every addition is a permanent public `Published` event. `test/Rub3CodeRegistry.t.sol` asserts the removal and rewrite surfaces are absent from the deployed runtime bytecode, the way the licence contracts' forbidden selectors are - with its own 10-name list, because the shared 25-name list is about tokens and says nothing about a registry.
 
 ### Publishing a release
 
@@ -788,7 +755,7 @@ cast send <CODE_REGISTRY> "deprecate(bytes32,string)" \
 
 ### Reading it, and the offsets bootstrap
 
-Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. The registry breaks that circle by publishing the *distinct* tables its releases use - five across today's canonical set, one each for `Rub3Access`, `Rub3Subscription`, `Rub3Factory` and `Rub3Registry` plus the empty one the two deployer helpers and the code registry share - so a verifier fetches the short candidate list once, hashes under each, and looks each result up.
+Computing a masked code hash needs the immutable ranges, and finding the record needs the hash. The registry breaks that circle by publishing the *distinct* tables its releases use - four across today's canonical set, one each for `Rub3Access`, `Rub3Factory` and `Rub3Registry` plus the empty one `Rub3AccessDeployer` and the code registry share - so a verifier fetches the short candidate list once, hashes under each, and looks each result up.
 
 **On a purchase path, read a bounded window of the newest tables.** How many tables exist is the owner key's to choose, and the append-only bound on that key covers what it can publish, not how long a buyer waits for it. `latestOffsetTables(count)` returns at most `count` tables newest-first, clamped, so a verifier asks for the number of candidates it is willing to try and never pays to transfer or decode more; each surviving candidate then costs its own `record` round trip, so hold the same bound over the loop as well - a node need not honour what it was asked for. The wrapper reads `latestOffsetTables(attest::MAX_CANDIDATE_OFFSET_TABLES)` and caps the lookups at the same number.
 
@@ -832,13 +799,13 @@ Neither is evidence for the other's question. Canonical *code* says nothing abou
 
 ### Discovery, never validity
 
-This is the invariant the contract is built around, and it is the one to check first when reading it. **Delisting removes the badge and the listing. It cannot invalidate a token, end a session, block a renewal, or change what a licence contract charges.**
+This is the invariant the contract is built around, and it is the one to check first when reading it. **Delisting removes the badge and the listing. It cannot invalidate a token, end a session, or change what a licence contract charges.**
 
-The proof is an absence rather than a promise. No licence contract in this project reads the registry, holds its address, or has any function that could be made to; `ownerOf`, `isValid` and `activate` run on state that lives in the licence contract, and every external call the registry makes is a `view`. `test/Rub3Registry.t.sol` asserts it behaviourally rather than leaving it as a claim: `test_delisting_cannotTouchAHeldTokenOrALiveSession` pulls every discovery lever at once - the owner delists, the registry suspends, and the payment token stops being recognised - and then measures the held token, its validation, its live session, a fresh activation, a fresh purchase and a renewal, all of which survive. `test_registryWrites_leaveTheLicenseContractUntouched` makes the same claim from the other side, snapshotting nine pieces of licence state across every registry write.
+The proof is an absence rather than a promise. No licence contract in this project reads the registry, holds its address, or has any function that could be made to; `ownerOf`, `honorsContract` and `activate` run on state that lives in the licence contract, and every external call the registry makes is a `view`. `test/Rub3Registry.t.sol` asserts it behaviourally rather than leaving it as a claim: `test_delisting_cannotTouchAHeldTokenOrALiveSession` pulls every discovery lever at once - the owner delists, the registry suspends, and the payment token stops being recognised - and then measures the held token, its validation, its live session, a fresh activation, a fresh purchase and a transfer, all of which survive. `test_registryWrites_leaveTheLicenseContractUntouched` makes the same claim from the other side, snapshotting nine pieces of licence state across every registry write.
 
 That is what bounds a compromise of the registry's owner key: it can hide listings, restore them, and reorder them. It cannot take away anything anyone paid for. There is no state here whose worst case is worse than "the discovery surface is wrong until it is fixed".
 
-`Rub3Registry` is deliberately **not** one of the targets in the forbidden-selector audit under [Auditing the invariants before buying](#auditing-the-invariants-before-buying). That list is about tokens - burns, seizures, pauses, renewal-term setters - and asserting it against a contract that holds no tokens would be a weak claim dressed as a strong one. The registry's invariant is a different one and is tested where it means something.
+`Rub3Registry` is deliberately **not** one of the targets in the forbidden-selector audit under [Auditing the invariants before buying](#auditing-the-invariants-before-buying). That list is about tokens - burns, seizures, pauses, forced migration - and asserting it against a contract that holds no tokens would be a weak claim dressed as a strong one. The registry's invariant is a different one and is tested where it means something.
 
 ### What may be listed
 
@@ -994,9 +961,6 @@ for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
            "forceTransfer(address,address,uint256)" "seize(uint256)" "clawback(uint256)" \
            "pause()" "unpause()" "paused()" "setPaused(bool)" \
            "revoke(uint256)" "revokeToken(uint256)" "invalidate(uint256)" \
-           "setExpiresAt(uint256,uint256)" "setRenewPrice(uint256,uint256)" \
-           "setRenewPriceToken(uint256,address)" "setRenewPriceAmount(uint256,uint256)" \
-           "setPeriod(uint256)" \
            "upgradeTo(address)" "upgradeToAndCall(address,bytes)" "initialize()" \
            "setWrapperHash(bytes32)" "removeWrapperHash(bytes32)" \
            "unrevokeWrapperHash(bytes32)" \
@@ -1008,7 +972,7 @@ for SIG in "burn(uint256)" "burn(address,uint256)" "burnFrom(address,uint256)" \
 done
 ```
 
-Silence means exactly one thing: none of those 30 known revocation selectors appears in the deployed runtime bytecode. **It is not evidence that no revocation surface exists**, and it should never be reported as though it were. The list is a blacklist of *names*, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, or something as dull as `reconcileLedger(uint256,address)` - and pass this scan in silence. The scan also weakens with every legitimate function the contracts gain, because one more plausible-looking owner function is far less conspicuous among fifteen than among six.
+Silence means exactly one thing: none of those 25 known revocation selectors appears in the deployed runtime bytecode. **It is not evidence that no revocation surface exists**, and it should never be reported as though it were. The list is a blacklist of *names*, and a modified copy of these templates can expose the same power under a name nobody guessed - `seizeToken(uint256)`, or something as dull as `reconcileLedger(uint256,address)` - and pass this scan in silence. The scan also weakens with every legitimate function the contracts gain, because one more plausible-looking owner function is far less conspicuous among fifteen than among six.
 
 Its real job is the failure message. When the fingerprint comparison rejects a contract, this scan is what turns "unrecognised code" into "the contract exposes `seize(uint256)`" - a finding a human can act on. That is the whole of its value, and the wrapper keeps it for exactly that reason and labels it a diagnostic in the code.
 
@@ -1016,7 +980,7 @@ Sanity-check the method itself against a selector that *is* there - `cast sig "a
 
 ## Planned contract evolution
 
-The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern, per-token renewal snapshot), the §2.2 stablecoin rail, the §2.3 factory and protocol fee, and the §2.9 code registry, all of which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
+The contracts above are the current, working set - including the §2.4 ownership invariants (append-only hash set, successor pattern), the §2.2 stablecoin rail, the §2.3 factory and protocol fee, and the §2.9 code registry, all of which have landed. The agent-first plan (see [../implementation.md](../implementation.md)) adds the following - all as **new deploys**, never in-place upgrades:
 
 - **`contentURI`** (§3.1) - content-addressed binary location on-chain, making the contract a complete distribution record
 - **Concurrent seats** (§3.4) - `maxConcurrentSessions[tokenId] = K` generalizing `activeSessionId` for agent fleets

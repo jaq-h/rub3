@@ -331,9 +331,9 @@ pub const EXIT_PRICE_ABOVE_POLICY: i32 = 22;
 ///
 /// - `contract=0x... canonical=<name> sells_licences=false` - the code *is*
 ///   canonical rub3 code, but at an address that sells no licences (the
-///   factory, one of its deployer helpers, the code registry, or the
-///   discovery registry). The build is pointed at the wrong address; check
-///   what it was packed with.
+///   factory, its deployer helper, the code registry, or the discovery
+///   registry). The build is pointed at the wrong address; check what it was
+///   packed with.
 /// - `contract=0x... code_bytes=N registry=<who> exposed=<a>|<b>` - no
 ///   authority this build could reach vouched for the code. That is a modified
 ///   copy, or a release newer than every authority it asked. `registry` says
@@ -2344,7 +2344,7 @@ mod tests {
             refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
                 code_len: 4096,
                 // `burn(address,uint256)` carries a comma of its own, which is
-                // the whole point: 10 of the 30 forbidden signatures do, so a
+                // the whole point: 6 of the 25 forbidden signatures do, so a
                 // comma-separated list is not recoverable by the orchestrator
                 // the detail line exists for.
                 exposed: vec!["seize(uint256)", "burn(address,uint256)", "pause()"],

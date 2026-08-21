@@ -101,7 +101,7 @@
     },
     "Rub3AccessDeployer": {
       "source": "src/Rub3Factory.sol",
-      "deployed_bytecode_sha256": "6a1e8ae8ec90d5c2204184b92ea15111f6cf4889a05cd8316e8758a190b7647a",
+      "deployed_bytecode_sha256": "5e22032d2ec7ef17fa18d81a01a9a07e5c9ae41a749b2445a282df3acecc7639",
       "immutable_ranges": []
     },
     "Rub3CodeRegistry": {
@@ -111,54 +111,46 @@
     },
     "Rub3Factory": {
       "source": "src/Rub3Factory.sol",
-      "deployed_bytecode_sha256": "0b03cc18efb8dd487b52d57bc28b7a3e18bb7575f6575c20810c8517d77f4076",
+      "deployed_bytecode_sha256": "60cf48c8baf4f9f35eb3a780c5c55e106da17a57c13b02fe0908c8f11cb78358",
       "immutable_ranges": [
         {
-          "start": 249,
+          "start": 212,
           "length": 32
         },
         {
-          "start": 338,
+          "start": 301,
           "length": 32
         },
         {
-          "start": 433,
+          "start": 396,
           "length": 32
         },
         {
-          "start": 472,
+          "start": 548,
           "length": 32
         },
         {
-          "start": 643,
+          "start": 707,
           "length": 32
         },
         {
-          "start": 802,
+          "start": 793,
           "length": 32
         },
         {
-          "start": 998,
+          "start": 837,
           "length": 32
         },
         {
-          "start": 1239,
+          "start": 1047,
           "length": 32
         },
         {
-          "start": 1720,
+          "start": 1694,
           "length": 32
         },
         {
-          "start": 1759,
-          "length": 32
-        },
-        {
-          "start": 2010,
-          "length": 32
-        },
-        {
-          "start": 2049,
+          "start": 1741,
           "length": 32
         }
       ]
@@ -180,105 +172,6 @@
           "length": 32
         }
       ]
-    },
-    "Rub3Subscription": {
-      "source": "src/Rub3Subscription.sol",
-      "deployed_bytecode_sha256": "2eab4428ee29c805b4e151a0068673910e7ea4a8e45a760b61ec745f1aba65a1",
-      "immutable_ranges": [
-        {
-          "start": 1284,
-          "length": 32
-        },
-        {
-          "start": 1628,
-          "length": 32
-        },
-        {
-          "start": 1812,
-          "length": 32
-        },
-        {
-          "start": 2169,
-          "length": 32
-        },
-        {
-          "start": 2488,
-          "length": 32
-        },
-        {
-          "start": 2657,
-          "length": 32
-        },
-        {
-          "start": 2990,
-          "length": 32
-        },
-        {
-          "start": 3346,
-          "length": 32
-        },
-        {
-          "start": 4973,
-          "length": 32
-        },
-        {
-          "start": 5906,
-          "length": 32
-        },
-        {
-          "start": 6557,
-          "length": 32
-        },
-        {
-          "start": 6614,
-          "length": 32
-        },
-        {
-          "start": 6784,
-          "length": 32
-        },
-        {
-          "start": 6828,
-          "length": 32
-        },
-        {
-          "start": 7303,
-          "length": 32
-        },
-        {
-          "start": 7449,
-          "length": 32
-        },
-        {
-          "start": 7984,
-          "length": 32
-        },
-        {
-          "start": 8726,
-          "length": 32
-        },
-        {
-          "start": 9736,
-          "length": 32
-        },
-        {
-          "start": 9778,
-          "length": 32
-        },
-        {
-          "start": 9882,
-          "length": 32
-        },
-        {
-          "start": 11420,
-          "length": 32
-        }
-      ]
-    },
-    "Rub3SubscriptionDeployer": {
-      "source": "src/Rub3Factory.sol",
-      "deployed_bytecode_sha256": "218f4165d090e7b7109507b178a50a03b1ad63fb65213ec10ffecc19a4de4429",
-      "immutable_ranges": []
     }
   }
 }

@@ -10,7 +10,7 @@ This file owns orientation: enough to understand rub3, build it, test it, run it
 ## How it works
 
 1. Developer packages their binary inside the rub3 wrapper
-2. Developer deploys an ERC-721 license contract on Base (`Rub3Access` or `Rub3Subscription`)
+2. Developer deploys an ERC-721 license contract on Base (`Rub3Access`)
 3. User launches the wrapped app - the wrapper checks for a valid cached session
 4. If no session (or session expired): the wrapper opens a native activation window, verifies on-chain ownership, and requests a wallet signature
 5. On success: session is cached locally, wrapped binary launches
@@ -103,14 +103,12 @@ rub3/
 ├── contracts/                        # Foundry project - ERC-721 license contracts
 │   ├── src/
 │   │   ├── Rub3License.sol           # Abstract base (ERC-721 + Enumerable + Ownable)
-│   │   ├── Rub3Access.sol            # One-time purchase license
-│   │   ├── Rub3Subscription.sol      # Time-bounded license (expiresAt, renew, isValid)
-│   │   ├── Rub3Factory.sol           # §2.3 - fee-stamping deploys + isDeployed, and its two deployer helpers
+│   │   ├── Rub3Access.sol            # The license: one-time purchase, valid while held
+│   │   ├── Rub3Factory.sol           # §2.3 - fee-stamping deploys + isDeployed, and its deployer helper
 │   │   ├── Rub3CodeRegistry.sol      # §2.9 - append-only record of which masked code hashes are genuine releases
 │   │   └── Rub3Registry.sol          # §3.2 - discovery: which apps exist and are listable. NOT the code registry
 │   ├── test/
 │   │   ├── Rub3Access.t.sol
-│   │   ├── Rub3Subscription.t.sol
 │   │   ├── Rub3Invariants.t.sol      # Ownership invariants (§2.4) + no-revocation bytecode audit
 │   │   ├── Rub3TokenPurchase.t.sol   # Stablecoin rail (§2.2): EIP-3009 authorization, replay, front-running
 │   │   ├── Rub3Factory.t.sol         # §2.3: fee immutability, exact split on both rails, direct deploys
@@ -120,7 +118,7 @@ rub3/
 │   │       ├── MockEIP3009Token.sol  # Faithful EIP-3009 stand-in for USDC, plus its negative fixtures
 │   │       └── NonCanonicalRub3Access.sol # §2.6 - a licence deliberately not canonical; never move to src/
 │   ├── script/
-│   │   ├── Deploy.s.sol              # Deploy either contract to any EVM chain, directly or via FACTORY
+│   │   ├── Deploy.s.sol              # Deploy a Rub3Access to any EVM chain, directly or via FACTORY
 │   │   └── DeployFactory.s.sol       # Deploy a Rub3Factory (FEE_BPS + TREASURY required; PREVIOUS_FACTORY optional)
 │   ├── foundry.toml
 │   ├── remappings.txt                # Import remappings pinned in-tree (a reproducibility input)
@@ -243,7 +241,7 @@ To build or deploy against a factory you deployed yourself, name it with
 
 ```bash
 cargo run -p rub3-cli -- deploy \
-  --type access --name "My App License" --symbol MAL \
+  --name "My App License" --symbol MAL \
   --identity access --price-eth 0.05 --chain base \
   --broadcast -- --private-key $DEPLOYER_KEY
 ```
@@ -553,7 +551,7 @@ because the two causes call for different responses:
 
 | Detail line | What happened | What to do |
 |---|---|---|
-| `contract=0x... canonical=NAME sells_licences=false` | The code **is** canonical rub3 code, at an address that sells no licences - the factory, one of its deployer helpers, the code registry, or the discovery registry | Wrong address. Check what the build is pointed at |
+| `contract=0x... canonical=NAME sells_licences=false` | The code **is** canonical rub3 code, at an address that sells no licences - the factory, its deployer helper, the code registry, or the discovery registry | Wrong address. Check what the build is pointed at |
 | `contract=0x... code_bytes=N registry=WHO exposed=A\|B` | No authority vouched for the code: a modified copy, or a release newer than every authority this build could reach | Verify the address, or use a build packed with that release |
 
 `registry` says what the second authority contributed, and is three-valued
@@ -676,16 +674,16 @@ the authority on what each covers, what it cost, and what comes next.
 - **Headless front door (§2.1)** - `--headless` runs enumerate → purchase → activate → sign → verify → persist → launch in one call, with stable exit codes and a `Signer` trait for KMS- or enclave-backed keys
 - **On-chain reads** - `ownerOf`, price on both rails, supply, enumeration, cooldown, session id, receipt polling, via alloy
 - **Identity models** - `access` and `account`, with local ERC-6551 TBA derivation signed into the session preimage
-- **Contracts** - `Rub3Access` and `Rub3Subscription` (ERC-721 + Enumerable, purchase, renew, `isValid`, tier-3 `activate` + cooldown), 293 forge tests
-- **Stablecoin rail (§2.2)** - USDC purchases and renewals through EIP-3009 authorizations anyone may submit, including from EIP-1271 smart-contract wallets, so an agent holding no ETH can still buy the price
+- **Contracts** - `Rub3Access`, the one licence model: ERC-721 + Enumerable, bought once on either payment rail, valid for as long as it is held, with tier-3 `activate` + cooldown. 255 forge tests
+- **Stablecoin rail (§2.2)** - USDC purchases through EIP-3009 authorizations anyone may submit, including from EIP-1271 smart-contract wallets, so an agent holding no ETH can still buy the price
 - **`Rub3Factory` + protocol fee (§2.3)** - immutable fee terms stamped into every canonical deploy and recorded in `isDeployed`; direct deploys stay fee-free and unrecorded. The registry the row is for is built (§3.2) and the marketplace (§4.3) is not, and neither is deployed: the factory and the registry launch together, so nothing reaches mainnet or is declared ready before then
-- **Ownership invariants (§2.4)** - append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor`, the contract-side `honorsContract` trust rule, per-token renewal snapshots, and a no-revocation bytecode audit over four deployed contracts
-- **Reproducible builds** - canonical bytecode fingerprints for seven contracts, gated in CI
+- **Ownership invariants (§2.4)** - append-only wrapper hash set with on-chain revocation reasons, opt-in successor pointer with holder-initiated `claimFromPredecessor`, the contract-side `honorsContract` trust rule, and a no-revocation bytecode audit over three deployed contracts
+- **Reproducible builds** - canonical bytecode fingerprints for five contracts, gated in CI
 - **Pre-purchase contract attestation (§2.6, §2.8, §2.9)** - before anything is spent, from either front door, the wrapper compares the contract's masked code hash against fingerprints pinned in the binary and refuses on a miss, catching a modified copy that a selector-name scan passes in silence. An agent gets exit 23; a person gets a screen saying what was found and what to do about it, in place of the purchase screen rather than beside it. It gates purchases only, never launches
 - **`Rub3CodeRegistry` (§2.9)** - the append-only on-chain authority a wrapper asks when its own table misses, so a release newer than the binary is told apart from a modified copy. Nothing can remove, overwrite or invalidate a record, `Deprecated` means "not recommended" and never strands a licence, and the registry's own code is fingerprinted before its answer is believed. Built and tested; unpopulated in `deployments.json`, so it is inert until a deploy exists
-- **`Rub3Registry` (§3.2)** - the *discovery* registry, and not the code registry above: which apps exist, which are listable, and in what order. Only a canonical factory deploy is listable, and only by the contract's own owner; each entry is an agent card assembled from live reads; entries priced in a recognised token rank above ones that are not, with the quote read live on every call so a contract that reprices after registering ranks on what it quotes now. Delisting is discovery and never validity - a held token, its session and its renewal are untouched, tested rather than asserted. Built and tested; nothing deployed, since the factory and the registry launch together
+- **`Rub3Registry` (§3.2)** - the *discovery* registry, and not the code registry above: which apps exist, which are listable, and in what order. Only a canonical factory deploy is listable, and only by the contract's own owner; each entry is an agent card assembled from live reads; entries priced in a recognised token rank above ones that are not, with the quote read live on every call so a contract that reprices after registering ranks on what it quotes now. Delisting is discovery and never validity - a held token and its session are untouched, tested rather than asserted. Built and tested; nothing deployed, since the factory and the registry launch together
 - **Spend ceilings (§2.2, §2.7)** - one operator policy bounds both rails before anything is spent: `RUB3_AGENT_MAX_TOKEN_AMOUNT` gates the stablecoin rail before an authorization is signed, `RUB3_AGENT_MAX_ETH_WEI` gates the ETH rail before the transaction is sent, and the ETH one defaults to 0.1 ETH so neither rail is ever unbounded (exit 22)
-- **Deploy scripts** - `forge script` deploys either licence contract to any EVM chain from env vars, directly or through a factory; `DeployFactory.s.sol` deploys the factory itself
+- **Deploy scripts** - `forge script` deploys the licence contract to any EVM chain from env vars, directly or through a factory; `DeployFactory.s.sol` deploys the factory itself
 - **`rub3 pack` and `rub3 deploy` (§2.5)** - one command builds the wrapper, the application and the configuration into a single distributable, with the canonical factory read out of `contracts/deployments.json` and compiled in beside the contract and chain id; another deploys the licence contract through that factory by driving the existing forge script. A `null` manifest entry is a hard error at both, so both refuse for every chain until launch. `fetch` and `register` are deliberately unbuilt: the sections they belong to (§3.1, §3.2) do not exist yet
 
 **Not yet implemented (agent-first roadmap):** wrapper support for the `honorsContract` trust rule (the contract exposes and tests it; no shipped wrapper calls it, so a holder who claims onto a successor is not yet honored at launch), the CLI's `fetch` and `register` subcommands, content-addressed distribution, concurrent-seat licensing, metered billing, marketplace. Human-surface polish (WalletConnect tabs, Preact refactor, Tauri plugin) is demoted behind the agent path; tier-4 device binding and binary encryption are deferred.
@@ -696,7 +694,7 @@ The plan is agent-first (July 2026 revision - see [implementation.md](implementa
 
 - **Let machines buy, verify, and resell software without asking anyone's permission.** The adoption unit is one closed loop an agent completes end to end: discover → pay → fetch → verify → run → resell.
 - **Open-source the rails; own the factory, registry, and marketplace.** Revenue is intended to be a 2–3% fee on a payment flow only the wrapper can meter, priced low enough that routing around it is not worth the trouble. The factory, its on-chain fee split and the registry are built; the marketplace is not, and the contracts are deployed nowhere: nothing reaches mainnet or is declared ready for use until the factory and the registry launch together. No token.
-- **The token is the invariant; everything else is versioned.** Evolution only ever changes what is offered going forward (price, successor contracts, registry listings), never what was granted (held tokens, their validation, their renewal terms). No proxies, no revocation surface - structurally, not by promise.
+- **The token is the invariant; everything else is versioned.** Evolution only ever changes what is offered going forward (price, successor contracts, registry listings), never what was granted (held tokens and their validation). No proxies, no revocation surface - structurally, not by promise.
 
 First target market: wallet-gated MCP servers - paid MCP servers have no licensing primitive today, and agents are their natural customers.
 

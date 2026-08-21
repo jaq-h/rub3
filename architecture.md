@@ -14,11 +14,13 @@ Three commitments shape every design decision below:
 
 **Two front doors, one rail.** All session crypto (signing, calldata encoding, receipt polling) is native Rust. Headless activation - signer in, session out - is the primary path and needs no webview; the interactive webview flow is the human fallback floor. Everything below the front door (RPC, session model, persistence, supervision) is shared.
 
-**The token is the invariant; everything else is versioned.** License contracts are immutable - no proxies, no upgrade hooks, no revocation surface. Evolution only ever changes what is *offered* going forward (price, successor contracts, registry listings), never what was *granted* (held tokens, their validation logic, their renewal terms).
+**The token is the invariant; everything else is versioned.** License contracts are immutable - no proxies, no upgrade hooks, no revocation surface. Evolution only ever changes what is *offered* going forward (price, successor contracts, registry listings), never what was *granted* (held tokens and their validation logic).
+
+**One licence model.** rub3 sells a licence once and it is valid for as long as it is held: `Rub3Access`, no expiry, nothing to renew, `ownerOf` the whole entitlement. A time-bounded second model was built and then removed before any deploy (implementation.md §2.10), so an agent reading a listing never has to work out which kind of licence it is about to buy.
 
 | | Can never change | Can change (affects future only) |
 |---|---|---|
-| **Developer** | validity of issued tokens; transfer rights; per-token renewal terms (`renewPrice`, `renewPriceToken`, `renewPriceAmount`, `period`); supply cap; identity model; TBA implementation; cooldown; predecessor link; protocol fee terms (`feeBps`, `treasury`) | price for new sales on either rail (`price`, `priceToken` / `priceAmount`); wrapper hash set (append + flag only); successor pointer; registry listing |
+| **Developer** | validity of issued tokens; transfer rights; supply cap; identity model; TBA implementation; cooldown; predecessor link; protocol fee terms (`feeBps`, `treasury`) | price for new sales on either rail (`price`, `priceToken` / `priceAmount`); wrapper hash set (append + flag only); successor pointer; registry listing |
 | **rub3** | fee on any deployed contract; validation logic | factory versions; registry curation; marketplace; facilitator |
 
 Every "can never change" cell in the developer row is enforced by bytecode today and checkable before purchase - and since §2.3 that includes the fee, so "rub3 cannot raise its take on a contract you already deployed" is now a property of the bytecode rather than a promise. See [Ownership invariants](#ownership-invariants-all-license-contracts) for the audit procedure and for the shorter list of properties that are still convention rather than proof.
@@ -35,7 +37,7 @@ Every "can never change" cell in the developer row is enforced by bytecode today
 |---|---|
 | User onboarding | Coinbase on-ramp - users buy ETH without bridging |
 | ENS support | Resolves L1 ENS natively, critical for trust layer |
-| Cost | $0.01–0.05 per mint/renewal transaction |
+| Cost | $0.01–0.05 per mint transaction |
 | Finality | ~2 sec soft confirmation |
 | Rust crates | `alloy` is lean (~30 deps), handles RPC, ABI, ENS resolution |
 | Wallet support | Native in Coinbase Wallet, MetaMask, Rainbow, and WalletConnect-compatible wallets |
@@ -63,7 +65,7 @@ Two rails, and they mint identically (implementation.md §2.2, built).
 
 **`receiveWithAuthorization`, not `transferWithAuthorization`.** EIP-3009 defines both over the same six signed fields; only the receive variant requires `msg.sender == to`. With the transfer variant, anyone watching the mempool could push a buyer's authorization straight at the token, moving the money to the licence contract *without* the mint and burning the nonce - the buyer paid, holds nothing, and there is no recovery. Requiring the receive variant makes the licence contract the only address that can spend the authorization at all, so payment and mint are inseparable. Anyone may still submit the *purchase*, which is what keeps it gasless.
 
-**What binds an authorization.** The token signs `from`, `to`, `value`, `validAfter`, `validBefore`, and `nonce` - and nothing else, so the mint recipient is not covered by default. rub3 binds it through the nonce: `purchaseAuthorizationNonce(recipient, salt)` (and `renewAuthorizationNonce(tokenId, salt)` for renewals) is derived by the contract, not accepted from the caller, so a submitter who changes the recipient derives a different nonce and produces a digest the buyer never signed. Distinct domain tags keep a purchase authorization from being spent as a renewal, or the reverse. Replay is the token's own single-use nonce, backed by a balance-delta check in the licence contract so a mint cannot happen unless the money actually arrived.
+**What binds an authorization.** The token signs `from`, `to`, `value`, `validAfter`, `validBefore`, and `nonce` - and nothing else, so the mint recipient is not covered by default. rub3 binds it through the nonce: `purchaseAuthorizationNonce(recipient, salt)` is derived by the contract, not accepted from the caller, so a submitter who changes the recipient derives a different nonce and produces a digest the buyer never signed. The derivation carries a domain tag and the contract's own address, so the nonce is worthless anywhere else. Replay is the token's own single-use nonce, backed by a balance-delta check in the licence contract so a mint cannot happen unless the money actually arrived.
 
 This is the prerequisite for x402-style catalog listings (implementation.md §3.3).
 
@@ -127,8 +129,8 @@ If the developer wants the TBA to actually hold assets or execute transactions o
 ┌──────────────┐     ┌─────────────────────┐     ┌──────────────────────────┐
 │   Developer   │     │   Base (L2)          │     │        User              │
 │              │     │                     │     │                          │
-│  App binary   │     │  Rub3Access or      │     │  Wallet                  │
-│  rub3 CLI    │────▶│  Rub3Subscription   │◀────│  rub3 Wrapper           │
+│  App binary   │     │  Rub3Access         │     │  Wallet                  │
+│  rub3 CLI    │────▶│  Rub3Factory        │◀────│  rub3 Wrapper           │
 │  ENS name     │     │  Rub3Registry       │     │  Token selector UI       │
 │  identity=    │     │  ERC-6551 Registry   │     │  Session Cache           │
 │  access|acct  │     │                     │     │  Embedded App            │
@@ -159,7 +161,7 @@ device_key_storage = "keychain"  # tier 4: "file" | "keychain" | "enclave"
 | 0 | `offline` | Never | 0 | File copy defeats it | Free/honor-system, offline-first tools |
 | 1 | `cached` | At activation + renewal | 0 | Shared file works until TTL | Low-value desktop apps, long TTL (30d) |
 | 2 | `verified` | At activation + every launch | 0 | Shared file fails if token transfers | Standard apps, moderate value |
-| 3 | `cooldown` | At activation + every launch | 1 per activation | 1 session per cooldown window, new activation kills old | SaaS-equivalent, subscriptions |
+| 3 | `cooldown` | At activation + every launch | 1 per activation | 1 session per cooldown window, new activation kills old | Seat-limited tools, high-value apps |
 | 4 | `hardened` | Every launch | 1 per activation | Session bound to hardware device key, non-transferable | High-value tools, trading software |
 
 ### Tier 0: `offline`
@@ -294,7 +296,7 @@ session_ttl_days = 7
 |---|---|
 | 1 day | High-value tools, strict ownership enforcement |
 | 7 days | Standard (default) |
-| 30 days | Matches subscription billing cycle |
+| 30 days | Long-lived desktop apps, minimal re-signing |
 
 Session files stored at `~/.rub3/sessions/<app_id>/<token_id>.json` - one per token, not one per app.
 
@@ -328,7 +330,7 @@ A wallet may own multiple tokens from the same contract. At session creation (fi
 └────────────────────────────────────────────────┘
 ```
 
-For access model, the display omits the Account field and shows wallet address instead. For subscriptions, each token shows its expiry date.
+For access model, the display omits the Account field and shows wallet address instead.
 
 If only one token is owned, the selector is skipped and that token is auto-selected.
 
@@ -365,6 +367,8 @@ The design commitment behind the richer modes is that they are **additive tabs o
 
 #### Rub3Access (one-time purchase)
 
+The only licence model. A time-bounded `Rub3Subscription` existed alongside it until implementation.md §2.10 removed it, so there is no expiry, no renewal, and no second shape a buyer has to tell this one apart from.
+
 ERC-721 + ERC-721Enumerable with payable `purchase(address recipient)` and `purchaseWithAuthorization(address recipient, PaymentAuthorization auth)`, where `PaymentAuthorization` is `(address from, uint256 validAfter, uint256 validBefore, bytes32 salt, bytes signature)`:
 - Price per token on both rails: `price` (wei) and `priceToken` / `priceAmount` (an EIP-3009 ERC-20 and its own smallest unit). Independent quotes, not a conversion - the contract holds no oracle. Optional supply cap (immutable)
 - `recipient == address(0)` defaults to `msg.sender` on the ETH path and to `auth.from`, the buyer, on the authorization path - never to the submitter
@@ -374,24 +378,11 @@ ERC-721 + ERC-721Enumerable with payable `purchase(address recipient)` and `purc
 
 On-chain check: `ownerOf(tokenId) == walletAddress`
 
-#### Rub3Subscription (recurring)
-
-ERC-721 + ERC-721Enumerable extended with time-based validity:
-- `mapping(uint256 => uint256) public expiresAt`
-- `mapping(uint256 => uint256) public renewPrice` - the token's ETH renewal price, snapshotted from `price` at mint and written once
-- `mapping(uint256 => address) public renewPriceToken` + `mapping(uint256 => uint256) public renewPriceAmount` - the same freeze for the stablecoin rail. **A second snapshot, not a conversion of the first**: both listed prices are frozen at the same instant, and a token minted while the contract offered no stablecoin rail carries none and renews in ETH, which every token always can
-- `purchase()` / `purchaseWithAuthorization()` set `expiresAt[tokenId] = block.timestamp + period` and snapshot all three renewal terms
-- `renew(uint256 tokenId)` payable, and `renewWithAuthorization(uint256 tokenId, PaymentAuthorization auth)`, each extending by one period at that token's own snapshot - never the current listed price
-- `uint256 immutable period` - the other half of "renewal terms are frozen per token"
-- `uint8 identityModel` - same flag as above
-
-On-chain check: `ownerOf(tokenId) == walletAddress && block.timestamp < expiresAt[tokenId]`
-
-Both contracts implement ERC-721Enumerable so the wrapper can call `tokensOfOwner()` directly.
+`Rub3Access` implements ERC-721Enumerable so the wrapper can call `tokensOfOwner()` directly.
 
 #### Activation and session management (tiers 3-4)
 
-Both Rub3Access and Rub3Subscription include the activation/session management interface for tiers 3-4:
+`Rub3Access` includes the activation/session management interface for tiers 3-4:
 
 ```solidity
 // ── State ──
@@ -463,15 +454,14 @@ contract Rub3Factory {
     // previousFactory within MAX_PREDECESSOR_FACTORY_HOPS (8) hops.
     function isCanonicalPredecessor(address) external view returns (bool);
 
-    // Both revert PredecessorNotCanonical(address) unless params.predecessor is.
+    // Reverts PredecessorNotCanonical(address) unless params.predecessor is.
     function deployAccess(Rub3LicenseParams calldata) external returns (address);
-    function deploySubscription(Rub3LicenseParams calldata, uint256 period) external returns (address);
 }
 ```
 
-**A factory deploy may only succeed a canonical predecessor.** `claimFromPredecessor` charges nothing, because migration must never be taxed, so an unconstrained `predecessor` would let a whole fee-free sale be laundered onto a registry-listed contract: sell on a direct deploy, then deploy the successor through the factory naming it as predecessor, and every holder claims onto a fee-bearing `isDeployed` contract with the treasury never paid. The factory therefore accepts `address(0)`, its own deployments, or those of a factory reachable through the immutable `previousFactory` chain - which is what keeps an older factory's contracts migratable when rub3 changes its take by deploying a new factory. Direct deploys and the permissionless deployer helpers are untouched: they grant no `isDeployed` row, so there is nothing there to launder onto. The cost is that a pre-factory contract cannot migrate its holders onto a canonical contract *through the factory*; it migrates onto a directly deployed successor instead, keeping every ownership guarantee and forgoing only the row. See `contracts/contracts.md` → "A factory deploy may only succeed a canonical predecessor".
+**A factory deploy may only succeed a canonical predecessor.** `claimFromPredecessor` charges nothing, because migration must never be taxed, so an unconstrained `predecessor` would let a whole fee-free sale be laundered onto a registry-listed contract: sell on a direct deploy, then deploy the successor through the factory naming it as predecessor, and every holder claims onto a fee-bearing `isDeployed` contract with the treasury never paid. The factory therefore accepts `address(0)`, its own deployments, or those of a factory reachable through the immutable `previousFactory` chain - which is what keeps an older factory's contracts migratable when rub3 changes its take by deploying a new factory. Direct deploys and the permissionless deployer helper are untouched: they grant no `isDeployed` row, so there is nothing there to launder onto. The cost is that a pre-factory contract cannot migrate its holders onto a canonical contract *through the factory*; it migrates onto a directly deployed successor instead, keeping every ownership guarantee and forgoing only the row. See `contracts/contracts.md` → "A factory deploy may only succeed a canonical predecessor".
 
-The fee split executes on-chain inside `purchase()` / `renew()`, on **both** payment rails: `feeBps` of what arrived to `treasury`, the remainder to the developer's `withdraw()` balance. **Immutable per contract** - `feeBps` and `treasury` are `immutable` on the factory *and* on every contract it deploys, so a developer's economics can never change after deploy; rub3 changes its take only by deploying a new factory, which affects contracts deployed by that factory and nothing that already exists. Direct (non-factory) deployment of the open-source contracts is always possible: fee-free and unrecorded by design, not a gap.
+The fee split executes on-chain inside `purchase()`, on **both** payment rails: `feeBps` of what arrived to `treasury`, the remainder to the developer's `withdraw()` balance. **Immutable per contract** - `feeBps` and `treasury` are `immutable` on the factory *and* on every contract it deploys, so a developer's economics can never change after deploy; rub3 changes its take only by deploying a new factory, which affects contracts deployed by that factory and nothing that already exists. Direct (non-factory) deployment of the open-source contracts is always possible: fee-free and unrecorded by design, not a gap.
 
 The factory path stamps the fee and grants an `isDeployed` row. That row is a durable canonical record today, and the eligibility criterion for the registry (implementation.md §3.2) and marketplace (§4.3) once they ship. The registry is built and the marketplace is not, neither is deployed anywhere, and the fee does not go live ahead of them: the contracts are not deployed to mainnet or declared ready for use until the registry is ready, so the factory and the registry launch together.
 
@@ -489,19 +479,19 @@ Three properties of the split are load-bearing rather than incidental, and each 
 
 **The fee's denomination is not constrained on-chain, and that is the accepted position.** The fee accrues in whatever asset the payment arrived in, so a developer who lists `priceToken` as an asset of their own choosing decides what rub3's share is *denominated in* as well as what it is a percentage of. Two consequences follow, and both are real: at 200-300 bps a payment below 34-50 of the token's smallest units rounds the fee to zero, and even a large amount priced in a token nobody trades is a percentage of nothing. Closing either on-chain means the contracts holding an economic policy about which tokens count - an allowlist, or a minimum amount per rate - which is exactly the oracle-shaped judgement the design refuses to carry, in a contract that can never be changed once deployed and that would then have to be redeployed every time a token's standing changed. **The denomination question is answered at the discovery layer instead.** The registry (implementation.md §3.2) maintains a recognised-token list and ranks and lists canonical contracts by the token they are priced in, so a contract quoting a token rail in an asset nobody recognises ranks below one that does, while the native rail counts as recognised - an ETH-only listing quotes no token and its fee accrues in ETH, the one asset this argument was never about. That keeps the same economic argument the rest of the fee rests on - routing around it costs the carrot - rather than converting it into an on-chain lock the invariants forbid. It is a requirement on the registry, which is built and deployed nowhere; nothing enforces it today.
 
-**Why the factory needs two helper contracts.** The two licence contracts' creation code together is over 30 KB against a 24,576-byte runtime limit, so the factory builds one `Rub3AccessDeployer` and one `Rub3SubscriptionDeployer` in its own constructor and holds their addresses as immutables. The consequence for an auditor: the factory's own bytecode fingerprint does not pin which licence implementations it deploys, so verifying a factory means fetching the code at `accessDeployer()` / `subscriptionDeployer()` and comparing those against the canonical manifest too.
+**Why the factory needs a helper contract.** `Rub3Access`'s creation code is over 16 KB against a 24,576-byte runtime limit, so a factory that could `new` it directly would have almost nothing left for itself. The factory builds one `Rub3AccessDeployer` in its own constructor instead and holds its address as an immutable. The consequence for an auditor: the factory's own bytecode fingerprint does not pin which licence implementation it deploys, so verifying a factory means fetching the code at `accessDeployer()` and comparing it against the canonical manifest too.
 
 #### Rub3Metered *(planned - implementation.md §4.1)*
 
-A third billing model unique to runtime enforcement: the launch gate requires a micropayment (per launch, per session-hour, or per N launches) settled in USDC. Same protocol fee, much higher-frequency flow than one-time sales.
+A second billing model unique to runtime enforcement, and the only one still planned: the launch gate requires a micropayment (per launch, per session-hour, or per N launches) settled in USDC. Same protocol fee, much higher-frequency flow than one-time sales. It is not a subscription - nothing about it makes an issued token expire - and it is `[not started]`.
 
 #### Ownership invariants (all license contracts)
 
 Live in `Rub3License` (implementation.md §2.4). Enforced by construction, machine-verifiable by any buyer before purchase:
 
-- **No revocation surface.** No burn, no admin transfer, no pause on `ownerOf` / `isValid` / `activate` for issued tokens. Not policy - absent from the bytecode.
+- **No revocation surface.** No burn, no admin transfer, no pause on `ownerOf` / `honorsContract` / `activate` for issued tokens. Not policy - absent from the bytecode.
 - **No proxies.** Contract code, and therefore license terms, are frozen at deploy. No upgrade hook, no delegatecall, no initializer.
-- **Renewal terms frozen per token, on both rails.** `renewPrice[tokenId]`, `renewPriceToken[tokenId]`, and `renewPriceAmount[tokenId]` all snapshot at mint and are written once; `period` is immutable. `renew()` and `renewWithAuthorization()` charge the snapshot. A developer cannot reprice a held subscription in either currency - and there is no function that could.
+- **Nothing a held token owes over time.** A licence is bought once and is valid for as long as it is held, so there is no expiry to move, no renewal price to reprice, and no term a later owner call could reach. That is the shape §2.10 chose over a second model whose terms had to be frozen per token to say the same thing.
 - **Append-only wrapper hash set.** Replaces the single rotatable `wrapperHash` slot - see [Binary verification](#binary-verification-all-tiers).
 - **Successor pattern for migrations.** See below.
 
@@ -520,19 +510,19 @@ function honorsContract(address configuredContract, uint256 tokenId) external vi
 
 Covers contract bugs, paid major versions, and chain migration. Three hard guarantees, each with a dedicated test in `contracts/test/Rub3Invariants.t.sol` that fails if the guarantee is removed:
 
-1. **The old contract validates its tokens forever, regardless.** `successor` is a signpost, not a switch: nothing in `ownerOf`, `activate`, `cooldownReady`, or `isValid` reads it. Setting, repointing, or clearing it changes nothing about an issued token, and neither does the holder migrating - or the owner renouncing ownership entirely.
+1. **The old contract validates its tokens forever, regardless.** `successor` is a signpost, not a switch: nothing in `ownerOf`, `activate`, `cooldownReady`, or `honorsContract` reads it. Setting, repointing, or clearing it changes nothing about an issued token, and neither does the holder migrating - or the owner renouncing ownership entirely.
 
 2. **Migration is holder-initiated, never forced.** Only the *current holder* of a predecessor token can call `claimFromPredecessor`, and only on the successor. Neither contract's owner can push a migration; there is no `forceMigrate` selector to call.
 
    It is a **snapshot-claim, not burn-to-mint** - necessarily so. Burn-to-mint would require the predecessor to expose a burn, which is exactly the revocation surface that must not exist. The old token is neither destroyed nor moved; the holder ends up with both.
 
-   **What a subscription carries across, and what it does not.** The claim carries the holder's remaining time *and* their snapshotted `renewPrice`. It does **not** carry `period`, which is immutable per contract: the successor's own `period` governs what the carried price buys from then on, so a successor declaring a shorter period raises the effective rate even though the price itself never moved. That takes nothing already granted, because claiming is opt-in and holder-initiated and the original token keeps validating on the old contract at its original terms forever. It does mean **a holder should read the successor's `period` and `price` before claiming**: the claim is the moment they accept the successor's terms, and it is the only protection here. A holder who dislikes those terms simply does not claim.
+   **A claim carries no terms, because a licence has none to carry.** It is bought once and holding it is the whole entitlement, on the predecessor and on the successor alike, so there is nothing to snapshot across and nothing a successor's own listing can change about what the claimed token is worth. That was not true of the time-bounded model §2.10 removed, where remaining time and a frozen renewal price had to be carried and `period` deliberately did not carry - the whole reason claiming had to be the moment a holder accepted the successor's terms.
 
    **The accepted consequence: migration can duplicate a seat.** The v1 token stays live and freely sellable after the claim, and the v2 token stays honored, so one purchase can end as two concurrently honored seats held by two different wallets. Honored seats are therefore *not* bounded by either contract's `supplyCap`, even though both caps are immutable: each cap bounds the tokens *that contract* mints, not the entitlements alive across a succession chain. This is deliberate and is not bounded in code. Bounding it would need the predecessor to invalidate the old token, which is the revocation surface, and the no-revocation guarantee wins. A developer who cannot accept the duplication ships a paid major version instead: deploy v2 *without* a predecessor, so it accepts no claims and every seat on it is sold.
 
    Both sides opt in, explicitly: the successor names its `predecessor` at deploy (immutable), and the predecessor's owner points `successor` at it. A v2 deployed *without* a predecessor accepts no claims - that is how a paid major version is shipped while still signposting where it lives.
 
-   **Succession is same-model, by construction.** An access contract cannot declare a subscription predecessor, and a subscription cannot declare an access one: both constructors probe the predecessor over the same discriminator, `period()`, which `Rub3Subscription` requires it to answer and `Rub3Access` requires it to fail. A cross-model pairing reverts at deploy with `IncompatiblePredecessor(address)`, so it is not a mistake a deployer can make. That closes the one path where a claim could grant more than the holder had: an access license carries nothing across in `_afterClaim`, so a subscription predecessor would have let any subscriber - including one lapsed years ago - mint a perpetual license for free.
+   **A predecessor is probed at deploy, because the pointer is immutable.** `Rub3License`'s constructor rejects a `predecessor` with no code, or one that cannot answer `successor()`, with `IncompatiblePredecessor(address)`. A mistyped address would otherwise brick every holder's claim forever, with redeployment the only remedy. There is nothing further to check: with one licence model, a rub3 licence contract is the only thing a predecessor can be. The extra model probe that used to sit on each concrete contract went with §2.10's second model.
 
 3. **The trust rule the contract exposes for wrappers: "contract X, or X's successor holding a token claimed from X."** `honorsContract(X, tokenId)` evaluates exactly that in one `eth_call`. A token *bought* on the successor is not a claim, so a wrapper pinned to X does not accept it. The predecessor's opt-in is checked once, at claim time, and recorded permanently - a later `setSuccessor` cannot retroactively unmake a claim that already happened, because a claim already made is a grant.
 
@@ -544,19 +534,18 @@ Covers contract bugs, paid major versions, and chain migration. Three hard guara
 
 The distinction matters because an agent can verify the first list before buying and can only trust the second.
 
-**Bytecode** - check these against the deployed runtime code. The 30 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, the set the copy-pasteable loop in `contracts/contracts.md` scans for, and the set `attest::FORBIDDEN_SIGNATURES` mirrors in the wrapper. Those selector rows are a **diagnostic**: a blacklist of names proves nothing by its silence, and the last row - the fingerprint comparison - is what actually decides whether the deployed code is this repository's. (The rows also name `renewPrice(tokenId)`, `renewPriceToken(tokenId)`, `renewPriceAmount(tokenId)`, `wrapperHashList()`, `feeBps()` and `treasury()`, which are functions that *do* exist and are read as part of the check.)
+**Bytecode** - check these against the deployed runtime code. The 25 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, the set the copy-pasteable loop in `contracts/contracts.md` scans for, and the set `attest::FORBIDDEN_SIGNATURES` mirrors in the wrapper. Those selector rows are a **diagnostic**: a blacklist of names proves nothing by its silence, and the last row - the fingerprint comparison - is what actually decides whether the deployed code is this repository's. (The rows also name `wrapperHashList()`, `feeBps()` and `treasury()`, which are functions that *do* exist and are read as part of the check.)
 
 | Property | How an agent checks it |
 |---|---|
-| No burn, admin transfer, seizure, or pause | The selectors are absent from the runtime bytecode, and a raw call carrying one reverts (there is no fallback). Scan for `burn(uint256)`, `burn(address,uint256)`, `burnFrom(address,uint256)`, `adminTransfer(address,address,uint256)`, `forceTransfer(address,address,uint256)`, `seize(uint256)`, `clawback(uint256)`, `pause()`, `unpause()`, `paused()`, `setPaused(bool)`, `revoke(uint256)`, `revokeToken(uint256)`, `invalidate(uint256)`, `setExpiresAt(uint256,uint256)`, `setRenewPrice(uint256,uint256)`, `forceMigrate(uint256,address)` |
+| No burn, admin transfer, seizure, or pause | The selectors are absent from the runtime bytecode, and a raw call carrying one reverts (there is no fallback). Scan for `burn(uint256)`, `burn(address,uint256)`, `burnFrom(address,uint256)`, `adminTransfer(address,address,uint256)`, `forceTransfer(address,address,uint256)`, `seize(uint256)`, `clawback(uint256)`, `pause()`, `unpause()`, `paused()`, `setPaused(bool)`, `revoke(uint256)`, `revokeToken(uint256)`, `invalidate(uint256)`, `forceMigrate(uint256,address)` |
 | No proxy, no upgrade hook | `upgradeTo(address)`, `upgradeToAndCall(address,bytes)`, `initialize()` absent; contract code hashes stable across blocks |
 | Hash set is append-only | `setWrapperHash(bytes32)`, `removeWrapperHash(bytes32)`, `unrevokeWrapperHash(bytes32)` absent; `wrapperHashList()` only ever grows |
-| Renewal terms frozen per token | `renewPrice(tokenId)`, `renewPriceToken(tokenId)` and `renewPriceAmount(tokenId)` do not move after mint; `setRenewPrice(uint256,uint256)`, `setRenewPriceToken(uint256,address)`, `setRenewPriceAmount(uint256,uint256)`, `setExpiresAt(uint256,uint256)` and any other renewal setter are absent from the runtime bytecode; `period` is `immutable`, with no `setPeriod(uint256)`. Free tiers are legitimate, so a `renewPrice` of `0` is conforming |
 | Deploy-time parameters frozen | `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` are `immutable` - no `setPredecessor(address)` selector. On `Rub3Factory`, `previousFactory` is `immutable` in the same way, with no `setPreviousFactory(address)`: it decides which predecessors a canonical deploy may name, so repointing it would grant a laundered contract standing after the fact |
 | The protocol fee is frozen per contract | `feeBps` and `treasury` are `immutable` on the licence contract and on the `Rub3Factory` that stamped them; `setFeeBps(uint16)` and `setTreasury(address)` are absent from the runtime bytecode. Read `feeBps()` / `treasury()` before buying and they are what that contract will charge for as long as it exists |
 | Migration cannot be forced | `claimFromPredecessor` is the only mint path outside `purchase` / `purchaseWithAuthorization`, and it checks `ownerOf(...) == msg.sender` on the predecessor |
 | Registry delisting never invalidates a token | `Rub3Registry` (§3.2) reaches a licence contract only through `STATICCALL`, and the EVM refuses any state change under one. Walk the registry's runtime opcodes, skipping each `PUSH1..PUSH32` immediate, and no `CALL`, `CALLCODE`, `DELEGATECALL`, `CREATE`, `CREATE2` or `SELFDESTRUCT` appears at all - so there is no opcode left in it that could write to a licence contract, hold ETH, deploy anything, or destroy itself. `test_audit_registryHoldsNoStateChangingExternalCall` in `contracts/test/Rub3Registry.t.sol` runs exactly that walk, with a positive control on a licence contract, which does contain a `CALL`. What stays convention is how a *consumer* reads a delisting, and the wrapper's reading is that discovery has no bearing on a held token |
-| The deployed code is this repository's template, not a modified copy | Zero the immutable byte ranges published in `contracts/canonical-bytecode.json`, `sha256` the result, and compare against that contract's `deployed_bytecode_sha256`. This is the check every row above depends on: they describe the template, and only a fingerprint match says the deployed contract *is* the template. It is name-independent, so a modified copy exposing seizure under an unguessed name fails it while passing the selector scan. `crates/rub3-wrapper/src/attest.rs` pins the same fingerprints and refuses to purchase without a match. `Rub3Factory.isDeployed(addr)` narrows the same question from the other side - a factory deploy is provably an unmodified template on that factory's terms - but the factory's own code has to be fingerprinted first, and its runtime code does not contain the licence implementations, so verifying one means also comparing `accessDeployer()` / `subscriptionDeployer()` against the manifest, which pins all seven. A published fingerprint only covers the releases the comparator already has, so a contract built from a **later** release fails this row indistinguishably from a modified copy. `Rub3CodeRegistry` is the append-only on-chain record that tells the two apart (implementation.md §2.9); it is consulted only on a miss, its own code is fingerprinted by this same row before its answer is believed, and none is deployed yet |
+| The deployed code is this repository's template, not a modified copy | Zero the immutable byte ranges published in `contracts/canonical-bytecode.json`, `sha256` the result, and compare against that contract's `deployed_bytecode_sha256`. This is the check every row above depends on: they describe the template, and only a fingerprint match says the deployed contract *is* the template. It is name-independent, so a modified copy exposing seizure under an unguessed name fails it while passing the selector scan. `crates/rub3-wrapper/src/attest.rs` pins the same fingerprints and refuses to purchase without a match. `Rub3Factory.isDeployed(addr)` narrows the same question from the other side - a factory deploy is provably an unmodified template on that factory's terms - but the factory's own code has to be fingerprinted first, and its runtime code does not contain the licence implementation, so verifying one means also comparing `accessDeployer()` against the manifest, which pins all five. A published fingerprint only covers the releases the comparator already has, so a contract built from a **later** release fails this row indistinguishably from a modified copy. `Rub3CodeRegistry` is the append-only on-chain record that tells the two apart (implementation.md §2.9); it is consulted only on a miss, its own code is fingerprinted by this same row before its answer is believed, and none is deployed yet |
 
 **Convention** - real commitments, but not provable from the bytecode:
 
@@ -591,8 +580,8 @@ A fingerprint table compiled into a binary can only recognise the releases that 
 Three properties carry the design:
 
 - **Append-only.** No removal, no overwrite, no un-deprecate, no proxy. A compromised owner key can only *add*, and every addition is a permanent public `Published` event.
-- **`Deprecated` never invalidates.** It means "not recommended for new purchases"; a held token, its validation and its renewal terms are untouched, and nothing on any launch path reads this contract. Anything else would be the revocation surface the ownership invariants rule out, reached through a different door.
-- **Its own code is verified before its answer is believed.** One address and one masked hash, both frozen into the wrapper at pack time; the deployer is trusted for nothing. The registry publishes the distinct immutable layouts in use so an agent can compute a hash before it has a record to look one up in - five across today's canonical set, one each for `Rub3Access`, `Rub3Subscription`, `Rub3Factory` and `Rub3Registry` plus the empty one the two deployer helpers and `Rub3CodeRegistry` itself share. **The wrapper reads that list bounded, from the newest end, and tries a bounded number of it**, since how many tables exist is the owner key's to choose while the read and each surviving candidate's `record` call sit on the path that spends money: it asks `latestOffsetTables(MAX_CANDIDATE_OFFSET_TABLES)` and holds the same cap over the lookups, because a node need not honour what it was asked for. So neither what a compromised owner key can put on the wire nor the round trips a purchase makes grows with what that key publishes. The newest end because this is reached only on a pinned-table miss, which is by definition a question about code newer than the binary asking: a budget spent oldest-first would make the seventeenth layout ever interned the point where fielded binaries stopped recognising new releases while the first ones stayed readable forever. Past the bound a candidate is unread or untried, which says what a dropped one says. Reachability and latency only - neither the size nor the end of this read could ever produce a wrong verdict.
+- **`Deprecated` never invalidates.** It means "not recommended for new purchases"; a held token and its validation are untouched, and nothing on any launch path reads this contract. Anything else would be the revocation surface the ownership invariants rule out, reached through a different door.
+- **Its own code is verified before its answer is believed.** One address and one masked hash, both frozen into the wrapper at pack time; the deployer is trusted for nothing. The registry publishes the distinct immutable layouts in use so an agent can compute a hash before it has a record to look one up in - four across today's canonical set, one each for `Rub3Access`, `Rub3Factory` and `Rub3Registry` plus the empty one `Rub3AccessDeployer` and `Rub3CodeRegistry` itself share. **The wrapper reads that list bounded, from the newest end, and tries a bounded number of it**, since how many tables exist is the owner key's to choose while the read and each surviving candidate's `record` call sit on the path that spends money: it asks `latestOffsetTables(MAX_CANDIDATE_OFFSET_TABLES)` and holds the same cap over the lookups, because a node need not honour what it was asked for. So neither what a compromised owner key can put on the wire nor the round trips a purchase makes grows with what that key publishes. The newest end because this is reached only on a pinned-table miss, which is by definition a question about code newer than the binary asking: a budget spent oldest-first would make the seventeenth layout ever interned the point where fielded binaries stopped recognising new releases while the first ones stayed readable forever. Past the bound a candidate is unread or untried, which says what a dropped one says. Reachability and latency only - neither the size nor the end of this read could ever produce a wrong verdict.
 
 An agent checks a registry-supplied offset table against the code it fetched before masking with it - each range one 32-byte word, sorted, disjoint, in bounds, and preceded by a `PUSH32` opcode - which bounds the blind spot a masked hash accepts. It does not close it the way the wrapper's own pinned table does: those ranges arrive with the binary from solc, where a masked byte provably cannot execute, while a one-byte lookback cannot prove the `PUSH32` is an instruction rather than data inside an earlier push's immediate. Shaping code and table together to exploit that needs the registry's owner key, which could more simply publish an empty table; the bound on that key is append-only publication and a permanent public event per addition, not this check.
 
@@ -645,7 +634,7 @@ Each entry doubles as an ERC-8004-style agent card - contract address, both pric
 
 **Every whole-set read has a bounded counterpart, because the set only grows.** Registration is permissionless for anyone holding a factory deploy and nothing is ever removed, so a read that scans all of it is on a clock that runs out, and an immutable contract gets no second chance to add one later. `registeredWindow`, `rankedRegistrationWindow` and `cardWindow` take their cursor over registration order and scan only their slice; `card` caps the wrapper hash set at the newest 32 and reports the true total beside it, so no listing owner's publishing history decides what a page containing them costs. What a bounded page gives up is stated on the function: **it is ranked within its window, not globally**, and paging through does not reconstruct `rankedListings`. `rankedListingWindow` and `cards` are the pair that look bounded and are not - they index into the global ranking, so producing a page means computing that ranking first - and each says so in its own NatSpec rather than leaving it to be found from a gas limit.
 
-**What the registry owner can and cannot do.** It can maintain the recognised-token list, and it can withhold the badge from a listing with a logged reason and give it back. That bounds a compromise of the owner key to "the discovery surface is wrong until it is fixed": there is no state in this contract whose worst case reaches a token, a session, a renewal, or a price. The bytecode row above is what proves it rather than this paragraph.
+**What the registry owner can and cannot do.** It can maintain the recognised-token list, and it can withhold the badge from a listing with a logged reason and give it back. That bounds a compromise of the owner key to "the discovery surface is wrong until it is fixed": there is no state in this contract whose worst case reaches a token, a session, or a price. The bytecode row above is what proves it rather than this paragraph.
 
 ---
 
@@ -669,7 +658,7 @@ rub3-wrapper
 │   ├── If none owned: attest the contract's code, THEN present the purchase
 │   │   screen - a refusal replaces it, never accompanies it (§2.8)
 │   ├── Present token selector UI (skip if single token)
-│   ├── On token selected: run ownerOf() / isValid() confirmation
+│   ├── On token selected: run ownerOf() confirmation
 │   ├── Read identityModel from contract
 │   ├── Compute TBA address if account model
 │   ├── Check cooldown elapsed (tiers 3-4)
@@ -812,7 +801,7 @@ The constructor seeds the set from a `bytes32[]` - one release ships several bin
 
 Status is monotone: `Unknown → Valid → Revoked`, terminal. A hash already in the set is rejected by `addWrapperHash` whether it is valid *or* revoked, so the set can never be rewritten; a mistaken revocation is corrected by publishing a fresh build, not by editing history. Revocation requires a non-empty reason - a compromised build is flagged on-chain *with the reason stated*, not silently.
 
-Old binaries stay verifiable; a compromised release is flagged with a reason. Revoking a **binary hash** never touches **token validity** - the holder downloads a patched build and the same license just works. This is structural, not a promise: `ownerOf`, `isValid`, and `activate` never read `wrapperHashes`, and `contracts/test/Rub3Invariants.t.sol` revokes every hash in the set and asserts all three are unaffected.
+Old binaries stay verifiable; a compromised release is flagged with a reason. Revoking a **binary hash** never touches **token validity** - the holder downloads a patched build and the same license just works. This is structural, not a promise: `ownerOf`, `honorsContract` and `activate` never read `wrapperHashes`, and `contracts/test/Rub3Invariants.t.sol` revokes every hash in the set and asserts all three are unaffected.
 
 Honest limit: the hash set informs new downloads and activations; it cannot retroactively disable compromised binaries already running. A kill switch that could would be a revocation mechanism, and it must not exist.
 
@@ -860,7 +849,7 @@ Launch app                      Open webview
                   User purchases              │
                   → loop back          User selects token
                                             │
-                                    ownerOf() / isValid()
+                                    ownerOf() confirmation
                                             │
                                     Read identityModel from contract
                                             │
@@ -882,7 +871,7 @@ Launch app                      Open webview
 ```text
     ... (same as above through token selection) ...
                                             │
-                                    ownerOf() / isValid()
+                                    ownerOf() confirmation
                                             │
                                     Check cooldown elapsed?
                                     (lastActivationBlock + cooldownBlocks ≤ block.number)
@@ -1011,7 +1000,6 @@ In interactive mode the wrapper never holds a wallet private key - signing happe
 | Replay expired session | N/A (no expiry) | Blocked by `expires_at` | Blocked | Blocked | N/A (no TTL, device challenge instead) |
 | Signing oracle (holder signs for pirates) | Works | Works until TTL | Works (real owner) | 1 per cooldown, kills own session | 1 per cooldown + bound to 1 device |
 | NFT transferred, old session still valid | Works forever | Expires at TTL | Fails (`ownerOf` mismatch) | Fails (session_id reset on new activation) | Fails (device key + session_id) |
-| Subscription lapsed | N/A | Valid until TTL | `isValid()` fails | `isValid()` fails | `isValid()` fails |
 | Forged session signature | Requires wallet key | Requires wallet key | Requires wallet key | Requires wallet key | Requires wallet key + device key |
 | VM clone with vTPM | Works | Works | Works | Works (1 active) | Blocked by Secure Enclave; possible with vTPM |
 | Compromised wrapper binary | ENS + binary hash | ENS + binary hash | ENS + binary hash | ENS + binary hash | ENS + binary hash |
@@ -1051,7 +1039,7 @@ Runtime:       heartbeat IPC (catches a direct launch or a dead wrapper; proves 
 ## Scaling Considerations
 
 - Contract deployment: one per app, ~$1–5 on Base (via `Rub3Factory` - deploys are never charged by rub3; the factory deploy itself is a one-off that rub3 pays, not the developer)
-- Protocol fee: a 2–3% split executed inside `purchase()`/`renew()` on factory deploys, on both payment rails - no additional infrastructure; settlement is continuous and on-chain, with each side sweeping its own balance
+- Protocol fee: a 2–3% split executed inside `purchase()` on factory deploys, on both payment rails - no additional infrastructure; settlement is continuous and on-chain, with each side sweeping its own balance
 - RPC read calls: varies by tier. Tier 0: zero. Tiers 1-2: one per renewal. Tiers 3-4: one per launch (`activeSessionId` + `ownerOf`). Public RPC or Alchemy free tier sufficient.
 - RPC write calls: tiers 3-4 only. One `activate()`/`activateDevice()` tx per session creation. ~$0.001 on Base.
 - Session files: ~500 bytes each, one per token per device. Negligible storage.
