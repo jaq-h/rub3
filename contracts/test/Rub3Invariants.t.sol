@@ -3,7 +3,6 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {Rub3Access} from "../src/Rub3Access.sol";
-import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 import {Rub3Factory} from "../src/Rub3Factory.sol";
 import {Rub3License} from "../src/Rub3License.sol";
 import {MockEIP3009Token} from "./mocks/MockEIP3009Token.sol";
@@ -35,7 +34,6 @@ contract Rub3InvariantsTest is Test {
     bytes32 internal constant HASH_V3 = keccak256("wrapper-v2-darwin-arm64");
 
     uint256 internal constant PRICE = 0.05 ether;
-    uint256 internal constant PERIOD = 30 days;
     uint256 internal constant COOLDOWN_BLOCKS = 15;
 
     /// Stands in for USDC wherever an owner power over the stablecoin rail has
@@ -113,22 +111,6 @@ contract Rub3InvariantsTest is Test {
             _sale(PRICE),
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
-            predecessor_,
-            owner
-        );
-    }
-
-    function _deploySubscription(address predecessor_) internal returns (Rub3Subscription) {
-        return new Rub3Subscription(
-            "Rub3 Sub",
-            "R3S",
-            _identity(0, address(0)),
-            _hashes(HASH_V1),
-            _sale(PRICE),
-            _noFee(),
-            0,
-            PERIOD,
             COOLDOWN_BLOCKS,
             predecessor_,
             owner
@@ -334,22 +316,6 @@ contract Rub3InvariantsTest is Test {
         vm.prank(alice);
         nft.transferFrom(alice, bob, id);
         assertEq(nft.ownerOf(id), bob);
-    }
-
-    /// The same claim for the subscription model's `isValid`.
-    function test_revokedHash_doesNotAffectSubscriptionValidity() public {
-        Rub3Subscription sub = _deploySubscription(address(0));
-        vm.prank(alice);
-        uint256 id = sub.purchase{value: PRICE}(alice);
-
-        assertTrue(sub.isValid(id));
-
-        vm.prank(owner);
-        sub.revokeWrapperHash(HASH_V1, "compromised build");
-
-        assertTrue(sub.isValid(id), "hash status must not reach isValid");
-        assertEq(sub.ownerOf(id), alice);
-        assertEq(sub.expiresAt(id), block.timestamp + PERIOD);
     }
 
     /// A token can be purchased and activated on a contract whose entire hash
@@ -619,87 +585,6 @@ contract Rub3InvariantsTest is Test {
         v2.claimFromPredecessor(id);
     }
 
-    /// Remaining time and the snapshotted renewal price both carry across, so a
-    /// successor cannot reprice a held subscription by selling dearer. `period`
-    /// is a separate matter, pinned by
-    /// {test_migration_successorPeriodGovernsWhatTheCarriedPriceBuys}.
-    function test_migration_carriesFrozenSubscriptionTerms() public {
-        Rub3Subscription v1 = _deploySubscription(address(0));
-        vm.prank(alice);
-        uint256 id = v1.purchase{value: PRICE}(alice);
-
-        uint256 expiry = v1.expiresAt(id);
-
-        Rub3Subscription v2 = _deploySubscription(address(v1));
-        vm.prank(owner);
-        v1.setSuccessor(address(v2));
-
-        // v2 sells at ten times the price to new buyers.
-        vm.prank(owner);
-        v2.setPrice(PRICE * 10);
-
-        vm.prank(alice);
-        uint256 newId = v2.claimFromPredecessor(id);
-
-        assertEq(v2.expiresAt(newId), expiry, "remaining time carries across");
-        assertEq(v2.renewPrice(newId), PRICE, "the frozen renewal price carries across");
-
-        // And renewal on the successor charges the carried price, not v2's.
-        vm.prank(alice);
-        v2.renew{value: PRICE}(newId);
-        assertEq(v2.expiresAt(newId), expiry + PERIOD);
-    }
-
-    /// `period` does *not* carry across: it is immutable per contract, so the
-    /// successor's own `period` decides what the carried price buys from then
-    /// on. A successor declaring a shorter period therefore raises the effective
-    /// rate without the price moving, which is why claiming is opt-in and why a
-    /// holder reads the successor's `period` and `price` first. The original
-    /// token keeps its original terms on v1 forever.
-    function test_migration_successorPeriodGovernsWhatTheCarriedPriceBuys() public {
-        Rub3Subscription v1 = _deploySubscription(address(0));
-        vm.prank(alice);
-        uint256 id = v1.purchase{value: PRICE}(alice);
-        uint256 expiry = v1.expiresAt(id);
-
-        uint256 shortPeriod = PERIOD / 30;
-        Rub3Subscription v2 = new Rub3Subscription(
-            "Rub3 Sub v2",
-            "R3S2",
-            _identity(0, address(0)),
-            _hashes(HASH_V3),
-            _sale(PRICE),
-            _noFee(),
-            0,
-            shortPeriod,
-            COOLDOWN_BLOCKS,
-            address(v1),
-            owner
-        );
-        vm.prank(owner);
-        v1.setSuccessor(address(v2));
-
-        vm.prank(alice);
-        uint256 newId = v2.claimFromPredecessor(id);
-
-        assertEq(v2.expiresAt(newId), expiry, "remaining time carries across unchanged");
-        assertEq(v2.renewPrice(newId), PRICE, "the frozen renewal price carries across unchanged");
-        assertEq(v2.period(), shortPeriod, "the successor keeps its own period");
-
-        // The carried price now buys the successor's period, not v1's.
-        vm.prank(alice);
-        v2.renew{value: PRICE}(newId);
-        assertEq(
-            v2.expiresAt(newId), expiry + shortPeriod, "the successor's period governs the renewal"
-        );
-
-        // Nothing granted was taken: the original token renews on v1 at v1's
-        // period for the same price, forever.
-        vm.prank(alice);
-        v1.renew{value: PRICE}(id);
-        assertEq(v1.expiresAt(id), expiry + PERIOD, "the original token keeps its original terms");
-    }
-
     // ── Guarantee 3: the wrapper's trust rule ─────────────────────────────────
 
     /// "contract X, or X's successor holding a token claimed from X" - the whole
@@ -839,14 +724,13 @@ contract Rub3InvariantsTest is Test {
         // the fee terms are chosen, so a setter there would unfreeze the
         // economics of every contract it has ever deployed just as surely as
         // one on the licence would.
-        address[4] memory targets = [
+        address[3] memory targets = [
             address(nft),
-            address(_deploySubscription(address(0))),
             address(_deploySuccessor(address(nft))),
             address(new Rub3Factory(250, address(0x7EA5), address(0)))
         ];
 
-        string[30] memory forbidden = [
+        string[25] memory forbidden = [
             // Burn - nothing may destroy an issued token.
             "burn(uint256)",
             "burn(address,uint256)",
@@ -862,18 +746,10 @@ contract Rub3InvariantsTest is Test {
             "unpause()",
             "paused()",
             "setPaused(bool)",
-            // Direct invalidation of a token or its terms. `period` is
-            // immutable per contract, which is what freezes the renewal term a
-            // held token buys; a setter for it would reprice that term for
-            // every existing holder at once.
+            // Direct invalidation of a token.
             "revoke(uint256)",
             "revokeToken(uint256)",
             "invalidate(uint256)",
-            "setExpiresAt(uint256,uint256)",
-            "setRenewPrice(uint256,uint256)",
-            "setRenewPriceToken(uint256,address)",
-            "setRenewPriceAmount(uint256,uint256)",
-            "setPeriod(uint256)",
             // Proxies / upgrade hooks - code is frozen at deploy.
             "upgradeTo(address)",
             "upgradeToAndCall(address,bytes)",
@@ -965,56 +841,8 @@ contract Rub3InvariantsTest is Test {
         assertEq(nft.ownerOf(id), bob);
     }
 
-    /// Same claim for the subscription's `isValid`, including across expiry and
-    /// a post-hoc price hike.
-    function test_audit_ownerDoesItsWorst_subscriptionSurvives() public {
-        // Deployed with both rails listed, so the hostile run below can try to
-        // move each of them out from under a token that is already issued.
-        Rub3Subscription sub = new Rub3Subscription(
-            "Rub3 Sub",
-            "R3S",
-            _identity(0, address(0)),
-            _hashes(HASH_V1),
-            Rub3License.SaleTerms({price: PRICE, priceToken: address(usdc), priceAmount: 5e6}),
-            _noFee(),
-            0,
-            PERIOD,
-            COOLDOWN_BLOCKS,
-            address(0),
-            owner
-        );
-        vm.prank(alice);
-        uint256 id = sub.purchase{value: PRICE}(alice);
-        uint256 expiry = sub.expiresAt(id);
-
-        vm.startPrank(owner);
-        sub.setPrice(type(uint256).max);
-        sub.setTokenPrice(address(usdc), type(uint256).max);
-        sub.revokeWrapperHash(HASH_V1, "burned");
-        sub.withdraw(payable(owner));
-        sub.withdrawToken(address(usdc), owner);
-        sub.renounceOwnership();
-        vm.stopPrank();
-
-        assertTrue(sub.isValid(id));
-        assertEq(sub.expiresAt(id), expiry, "expiry is not writable by anyone");
-        assertEq(sub.renewPrice(id), PRICE, "the renewal snapshot is not writable by anyone");
-        assertEq(
-            sub.renewPriceToken(id), address(usdc), "the stablecoin rail is frozen per token too"
-        );
-        assertEq(sub.renewPriceAmount(id), 5e6, "and so is its amount");
-
-        // The holder can still renew, at their own frozen price, forever.
-        vm.prank(alice);
-        sub.renew{value: PRICE}(id);
-        assertEq(sub.expiresAt(id), expiry + PERIOD);
-
-        vm.prank(alice);
-        assertEq(sub.activate(id), 1);
-    }
-
     // ══════════════════════════════════════════════════════════════════════════
-    // 4. Mint ordering and predecessor typing
+    // 4. Mint ordering and the predecessor probe
     //
     //    Both protect the same thing from a different side: a grant must be
     //    whole the moment it exists, and a migration promised at deploy must
@@ -1022,83 +850,31 @@ contract Rub3InvariantsTest is Test {
     // ══════════════════════════════════════════════════════════════════════════
 
     /// `_safeMint` hands control to a contract recipient while the token already
-    /// exists. Its frozen terms must exist by then too, or the recipient can act
-    /// on a token that is not yet the thing it was sold.
-    function test_mintOrdering_subscriptionTermsExistBeforeRecipientCallback() public {
-        Rub3Subscription sub = _deploySubscription(address(0));
-        MintCallbackProbe probe = new MintCallbackProbe();
-        vm.deal(address(probe), 10 ether);
-        probe.watch(sub);
-
-        uint256 id = probe.buy(PRICE);
-
-        assertTrue(probe.fired(), "the recipient callback must have run");
-        assertEq(probe.seenRenewPrice(), PRICE, "renewal snapshot is frozen before the callback");
-        assertEq(probe.seenExpiresAt(), sub.expiresAt(id), "expiry is set before the callback");
-    }
-
-    /// Same guarantee on the claim path: a migrating holder's carried terms and
-    /// their `wasClaimed` provenance are both in place before the callback.
+    /// exists, so any per-token state a mint path writes must be written first.
+    /// The claim path is the one that writes some: a migrating holder's
+    /// `wasClaimed` provenance and the predecessor token it came from are both
+    /// in place before the callback, so `onERC721Received` can never observe a
+    /// claimed token that does not yet say it was claimed.
     function test_mintOrdering_claimStateExistsBeforeRecipientCallback() public {
-        Rub3Subscription v1 = _deploySubscription(address(0));
         MintCallbackProbe probe = new MintCallbackProbe();
         vm.deal(address(probe), 10 ether);
-        probe.watch(v1);
+        probe.watch(nft);
         uint256 id = probe.buy(PRICE);
+        assertTrue(probe.fired(), "the recipient callback must have run");
 
-        Rub3Subscription v2 = _deploySubscription(address(v1));
-        vm.startPrank(owner);
-        v1.setSuccessor(address(v2));
-        v2.setPrice(PRICE * 10); // v2 sells dearer; the carried snapshot must win
-        vm.stopPrank();
+        Rub3Access v2 = _deploySuccessor(address(nft));
+        vm.prank(owner);
+        nft.setSuccessor(address(v2));
 
         uint256 newId = probe.claim(v2, id);
 
         assertTrue(probe.seenWasClaimed(), "claim provenance is recorded before the callback");
         assertEq(
-            probe.seenRenewPrice(), PRICE, "the carried renewal price is set before the callback"
+            probe.seenClaimedFromTokenId(),
+            id,
+            "and so is the predecessor token it was claimed against"
         );
-        assertEq(v2.renewPrice(newId), PRICE);
-    }
-
-    /// `predecessor` is immutable, so a subscription pointed at a contract that
-    /// cannot answer `period()` would brick every holder's claim with no remedy
-    /// but redeployment. It fails at deploy instead, loudly and by name.
-    function test_predecessorProbe_rejectsNonSubscriptionPredecessor() public {
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, address(nft))
-        );
-        new Rub3Subscription(
-            "Rub3 Sub",
-            "R3S",
-            _identity(0, address(0)),
-            _hashes(HASH_V1),
-            _sale(PRICE),
-            _noFee(),
-            0,
-            PERIOD,
-            COOLDOWN_BLOCKS,
-            address(nft),
-            owner
-        );
-    }
-
-    /// A mistyped address with no code at all is rejected the same way.
-    function test_predecessorProbe_rejectsNonContractPredecessor() public {
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, alice));
-        new Rub3Subscription(
-            "Rub3 Sub",
-            "R3S",
-            _identity(0, address(0)),
-            _hashes(HASH_V1),
-            _sale(PRICE),
-            _noFee(),
-            0,
-            PERIOD,
-            COOLDOWN_BLOCKS,
-            alice,
-            owner
-        );
+        assertTrue(v2.wasClaimed(newId));
     }
 
     /// The probe lives on the base contract, so an access license is guarded
@@ -1146,32 +922,6 @@ contract Rub3InvariantsTest is Test {
         );
     }
 
-    /// The mirror of the subscription probe, over the same `period()`
-    /// discriminator: an access license may not declare a subscription
-    /// predecessor. Without it, `_afterClaim` on an access license carries
-    /// nothing, so any subscriber - including one lapsed years ago - could mint
-    /// a perpetual license for free. Cross-model succession is impossible by
-    /// construction, in both directions.
-    function test_predecessorProbe_accessRejectsSubscriptionPredecessor() public {
-        Rub3Subscription sub = _deploySubscription(address(0));
-
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, address(sub))
-        );
-        new Rub3Access(
-            "x",
-            "x",
-            _identity(0, address(0)),
-            _hashes(HASH_V3),
-            _sale(PRICE),
-            _noFee(),
-            0,
-            COOLDOWN_BLOCKS,
-            address(sub),
-            owner
-        );
-    }
-
     /// A well-typed access predecessor still deploys, and still completes a
     /// claim end to end. The probe never reads the *value* of `successor()`,
     /// because the predecessor points here only after this deploy.
@@ -1190,94 +940,28 @@ contract Rub3InvariantsTest is Test {
         assertEq(v2.ownerOf(newId), alice);
         assertTrue(v2.wasClaimed(newId));
     }
-
-    /// The subscription layer probes the whole slice {_afterClaim} reads, not
-    /// just the `period()` discriminator. A predecessor that answers the base
-    /// slice and `period()` but has no per-token expiry clears both earlier
-    /// layers and would still brick every claim, so it is rejected too.
-    function test_predecessorProbe_rejectsPredecessorMissingExpiresAt() public {
-        address stub = address(new PeriodOnlyPredecessor());
-
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, stub));
-        new Rub3Subscription(
-            "Rub3 Sub",
-            "R3S",
-            _identity(0, address(0)),
-            _hashes(HASH_V1),
-            _sale(PRICE),
-            _noFee(),
-            0,
-            PERIOD,
-            COOLDOWN_BLOCKS,
-            stub,
-            owner
-        );
-    }
-
-    /// And the last getter in the slice on its own: answering `period()` and
-    /// `expiresAt` is still not enough without `renewPrice`.
-    function test_predecessorProbe_rejectsPredecessorMissingRenewPrice() public {
-        address stub = address(new NoRenewPricePredecessor());
-
-        vm.expectRevert(abi.encodeWithSelector(Rub3License.IncompatiblePredecessor.selector, stub));
-        new Rub3Subscription(
-            "Rub3 Sub",
-            "R3S",
-            _identity(0, address(0)),
-            _hashes(HASH_V1),
-            _sale(PRICE),
-            _noFee(),
-            0,
-            PERIOD,
-            COOLDOWN_BLOCKS,
-            stub,
-            owner
-        );
-    }
-
-    /// A well-typed predecessor deploys, and the claim path the probe guards
-    /// works end to end.
-    function test_predecessorProbe_acceptsSubscriptionPredecessor() public {
-        Rub3Subscription v1 = _deploySubscription(address(0));
-        Rub3Subscription v2 = _deploySubscription(address(v1));
-        assertEq(v2.predecessor(), address(v1));
-
-        vm.prank(alice);
-        uint256 id = v1.purchase{value: PRICE}(alice);
-        vm.prank(owner);
-        v1.setSuccessor(address(v2));
-
-        vm.prank(alice);
-        uint256 newId = v2.claimFromPredecessor(id);
-        assertEq(v2.ownerOf(newId), alice);
-        assertEq(v2.renewPrice(newId), PRICE);
-    }
 }
 
 /// @notice Records what a token looks like from inside `onERC721Received`, i.e.
 ///         while the mint that created it is still executing. Any per-token
 ///         state a mint path writes *after* `_safeMint` is invisible here.
 contract MintCallbackProbe {
-    Rub3Subscription public sub;
+    Rub3Access public nft;
 
-    uint256 public seenRenewPrice;
-    uint256 public seenExpiresAt;
     bool public seenWasClaimed;
+    uint256 public seenClaimedFromTokenId;
     bool public fired;
 
-    function watch(Rub3Subscription sub_) external {
-        sub = sub_;
+    function watch(Rub3Access nft_) external {
+        nft = nft_;
     }
 
     function buy(uint256 value) external returns (uint256) {
-        return sub.purchase{value: value}(address(this));
+        return nft.purchase{value: value}(address(this));
     }
 
-    function claim(Rub3Subscription successor_, uint256 predecessorTokenId)
-        external
-        returns (uint256)
-    {
-        sub = successor_;
+    function claim(Rub3Access successor_, uint256 predecessorTokenId) external returns (uint256) {
+        nft = successor_;
         return successor_.claimFromPredecessor(predecessorTokenId);
     }
 
@@ -1286,40 +970,10 @@ contract MintCallbackProbe {
         returns (bytes4)
     {
         fired = true;
-        seenRenewPrice = sub.renewPrice(tokenId);
-        seenExpiresAt = sub.expiresAt(tokenId);
-        seenWasClaimed = sub.wasClaimed(tokenId);
+        seenWasClaimed = nft.wasClaimed(tokenId);
+        seenClaimedFromTokenId = nft.claimedFromTokenId(tokenId);
         return this.onERC721Received.selector;
     }
 
     receive() external payable {}
-}
-
-/// @notice Answers the base read slice and the `period()` discriminator, but
-///         none of the per-token getters {Rub3Subscription-_afterClaim} reads.
-///         A predecessor shaped like this clears both earlier probe layers.
-contract PeriodOnlyPredecessor {
-    function successor() external pure returns (address) {
-        return address(0);
-    }
-
-    function period() external pure returns (uint256) {
-        return 30 days;
-    }
-}
-
-/// @notice One getter further along than {PeriodOnlyPredecessor}: it carries an
-///         expiry but no renewal price.
-contract NoRenewPricePredecessor {
-    function successor() external pure returns (address) {
-        return address(0);
-    }
-
-    function period() external pure returns (uint256) {
-        return 30 days;
-    }
-
-    function expiresAt(uint256) external pure returns (uint256) {
-        return 0;
-    }
 }

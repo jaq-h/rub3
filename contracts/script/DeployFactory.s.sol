@@ -67,7 +67,6 @@ contract DeployFactory is Script {
                 : ""
         );
         console.log("  accessDeployer:       %s", factory.accessDeployer());
-        console.log("  subscriptionDeployer: %s", factory.subscriptionDeployer());
         console.log("");
         console.log("  Deploy through it with FACTORY=%s", address(factory));
     }

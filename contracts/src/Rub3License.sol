@@ -49,26 +49,19 @@ interface IERC3009 {
 interface IRub3Predecessor {
     function ownerOf(uint256 tokenId) external view returns (address);
     function successor() external view returns (address);
-
-    /// The subscription slice, absent on a predecessor that is not a
-    /// subscription. `period()` is read only by the constructor probes, as the
-    /// discriminator between a subscription and an access license: both
-    /// concrete contracts probe it, {Rub3Subscription} requiring a predecessor
-    /// to answer it and {Rub3Access} requiring one to fail it, so cross-model
-    /// succession cannot be deployed at all. It is immutable per contract and
-    /// never carries across a claim. `expiresAt` / `renewPrice` are the
-    /// per-token terms `_afterClaim` actually carries.
-    function period() external view returns (uint256);
-    function expiresAt(uint256 tokenId) external view returns (uint256);
-    function renewPrice(uint256 tokenId) external view returns (uint256);
 }
 
-/// @notice Abstract base shared by {Rub3Access} and {Rub3Subscription}.
+/// @notice Abstract base of {Rub3Access}, rub3's licence contract.
 ///
 /// Holds the ERC-721 + ERC-721Enumerable wiring, the metadata the wrapper reads
 /// at activation (`identityModel`, the wrapper hash set), the sale configuration
 /// (`price`, `supplyCap`), the sequential mint helper, the tier-3 activation /
 /// cooldown machinery, and the ownership invariants of implementation.md §2.4.
+///
+/// Separate from {Rub3Access} because the two answer different questions: this
+/// is the machinery every rub3 licence contract has, and {Rub3Access} is what a
+/// licence *is* - bought once, valid while held. rub3 sells one licence model
+/// (implementation.md §2.10), so there is one concrete contract today.
 ///
 /// # Ownership invariants
 ///
@@ -78,14 +71,15 @@ interface IRub3Predecessor {
 ///
 /// - **No revocation surface.** There is no burn, no admin transfer, no pause,
 ///   and no owner-callable function of any kind that can change `ownerOf`,
-///   `isValid`, or the outcome of `activate` for an already-issued token. The
-///   selectors are absent from the bytecode - see `test/Rub3Invariants.t.sol`.
+///   `honorsContract`, or the outcome of `activate` for an already-issued
+///   token. The selectors are absent from the bytecode - see
+///   `test/Rub3Invariants.t.sol`.
 /// - **No proxies.** Contract code, and therefore license terms, are frozen at
 ///   deploy. There is no upgrade hook, no delegatecall, no initializer.
 /// - **Append-only wrapper hash set.** Binary hashes are added, never replaced;
 ///   a compromised build is flagged `Revoked` with an on-chain reason. Hash
 ///   status governs *binary* trust only and is never consulted by `ownerOf`,
-///   `isValid`, or `activate`.
+///   `honorsContract`, or `activate`.
 /// - **Opt-in succession.** `successor` is a pointer, not a switch. This
 ///   contract validates its own tokens forever regardless of what it points at,
 ///   and migration onto a successor is initiated by the holder alone.
@@ -97,14 +91,16 @@ interface IRub3Predecessor {
 /// with an EIP-3009 authorization the buyer signs off-chain and *anyone* may
 /// submit (implementation.md §2.2). Neither is privileged: both take payment
 /// through one of the two helpers at the bottom of this contract and then reach
-/// the same single mint in the concrete contract, so a token bought with USDC is
+/// the same single mint in {Rub3Access}, so a token bought with USDC is
 /// indistinguishable from one bought with ETH in state, events, and terms.
 abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGuardTransient {
     /// @notice What a licence costs, on both rails.
     ///
     ///         Grouped rather than passed as three loose constructor arguments:
     ///         it names the concept, keeps the two rails visibly parallel, and
-    ///         keeps the concrete constructors inside solc's stack limit.
+    ///         holds down the constructor's argument count. That last is what
+    ///         put this struct here: loose, the three took the ABI decoder past
+    ///         solc's stack limit (implementation.md §2.2).
     struct SaleTerms {
         /// Price in wei. The ETH rail, always available.
         uint256 price;
@@ -120,9 +116,9 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///         Grouped because the two fields are not independent: the
     ///         constructor requires a TBA implementation for the account model
     ///         and forbids one for the access model, so "which model" and "which
-    ///         implementation" are one decision made once. Grouping also keeps
-    ///         {Rub3Subscription}'s constructor inside solc's stack limit, which
-    ///         a twelfth loose argument would push it past.
+    ///         implementation" are one decision made once. Grouping also holds
+    ///         the constructor's argument count down, for the reason
+    ///         {SaleTerms} gives (implementation.md §2.3).
     struct IdentityTerms {
         /// 0 = access (user_id = wallet), 1 = account (user_id = TBA).
         uint8 model;
@@ -134,10 +130,10 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///         at deploy.
     ///
     ///         Grouped for the same reasons as {SaleTerms}: it names the
-    ///         concept, and it costs the concrete constructors one stack slot
-    ///         rather than two. Both fields become `immutable`, so what a
-    ///         developer's economics are is settled before the first buyer
-    ///         looks and can never move afterwards - see {feeBps}.
+    ///         concept, and it costs the constructor one stack slot rather than
+    ///         two. Both fields become `immutable`, so what a developer's
+    ///         economics are is settled before the first buyer looks and can
+    ///         never move afterwards - see {feeBps}.
     ///
     ///         A direct (non-factory) deploy passes `FeeTerms(0, address(0))`
     ///         and carries no fee at all. That is deliberate: the templates are
@@ -192,9 +188,8 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
 
     /// @notice Purchase price in wei for *new* mints. Set by {setPrice}.
     ///
-    ///         Changing it never touches an issued token: `Rub3Access` tokens
-    ///         are paid for once, and `Rub3Subscription` snapshots each token's
-    ///         renewal price at mint (`renewPrice[tokenId]`).
+    ///         Changing it never touches an issued token: a licence is paid for
+    ///         once, and `ownerOf` is the whole entitlement from then on.
     uint256 public price;
 
     /// @notice ERC-20 accepted for purchase alongside ETH, or `address(0)` when
@@ -205,8 +200,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///         on a contract deployed before §2.2) as "ETH only".
     ///
     ///         Set by {setTokenPrice}, and like {setPrice} it moves what is
-    ///         offered to future buyers only - `Rub3Subscription` snapshots both
-    ///         rails per token at mint.
+    ///         offered to future buyers only.
     address public priceToken;
 
     /// @notice Purchase price denominated in `priceToken`, in that token's own
@@ -480,9 +474,8 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
 
     /// @notice Set the price of *future* mints.
     ///
-    /// Affects nothing already issued. `Rub3Subscription` renewals are charged
-    /// against each token's own `renewPrice` snapshot, so a price change cannot
-    /// reach a subscription somebody already holds.
+    /// Affects nothing already issued. A licence is bought once, so the only
+    /// price that ever applied to a held token is the one paid at its mint.
     function setPrice(uint256 newPrice) external onlyOwner {
         emit PriceUpdated(price, newPrice);
         price = newPrice;
@@ -491,10 +484,9 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     /// @notice Set (or withdraw) the ERC-20 rail offered to *future* buyers.
     ///
     /// `token == address(0)` (with `amount == 0`) stops offering the rail. It
-    /// reaches nothing already issued, exactly like {setPrice}: an access token
-    /// is paid for once, and a subscription snapshots *both* rails at mint, so a
-    /// holder keeps renewing in the token they bought under at the amount they
-    /// bought under even after this is repointed or cleared.
+    /// reaches nothing already issued, exactly like {setPrice}: a licence is
+    /// paid for once, so repointing or clearing the rail decides what a future
+    /// buyer may pay in and nothing else.
     function setTokenPrice(address token, uint256 amount) external onlyOwner {
         _setTokenPrice(token, amount);
     }
@@ -510,9 +502,9 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     /// @notice Flag a previously valid build as compromised, with a reason.
     ///
     /// This is a statement about a *binary*, and nothing else. It cannot change
-    /// `ownerOf`, `isValid`, `activate`, or any other token state - none of them
-    /// read {wrapperHashes}. The holder downloads a patched build and their
-    /// same license keeps working.
+    /// `ownerOf`, {honorsContract}, {activate}, or any other token state - none
+    /// of them read {wrapperHashes}. The holder downloads a patched build and
+    /// their same license keeps working.
     ///
     /// Honest limit: revocation informs new downloads and future activations.
     /// It cannot disable a compromised binary that is already running. A switch
@@ -530,7 +522,7 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///
     /// Setting, changing, or clearing this pointer has no effect on any token
     /// issued here: this contract keeps validating its own tokens forever, and
-    /// nothing in {ownerOf}, {activate}, or a subclass's `isValid` reads it.
+    /// nothing in {ownerOf}, {activate} or {honorsContract} reads it.
     /// Migration only ever happens because a holder calls
     /// {claimFromPredecessor} on the successor themselves.
     function setSuccessor(address newSuccessor) external onlyOwner {
@@ -633,15 +625,14 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
 
     // ── Payment rails (ETH and EIP-3009) ──────────────────────────────────────
 
-    /// @dev Domain tag for a *purchase* authorization nonce. Distinct from
-    ///      {_RENEW_AUTHORIZATION} so an authorization signed to buy a token can
-    ///      never be replayed to renew one, or the reverse.
+    /// @dev Domain tag for a purchase authorization nonce. Buying is the only
+    ///      thing this contract derives an EIP-3009 nonce for, so it is the
+    ///      only tag - but it stays in the preimage rather than being dropped
+    ///      as a constant that discriminates nothing: an untagged nonce is one
+    ///      a second derivation added later could reproduce verbatim, and the
+    ///      preimage of an authorization already signed cannot be changed
+    ///      afterwards.
     bytes32 internal constant _PURCHASE_AUTHORIZATION = keccak256("rub3.PurchaseAuthorization.v1");
-
-    /// @dev Domain tag for a *renewal* authorization nonce. Used only by
-    ///      {Rub3Subscription}; declared here so both derivations sit side by
-    ///      side and are visibly disjoint.
-    bytes32 internal constant _RENEW_AUTHORIZATION = keccak256("rub3.RenewAuthorization.v1");
 
     /// @notice The EIP-3009 nonce a purchase authorization must carry.
     ///
@@ -712,8 +703,6 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         tokenId = _reserveNextId();
         wasClaimed[tokenId] = true;
         claimedFromTokenId[tokenId] = predecessorTokenId;
-
-        _afterClaim(tokenId, predecessorTokenId);
 
         _safeMint(msg.sender, tokenId);
 
@@ -1025,11 +1014,6 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         _wrapperHashList.push(hash);
         emit WrapperHashAdded(hash);
     }
-
-    /// @dev Hook for subclasses to carry a migrating holder's terms across from
-    ///      the predecessor token. Runs inside {claimFromPredecessor} against the
-    ///      reserved id, before the token is minted. Default: nothing to carry.
-    function _afterClaim(uint256 tokenId, uint256 predecessorTokenId) internal virtual {}
 
     // ── Required overrides (ERC721 + ERC721Enumerable) ────────────────────────
 

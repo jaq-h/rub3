@@ -148,9 +148,9 @@ pub enum Role {
     Licence,
     /// `Rub3Factory` - deploys licence contracts, sells nothing.
     Factory,
-    /// A factory-internal deployer helper, holding one licence template's
-    /// creation code. Pinned so a factory's declared `accessDeployer()` /
-    /// `subscriptionDeployer()` can be checked against it.
+    /// A factory-internal deployer helper, holding the licence template's
+    /// creation code. Pinned so a factory's declared `accessDeployer()` can be
+    /// checked against it.
     Deployer,
     /// `Rub3CodeRegistry` - the version authority this module consults when its
     /// own table misses. Pinned because its answer is believed only after its
@@ -242,8 +242,7 @@ pub struct CanonicalContract {
 /// A label, not a version the code branches on. It exists so a refusal or an
 /// audit log can say *which* canonical contract matched, once this table holds
 /// more than one release of the same contract.
-const RELEASE: &str =
-    "2026-08, contracts at implementation.md §2.2 (exact payment on the ETH rail)";
+const RELEASE: &str = "2026-08, contracts at implementation.md §2.10 (one licence model)";
 
 /// Every contract this binary accepts as canonical rub3 code.
 ///
@@ -285,7 +284,7 @@ const RELEASE: &str =
 /// reads top to bottom.
 // One range per line, kept that way on purpose: this table is reviewed against
 // contracts/canonical-bytecode.json by eye as well as by test, and rustfmt's
-// four-lines-per-range expansion buries 55 offsets in 220 lines of braces.
+// four-lines-per-range expansion buries 31 offsets in 124 lines of braces.
 #[rustfmt::skip]
 pub static CANONICAL: &[CanonicalContract] = &[
     CanonicalContract {
@@ -320,7 +319,7 @@ pub static CANONICAL: &[CanonicalContract] = &[
         source: "contracts/src/Rub3Factory.sol",
         role: Role::Deployer,
         release: RELEASE,
-        masked_sha256: "6a1e8ae8ec90d5c2204184b92ea15111f6cf4889a05cd8316e8758a190b7647a",
+        masked_sha256: "5e22032d2ec7ef17fa18d81a01a9a07e5c9ae41a749b2445a282df3acecc7639",
         immutable_ranges: &[],
     },
     CanonicalContract {
@@ -336,20 +335,18 @@ pub static CANONICAL: &[CanonicalContract] = &[
         source: "contracts/src/Rub3Factory.sol",
         role: Role::Factory,
         release: RELEASE,
-        masked_sha256: "0b03cc18efb8dd487b52d57bc28b7a3e18bb7575f6575c20810c8517d77f4076",
+        masked_sha256: "60cf48c8baf4f9f35eb3a780c5c55e106da17a57c13b02fe0908c8f11cb78358",
         immutable_ranges: &[
-            ImmutableRange { start: 249, length: 32 },
-            ImmutableRange { start: 338, length: 32 },
-            ImmutableRange { start: 433, length: 32 },
-            ImmutableRange { start: 472, length: 32 },
-            ImmutableRange { start: 643, length: 32 },
-            ImmutableRange { start: 802, length: 32 },
-            ImmutableRange { start: 998, length: 32 },
-            ImmutableRange { start: 1239, length: 32 },
-            ImmutableRange { start: 1720, length: 32 },
-            ImmutableRange { start: 1759, length: 32 },
-            ImmutableRange { start: 2010, length: 32 },
-            ImmutableRange { start: 2049, length: 32 },
+            ImmutableRange { start: 212, length: 32 },
+            ImmutableRange { start: 301, length: 32 },
+            ImmutableRange { start: 396, length: 32 },
+            ImmutableRange { start: 548, length: 32 },
+            ImmutableRange { start: 707, length: 32 },
+            ImmutableRange { start: 793, length: 32 },
+            ImmutableRange { start: 837, length: 32 },
+            ImmutableRange { start: 1047, length: 32 },
+            ImmutableRange { start: 1694, length: 32 },
+            ImmutableRange { start: 1741, length: 32 },
         ],
     },
     CanonicalContract {
@@ -363,45 +360,6 @@ pub static CANONICAL: &[CanonicalContract] = &[
             ImmutableRange { start: 2731, length: 32 },
             ImmutableRange { start: 2852, length: 32 },
         ],
-    },
-    CanonicalContract {
-        contract: "Rub3Subscription",
-        source: "contracts/src/Rub3Subscription.sol",
-        role: Role::Licence,
-        release: RELEASE,
-        masked_sha256: "2eab4428ee29c805b4e151a0068673910e7ea4a8e45a760b61ec745f1aba65a1",
-        immutable_ranges: &[
-            ImmutableRange { start: 1284, length: 32 },
-            ImmutableRange { start: 1628, length: 32 },
-            ImmutableRange { start: 1812, length: 32 },
-            ImmutableRange { start: 2169, length: 32 },
-            ImmutableRange { start: 2488, length: 32 },
-            ImmutableRange { start: 2657, length: 32 },
-            ImmutableRange { start: 2990, length: 32 },
-            ImmutableRange { start: 3346, length: 32 },
-            ImmutableRange { start: 4973, length: 32 },
-            ImmutableRange { start: 5906, length: 32 },
-            ImmutableRange { start: 6557, length: 32 },
-            ImmutableRange { start: 6614, length: 32 },
-            ImmutableRange { start: 6784, length: 32 },
-            ImmutableRange { start: 6828, length: 32 },
-            ImmutableRange { start: 7303, length: 32 },
-            ImmutableRange { start: 7449, length: 32 },
-            ImmutableRange { start: 7984, length: 32 },
-            ImmutableRange { start: 8726, length: 32 },
-            ImmutableRange { start: 9736, length: 32 },
-            ImmutableRange { start: 9778, length: 32 },
-            ImmutableRange { start: 9882, length: 32 },
-            ImmutableRange { start: 11420, length: 32 },
-        ],
-    },
-    CanonicalContract {
-        contract: "Rub3SubscriptionDeployer",
-        source: "contracts/src/Rub3Factory.sol",
-        role: Role::Deployer,
-        release: RELEASE,
-        masked_sha256: "218f4165d090e7b7109507b178a50a03b1ad63fb65213ec10ffecc19a4de4429",
-        immutable_ranges: &[],
     },
 ];
 
@@ -505,15 +463,10 @@ pub const FORBIDDEN_SIGNATURES: &[&str] = &[
     "unpause()",
     "paused()",
     "setPaused(bool)",
-    // Direct invalidation of a token or its terms.
+    // Direct invalidation of a token.
     "revoke(uint256)",
     "revokeToken(uint256)",
     "invalidate(uint256)",
-    "setExpiresAt(uint256,uint256)",
-    "setRenewPrice(uint256,uint256)",
-    "setRenewPriceToken(uint256,address)",
-    "setRenewPriceAmount(uint256,uint256)",
-    "setPeriod(uint256)",
     // Proxies / upgrade hooks - code is frozen at deploy.
     "upgradeTo(address)",
     "upgradeToAndCall(address,bytes)",
@@ -614,10 +567,10 @@ const PUSH32: u8 = 0x7f;
 ///    and that is what turns "we did not look at these bytes" into "these bytes
 ///    cannot execute". It holds by construction on compiler output: solc
 ///    compiles every read of an immutable to a `PUSH32` whose operand the
-///    deployer fills in. Measured rather than assumed, on all four of this
+///    deployer fills in. Measured rather than assumed, on all three of this
 ///    repository's contracts that have immutables - `Rub3Access`,
-///    `Rub3Subscription`, `Rub3Factory` and `Rub3Registry`; the two deployer
-///    helpers and `Rub3CodeRegistry` have none. Should a future compiler emit
+///    `Rub3Factory` and `Rub3Registry`; the deployer helper and
+///    `Rub3CodeRegistry` have none. Should a future compiler emit
 ///    them another way, this rejects the registry's table and the gate falls
 ///    back to refusing - fail-closed, on the path that spends money, which is
 ///    the right direction to be wrong in.
@@ -1084,9 +1037,9 @@ fn sanitised(record: RegistryRecord) -> RegistryRecord {
 ///
 /// Sixteen is deliberately far above anything legitimate rather than tight. A
 /// table is per *code layout*, not per contract and not per release: the whole
-/// canonical set spans five, one each for `Rub3Access`, `Rub3Subscription`,
-/// `Rub3Factory` and `Rub3Registry` plus the empty one the two deployer helpers
-/// and `Rub3CodeRegistry` itself share. A sixth appears only when a future
+/// canonical set spans four, one each for `Rub3Access`, `Rub3Factory` and
+/// `Rub3Registry` plus the empty one `Rub3AccessDeployer` and
+/// `Rub3CodeRegistry` itself share. A fifth appears only when a future
 /// contract's immutables land at offsets none of those describe, so sixteen
 /// leaves room for many such releases live at once. Raise it when a real
 /// deployment needs more tables than this, never to accommodate a registry
@@ -2230,8 +2183,8 @@ mod tests {
             }
         }
         assert!(
-            licences >= 2,
-            "the table should pin both licence templates, found {licences}"
+            licences >= 1,
+            "the table should pin the licence template, found {licences}"
         );
     }
 
@@ -2800,11 +2753,7 @@ mod tests {
         let table = registry_only_table(&registry_code);
         let hash = masked_code_digest(&code, &layout()).expect("ranges fit");
 
-        let mut record = record_for(
-            "Rub3Subscription",
-            Some(Role::Licence),
-            RecordStatus::Active,
-        );
+        let mut record = record_for("Rub3Access", Some(Role::Licence), RecordStatus::Active);
         record.offsets = layout();
 
         let chain = ScriptedChain::new()
@@ -2813,7 +2762,7 @@ mod tests {
             .with_record(hash, record);
 
         match consult_registry_against(&chain, registry_address(), &code, table) {
-            RegistryVerdict::Known(found) => assert_eq!(found.contract, "Rub3Subscription"),
+            RegistryVerdict::Known(found) => assert_eq!(found.contract, "Rub3Access"),
             other => panic!("the older candidate table holds the answer, got {other:?}"),
         }
         assert_eq!(

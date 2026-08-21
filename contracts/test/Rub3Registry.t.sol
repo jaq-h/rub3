@@ -8,7 +8,6 @@ import {Rub3Access} from "../src/Rub3Access.sol";
 import {Rub3CodeRegistry} from "../src/Rub3CodeRegistry.sol";
 import {Rub3License} from "../src/Rub3License.sol";
 import {Rub3Registry} from "../src/Rub3Registry.sol";
-import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 import {Rub3Factory, Rub3LicenseParams} from "../src/Rub3Factory.sol";
 import {MockEIP3009Token} from "./mocks/MockEIP3009Token.sol";
 
@@ -81,7 +80,6 @@ contract Rub3RegistryTest is Test {
     uint256 internal constant PRICE = 1 ether;
     uint256 internal constant USDC_PRICE = 5_000_000; // 5 USDC, 6 decimals
     uint256 internal constant COOLDOWN_BLOCKS = 15;
-    uint256 internal constant PERIOD = 30 days;
     uint16 internal constant FEE_BPS = 250;
 
     address internal treasury = address(0x7EA5);
@@ -771,12 +769,11 @@ contract Rub3RegistryTest is Test {
     /// contract's ability to sell another one are all measured afterwards.
     function test_delisting_cannotTouchAHeldTokenOrALiveSession() public {
         vm.prank(developer);
-        Rub3Subscription license = Rub3Subscription(
-            factory.deploySubscription(_params(_sale(address(usdc), USDC_PRICE)), PERIOD)
-        );
+        Rub3Access license =
+            Rub3Access(factory.deployAccess(_params(_sale(address(usdc), USDC_PRICE))));
 
         vm.prank(developer);
-        registry.register(address(license), "Subscribed App", "ipfs://bafySub");
+        registry.register(address(license), "Listed App", "ipfs://bafyListed");
 
         vm.prank(alice);
         uint256 tokenId = license.purchase{value: PRICE}(address(0));
@@ -785,7 +782,7 @@ contract Rub3RegistryTest is Test {
         uint256 sessionId = license.activate(tokenId);
 
         assertTrue(registry.isListed(address(license)));
-        assertTrue(license.isValid(tokenId));
+        assertTrue(license.honorsContract(address(license), tokenId));
 
         // Pull every lever.
         vm.prank(developer);
@@ -800,9 +797,8 @@ contract Rub3RegistryTest is Test {
 
         // Nothing else moved.
         assertEq(license.ownerOf(tokenId), alice, "the token is still owned");
-        assertTrue(license.isValid(tokenId), "the token is still valid");
+        assertTrue(license.honorsContract(address(license), tokenId), "the token is still honoured");
         assertEq(license.activeSessionId(tokenId), sessionId, "the session is still live");
-        assertEq(license.expiresAt(tokenId) > block.timestamp, true, "the term is untouched");
 
         // A fresh activation still works, which is the read a wrapper makes on
         // every launch.
@@ -817,11 +813,11 @@ contract Rub3RegistryTest is Test {
         uint256 secondToken = license.purchase{value: PRICE}(address(0));
         assertEq(license.ownerOf(secondToken), stranger);
 
-        // Renewal, the other thing a licence contract owes a holder over time.
-        vm.warp(block.timestamp + 1 days);
+        // And the holder can still transfer it: the entitlement stays a
+        // tradable asset no discovery lever can freeze.
         vm.prank(alice);
-        license.renew{value: license.renewPrice(tokenId)}(tokenId);
-        assertTrue(license.isValid(tokenId));
+        license.transferFrom(alice, stranger, tokenId);
+        assertEq(license.ownerOf(tokenId), stranger);
     }
 
     /// The same claim from the other side: every registry write leaves the

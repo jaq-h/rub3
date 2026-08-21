@@ -3,7 +3,6 @@ pragma solidity ^0.8.28;
 
 import {Rub3Access} from "./Rub3Access.sol";
 import {Rub3License} from "./Rub3License.sol";
-import {Rub3Subscription} from "./Rub3Subscription.sol";
 
 /// @notice Everything a license contract needs at deploy except its economics,
 ///         which the factory stamps rather than accepts.
@@ -26,13 +25,13 @@ struct Rub3LicenseParams {
 
 /// @notice Deploys {Rub3Access}. Split out of {Rub3Factory} for one reason: a
 ///         contract's runtime code has to carry the creation code of everything
-///         it can `new`, and the two license contracts together are over 30 KB -
-///         comfortably past the 24,576-byte runtime limit, so one contract
-///         cannot hold both.
+///         it can `new`, and {Rub3Access}'s is over 16 KB against a
+///         24,576-byte runtime limit, so a factory holding it directly would
+///         have almost nothing left for itself.
 ///
 /// A `new` reached only from a *constructor* lands in the creation code instead,
 /// which is discarded after deployment. {Rub3Factory} therefore builds one of
-/// each of these in its own constructor and keeps the addresses as immutables:
+/// this contract in its own constructor and keeps the address as an immutable:
 /// the factory's runtime stays small, and which license implementation it
 /// deploys is fixed by the same transaction that created it.
 ///
@@ -63,32 +62,6 @@ contract Rub3AccessDeployer {
     }
 }
 
-/// @notice Deploys {Rub3Subscription}. The subscription half of
-///         {Rub3AccessDeployer}; see it for why the split exists.
-contract Rub3SubscriptionDeployer {
-    function deploy(
-        Rub3LicenseParams memory params,
-        Rub3License.FeeTerms memory fee,
-        uint256 period
-    ) external returns (address license) {
-        return address(
-            new Rub3Subscription(
-                params.name,
-                params.symbol,
-                params.identity,
-                params.wrapperHashes,
-                params.sale,
-                fee,
-                params.supplyCap,
-                period,
-                params.cooldownBlocks,
-                params.predecessor,
-                params.owner
-            )
-        );
-    }
-}
-
 /// @notice The canonical deployment path for rub3 license contracts, and the
 ///         protocol's revenue mechanism (implementation.md §2.3).
 ///
@@ -97,7 +70,7 @@ contract Rub3SubscriptionDeployer {
 /// 1. **It stamps the economics.** Every contract it deploys is constructed with
 ///    this factory's `feeBps` and `treasury`, which become `immutable` on the
 ///    license contract. From then on the split runs on-chain inside `purchase()`
-///    and `renew()` on both payment rails - see {Rub3License-_accrueFee}.
+///    on both payment rails - see {Rub3License-_accrueFee}.
 /// 2. **It records what it deployed.** `isDeployed` is the registry's and the
 ///    marketplace's whole trust rule (§3.2, §4.3): they list what this mapping
 ///    records and nothing else.
@@ -114,9 +87,9 @@ contract Rub3SubscriptionDeployer {
 ///
 /// This factory holds no owner, no admin, and no privileged caller. It cannot
 /// touch a contract it deployed - the license contract's owner is the developer,
-/// and `isDeployed` is write-once from `deployAccess` / `deploySubscription`.
-/// Un-recording a deployment is not implemented, because a listing that could be
-/// withdrawn is a revocation surface pointed at the registry.
+/// and `isDeployed` is write-once from {deployAccess}. Un-recording a deployment
+/// is not implemented, because a listing that could be withdrawn is a revocation
+/// surface pointed at the registry.
 ///
 /// # Deploying directly is still fine
 ///
@@ -135,10 +108,10 @@ contract Rub3SubscriptionDeployer {
 /// treasury never paid. So this factory deploys only successors to contracts a
 /// rub3 factory already recorded - see {isCanonicalPredecessor}.
 ///
-/// The check lives here and **not** on the deployer helpers. They are
-/// permissionless and record nothing, so a licence they produce has no
+/// The check lives here and **not** on {Rub3AccessDeployer}. It is
+/// permissionless and records nothing, so a licence it produces has no
 /// `isDeployed` row and none of the standing the laundering route was after;
-/// constraining them would restrict a path that is already equivalent to
+/// constraining it would restrict a path that is already equivalent to
 /// deploying the template yourself. The rule guards the registry row, so it
 /// belongs where the registry row is granted.
 contract Rub3Factory {
@@ -192,9 +165,6 @@ contract Rub3Factory {
     ///         factory's own runtime code does not contain it.
     address public immutable accessDeployer;
 
-    /// @notice The {Rub3SubscriptionDeployer} counterpart of {accessDeployer}.
-    address public immutable subscriptionDeployer;
-
     /// @notice True for license contracts this factory deployed. The registry's
     ///         and the marketplace's entire trust rule; write-once, never
     ///         cleared.
@@ -205,18 +175,20 @@ contract Rub3Factory {
     ///      {Rub3License} keeps `_wrapperHashList`.
     address[] private _deployments;
 
-    /// @notice A license contract was deployed and recorded. `model` is
-    ///         `0` for {Rub3Access} and `1` for {Rub3Subscription}, matching the
-    ///         order of the two deploy functions.
+    /// @notice A license contract was deployed and recorded.
     ///
     ///         The fee terms are logged with each deployment because they are
     ///         what that contract is frozen at: a later factory version charging
     ///         something else does not change this row.
+    ///
+    ///         There is no licence-model field, because there is one licence
+    ///         model: every address this event names is a {Rub3Access}, and a
+    ///         field that is always the same value is one a reader has to check
+    ///         anyway (implementation.md §2.10).
     event LicenseDeployed(
         address indexed license,
         address indexed owner,
         address indexed deployer,
-        uint8 model,
         uint16 feeBps,
         address treasury
     );
@@ -273,13 +245,12 @@ contract Rub3Factory {
         treasury = treasury_;
         previousFactory = previousFactory_;
 
-        // Created here rather than passed in, so the implementations this
-        // factory deploys are settled by the transaction that created it and
+        // Created here rather than passed in, so the implementation this
+        // factory deploys is settled by the transaction that created it and
         // cannot be substituted afterwards or mis-supplied at construction. The
-        // `new` sits in a constructor, so their creation code lives in this
+        // `new` sits in a constructor, so its creation code lives in this
         // factory's initcode and never in its runtime code.
         accessDeployer = address(new Rub3AccessDeployer());
-        subscriptionDeployer = address(new Rub3SubscriptionDeployer());
     }
 
     /// @notice Deploy a {Rub3Access} carrying this factory's fee terms, and
@@ -289,23 +260,7 @@ contract Rub3Factory {
     function deployAccess(Rub3LicenseParams calldata params) external returns (address license) {
         _requireCanonicalPredecessor(params.predecessor);
         license = Rub3AccessDeployer(accessDeployer).deploy(_withOwner(params), _fee());
-        _record(license, 0);
-    }
-
-    /// @notice Deploy a {Rub3Subscription} carrying this factory's fee terms,
-    ///         and record it.
-    /// @param  period Subscription length in seconds. Immutable on the deployed
-    ///         contract, like every other renewal term.
-    /// @dev    `params.owner` of `address(0)` means `msg.sender`.
-    ///         `params.predecessor` must satisfy {isCanonicalPredecessor}.
-    function deploySubscription(Rub3LicenseParams calldata params, uint256 period)
-        external
-        returns (address license)
-    {
-        _requireCanonicalPredecessor(params.predecessor);
-        license = Rub3SubscriptionDeployer(subscriptionDeployer)
-            .deploy(_withOwner(params), _fee(), period);
-        _record(license, 1);
+        _record(license);
     }
 
     /// @notice Number of contracts this factory has deployed.
@@ -331,7 +286,7 @@ contract Rub3Factory {
     ///         {MAX_PREDECESSOR_FACTORY_HOPS} hops.
     ///
     ///         Call it before deploying: it is the whole rule, and it is the
-    ///         only reason `deployAccess` / `deploySubscription` revert with
+    ///         only reason {deployAccess} reverts with
     ///         {PredecessorNotCanonical}.
     /// @dev    A developer whose predecessor is not canonical - a pre-factory
     ///         contract, or one deployed directly - can still deploy the
@@ -374,16 +329,9 @@ contract Rub3Factory {
         if (!isCanonicalPredecessor(predecessor)) revert PredecessorNotCanonical(predecessor);
     }
 
-    function _record(address license, uint8 model) private {
+    function _record(address license) private {
         isDeployed[license] = true;
         _deployments.push(license);
-        emit LicenseDeployed(
-            license,
-            Rub3License(license).owner(),
-            msg.sender,
-            model,
-            feeBps,
-            treasury
-        );
+        emit LicenseDeployed(license, Rub3License(license).owner(), msg.sender, feeBps, treasury);
     }
 }

@@ -5,12 +5,10 @@ import {Script, console} from "forge-std/Script.sol";
 import {Rub3Access} from "../src/Rub3Access.sol";
 import {Rub3Factory, Rub3LicenseParams} from "../src/Rub3Factory.sol";
 import {Rub3License} from "../src/Rub3License.sol";
-import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 
-/// @notice Deploys either Rub3Access or Rub3Subscription from environment variables.
+/// @notice Deploys a Rub3Access licence contract from environment variables.
 ///
 /// Required env vars:
-///   CONTRACT_TYPE      - "access" | "subscription"
 ///   TOKEN_NAME         - ERC-721 name  (e.g. "My App License")
 ///   TOKEN_SYMBOL       - ERC-721 symbol (e.g. "MAL")
 ///   IDENTITY_MODEL     - 0 (access: user_id = wallet) | 1 (account: user_id = TBA)
@@ -47,7 +45,6 @@ import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 ///                     or the deploy reverts `PredecessorNotCanonical(address)` -
 ///                     see contracts.md -> "A factory deploy may only succeed a
 ///                     canonical predecessor".
-///   PERIOD          - subscription length in seconds (required for "subscription")
 ///   FACTORY         - address of a deployed Rub3Factory to deploy through
 ///                     (default: 0x0 = deploy directly). Going through a factory
 ///                     is what stamps the protocol fee and records the contract
@@ -76,7 +73,6 @@ contract Deploy is Script {
     ///      the reading, the deploying, and the summary each get their own
     ///      frame.
     struct DeployParams {
-        string contractType;
         string name;
         string symbol;
         Rub3License.IdentityTerms identity;
@@ -84,7 +80,6 @@ contract Deploy is Script {
         address owner;
         uint256 supplyCap;
         uint256 cooldownBlocks;
-        uint256 period;
         address factory;
         Rub3License.SaleTerms sale;
         bytes32[] wrapperHashes;
@@ -103,7 +98,6 @@ contract Deploy is Script {
     /// Reads every deploy input from the environment.
     function _params() internal view returns (DeployParams memory p) {
         // ── Required params ───────────────────────────────────────────────────
-        p.contractType = vm.envString("CONTRACT_TYPE");
         p.name = vm.envString("TOKEN_NAME");
         p.symbol = vm.envString("TOKEN_SYMBOL");
         p.identity.model = uint8(vm.envUint("IDENTITY_MODEL"));
@@ -112,8 +106,6 @@ contract Deploy is Script {
         p.supplyCap = vm.envOr("SUPPLY_CAP", uint256(0));
         p.cooldownBlocks = vm.envOr("COOLDOWN_BLOCKS", uint256(1800));
         p.owner = vm.envOr("OWNER", msg.sender);
-        // period is only required for "subscription"; default 0 for "access"
-        p.period = _eq(p.contractType, "subscription") ? vm.envUint("PERIOD") : 0;
         // TBA implementation - required for account model, forbidden for access model.
         p.identity.tbaImplementation = vm.envOr("TBA_IMPLEMENTATION", address(0));
         // Contract whose holders may migrate onto this one. Immutable once deployed.
@@ -130,7 +122,7 @@ contract Deploy is Script {
         });
     }
 
-    /// Deploys the contract `CONTRACT_TYPE` names. Must run inside a broadcast.
+    /// Deploys the licence contract. Must run inside a broadcast.
     function _deploy(DeployParams memory p) internal returns (address) {
         if (p.factory != address(0)) return _deployViaFactory(p);
 
@@ -139,44 +131,18 @@ contract Deploy is Script {
         // {Rub3Factory}.
         Rub3License.FeeTerms memory noFee = Rub3License.FeeTerms({feeBps: 0, treasury: address(0)});
 
-        if (_eq(p.contractType, "access")) {
-            return address(
-                new Rub3Access(
-                    p.name,
-                    p.symbol,
-                    p.identity,
-                    p.wrapperHashes,
-                    p.sale,
-                    noFee,
-                    p.supplyCap,
-                    p.cooldownBlocks,
-                    p.predecessor,
-                    p.owner
-                )
-            );
-        }
-        if (_eq(p.contractType, "subscription")) {
-            return address(
-                new Rub3Subscription(
-                    p.name,
-                    p.symbol,
-                    p.identity,
-                    p.wrapperHashes,
-                    p.sale,
-                    noFee,
-                    p.supplyCap,
-                    p.period,
-                    p.cooldownBlocks,
-                    p.predecessor,
-                    p.owner
-                )
-            );
-        }
-        revert(
-            string.concat(
-                "Deploy: unknown CONTRACT_TYPE '",
-                p.contractType,
-                "' (expected 'access' or 'subscription')"
+        return address(
+            new Rub3Access(
+                p.name,
+                p.symbol,
+                p.identity,
+                p.wrapperHashes,
+                p.sale,
+                noFee,
+                p.supplyCap,
+                p.cooldownBlocks,
+                p.predecessor,
+                p.owner
             )
         );
     }
@@ -197,16 +163,7 @@ contract Deploy is Script {
             owner: p.owner
         });
 
-        Rub3Factory factory = Rub3Factory(p.factory);
-        if (_eq(p.contractType, "access")) return factory.deployAccess(lp);
-        if (_eq(p.contractType, "subscription")) return factory.deploySubscription(lp, p.period);
-        revert(
-            string.concat(
-                "Deploy: unknown CONTRACT_TYPE '",
-                p.contractType,
-                "' (expected 'access' or 'subscription')"
-            )
-        );
+        return Rub3Factory(p.factory).deployAccess(lp);
     }
 
     /// Prints what was deployed and on what terms.
@@ -221,10 +178,7 @@ contract Deploy is Script {
     // forgefmt: disable-next-item
     function _summary(DeployParams memory p, address deployed) internal view {
         console.log("");
-        console.log("Deployed Rub3%s%s",
-            _capitalize(p.contractType),
-            block.chainid == 1 ? "" : " (not mainnet)"
-        );
+        console.log("Deployed Rub3Access%s", block.chainid == 1 ? "" : " (not mainnet)");
         console.log("  address:       %s", deployed);
         console.log("  chain:         %d", block.chainid);
         console.log("  name:          %s", p.name);
@@ -267,10 +221,6 @@ contract Deploy is Script {
                 Rub3License(deployed).treasury()
             );
         }
-        if (_eq(p.contractType, "subscription")) {
-            console.log("  period:        %d sec", p.period);
-            console.log("                 (~%d days)", p.period / 86400);
-        }
     }
 
     /// Reads the launch release's wrapper hashes: `WRAPPER_HASHES` (comma-separated)
@@ -287,22 +237,5 @@ contract Deploy is Script {
         bytes32[] memory single = new bytes32[](1);
         single[0] = one;
         return single;
-    }
-
-    function _eq(string memory a, string memory b) internal pure returns (bool) {
-        return keccak256(bytes(a)) == keccak256(bytes(b));
-    }
-
-    // Returns a copy of `s` with the first character uppercased.
-    // Must copy - `bytes(s)` aliases the original memory and would mutate the caller's string.
-    function _capitalize(string memory s) internal pure returns (string memory) {
-        bytes memory src = bytes(s);
-        if (src.length == 0) return s;
-        bytes memory dst = new bytes(src.length);
-        for (uint256 i = 0; i < src.length; i++) {
-            dst[i] = src[i];
-        }
-        if (dst[0] >= 0x61 && dst[0] <= 0x7a) dst[0] = bytes1(uint8(dst[0]) - 32);
-        return string(dst);
     }
 }

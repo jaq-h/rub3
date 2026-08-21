@@ -4,7 +4,6 @@ pragma solidity ^0.8.28;
 import {Test, Vm} from "forge-std/Test.sol";
 import {Rub3Access} from "../src/Rub3Access.sol";
 import {Rub3License} from "../src/Rub3License.sol";
-import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 import {Rub3Factory, Rub3LicenseParams, Rub3AccessDeployer} from "../src/Rub3Factory.sol";
 import {MockEIP3009Token} from "./mocks/MockEIP3009Token.sol";
 
@@ -65,7 +64,6 @@ contract Rub3FactoryTest is Test {
     uint256 internal constant PRICE = 1 ether;
     uint256 internal constant USDC_PRICE = 5_000_000; // 5 USDC, 6 decimals
     uint256 internal constant COOLDOWN_BLOCKS = 15;
-    uint256 internal constant PERIOD = 30 days;
 
     /// Within [MIN_FEE_BPS, MAX_FEE_BPS]. Deliberately not a round 2% or 3%: the
     /// rate is a deploy-time decision and the tests must not read as if one
@@ -80,7 +78,10 @@ contract Rub3FactoryTest is Test {
     Rub3Factory internal factory;
     MockEIP3009Token internal usdc;
     Rub3Access internal nft;
-    Rub3Subscription internal sub;
+    /// A second deploy through the same factory. The factory's record-keeping -
+    /// `isDeployed`, the ordered enumeration, the per-deploy log - is only
+    /// interesting with more than one row in it.
+    Rub3Access internal second;
 
     function setUp() public {
         buyer = vm.addr(BUYER_PK);
@@ -89,7 +90,7 @@ contract Rub3FactoryTest is Test {
 
         vm.startPrank(developer);
         nft = Rub3Access(factory.deployAccess(_params(_sale(PRICE))));
-        sub = Rub3Subscription(factory.deploySubscription(_params(_sale(PRICE)), PERIOD));
+        second = Rub3Access(factory.deployAccess(_params(_sale(PRICE))));
         vm.stopPrank();
 
         usdc.mint(buyer, 1_000_000_000); // 1000 USDC
@@ -211,24 +212,6 @@ contract Rub3FactoryTest is Test {
         );
     }
 
-    function _renewAuth(Rub3Subscription target, uint256 tokenId, uint256 value, bytes32 salt)
-        internal
-        view
-        returns (Rub3License.PaymentAuthorization memory auth)
-    {
-        auth.from = buyer;
-        auth.validAfter = 0;
-        auth.validBefore = block.timestamp + 1 hours;
-        auth.salt = salt;
-        auth.signature = _sign(
-            address(target),
-            value,
-            auth.validAfter,
-            auth.validBefore,
-            target.renewAuthorizationNonce(tokenId, salt)
-        );
-    }
-
     function _sign(
         address payee,
         uint256 value,
@@ -247,33 +230,33 @@ contract Rub3FactoryTest is Test {
 
     // ══ 1. The factory ═══════════════════════════════════════════════════════
 
-    function test_factory_stampsItsOwnTermsOnBothModels() public view {
+    function test_factory_stampsItsOwnTermsOnEveryDeploy() public view {
         assertEq(factory.feeBps(), FEE_BPS);
         assertEq(factory.treasury(), treasury);
 
         assertEq(nft.feeBps(), FEE_BPS);
         assertEq(nft.treasury(), treasury);
-        assertEq(sub.feeBps(), FEE_BPS);
-        assertEq(sub.treasury(), treasury);
+        assertEq(second.feeBps(), FEE_BPS);
+        assertEq(second.treasury(), treasury);
     }
 
     function test_factory_recordsWhatItDeployed() public view {
         assertTrue(factory.isDeployed(address(nft)));
-        assertTrue(factory.isDeployed(address(sub)));
+        assertTrue(factory.isDeployed(address(second)));
 
         assertEq(factory.deploymentCount(), 2);
         assertEq(factory.deploymentAt(0), address(nft));
-        assertEq(factory.deploymentAt(1), address(sub));
+        assertEq(factory.deploymentAt(1), address(second));
 
         address[] memory all = factory.deployments();
         assertEq(all.length, 2);
         assertEq(all[0], address(nft));
-        assertEq(all[1], address(sub));
+        assertEq(all[1], address(second));
     }
 
     function test_factory_ownerDefaultsToCaller() public view {
         assertEq(nft.owner(), developer);
-        assertEq(sub.owner(), developer);
+        assertEq(second.owner(), developer);
     }
 
     function test_factory_explicitOwnerIsHonored() public {
@@ -293,7 +276,7 @@ contract Rub3FactoryTest is Test {
         address deployed = factory.deployAccess(_params(_saleEthOnly(PRICE)));
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        bytes32 topic = keccak256("LicenseDeployed(address,address,address,uint8,uint16,address)");
+        bytes32 topic = keccak256("LicenseDeployed(address,address,address,uint16,address)");
 
         bool found;
         for (uint256 i = 0; i < logs.length; i++) {
@@ -302,17 +285,11 @@ contract Rub3FactoryTest is Test {
             assertEq(address(uint160(uint256(logs[i].topics[1]))), deployed);
             assertEq(address(uint160(uint256(logs[i].topics[2]))), developer); // owner
             assertEq(address(uint160(uint256(logs[i].topics[3]))), developer); // deployer
-            (uint8 model, uint16 feeBps, address treasury_) =
-                abi.decode(logs[i].data, (uint8, uint16, address));
-            assertEq(model, 0);
+            (uint16 feeBps, address treasury_) = abi.decode(logs[i].data, (uint16, address));
             assertEq(feeBps, FEE_BPS);
             assertEq(treasury_, treasury);
         }
         assertTrue(found, "LicenseDeployed not emitted");
-    }
-
-    function test_factory_subscriptionCarriesItsPeriod() public view {
-        assertEq(sub.period(), PERIOD);
     }
 
     function test_factory_rejectsFeeBelowRange() public {
@@ -345,20 +322,20 @@ contract Rub3FactoryTest is Test {
         new Rub3Factory(FEE_BPS, address(0), address(0));
     }
 
-    /// The factory's initcode carries both deployers, which carry both licence
-    /// implementations, so growing the contracts eats into the EIP-3860 limit.
-    /// Left unguarded, the first sign of trouble would be an undeployable
+    /// The factory's initcode carries its deployer helper, which carries the
+    /// licence implementation, so growing the contracts eats into the EIP-3860
+    /// limit. Left unguarded, the first sign of trouble would be an undeployable
     /// factory on mainnet.
     function test_factory_initcodeFitsUnderEip3860() public pure {
         assertLt(type(Rub3Factory).creationCode.length, 49_152);
     }
 
-    /// The runtime limit is the reason the deployers are separate contracts at
-    /// all: the two licences together are over 30 KB of creation code.
+    /// The runtime limit is the reason the deployer is a separate contract at
+    /// all: `Rub3Access`'s creation code alone is over 16 KB, and a factory
+    /// holding it in its own runtime would have almost nothing left.
     function test_factory_runtimeFitsUnderTheCodeSizeLimit() public view {
         assertLt(address(factory).code.length, 24_576);
         assertLt(factory.accessDeployer().code.length, 24_576);
-        assertLt(factory.subscriptionDeployer().code.length, 24_576);
     }
 
     // ══ 2. Immutability: the product promise ═════════════════════════════════
@@ -654,21 +631,24 @@ contract Rub3FactoryTest is Test {
         assertEq(address(f).balance, 0);
     }
 
-    function test_eth_renewalIsChargedToo() public {
+    /// The fee is taken on *every* payment the contract receives, not once per
+    /// contract: a second sale accrues a second fee, and the two shares still
+    /// sum to what arrived.
+    function test_eth_everyPaymentIsChargedNotJustTheFirst() public {
         vm.prank(buyer);
-        uint256 id = sub.purchase{value: PRICE}(address(0));
+        second.purchase{value: PRICE}(address(0));
 
-        uint256 afterMint = sub.feesAccrued();
-        assertEq(afterMint, _expectedFee(PRICE, FEE_BPS));
+        uint256 afterFirst = second.feesAccrued();
+        assertEq(afterFirst, _expectedFee(PRICE, FEE_BPS));
 
         vm.prank(buyer);
-        sub.renew{value: PRICE}(id);
+        second.purchase{value: PRICE}(address(0));
 
-        assertEq(sub.feesAccrued(), afterMint * 2);
+        assertEq(second.feesAccrued(), afterFirst * 2);
 
-        sub.withdrawFees();
+        second.withdrawFees();
         vm.prank(developer);
-        sub.withdraw(payable(developer));
+        second.withdraw(payable(developer));
         assertEq(treasury.balance + developer.balance, 2 * PRICE);
     }
 
@@ -721,23 +701,27 @@ contract Rub3FactoryTest is Test {
         assertEq(usdc.balanceOf(treasury), fee);
     }
 
-    function test_token_renewalIsChargedToo() public {
+    /// The stablecoin counterpart of
+    /// {test_eth_everyPaymentIsChargedNotJustTheFirst}.
+    function test_token_everyPaymentIsChargedNotJustTheFirst() public {
         vm.prank(submitter);
-        uint256 id = sub.purchaseWithAuthorization(
-            buyer, _purchaseAuth(sub, buyer, USDC_PRICE, keccak256("s1"))
+        second.purchaseWithAuthorization(
+            buyer, _purchaseAuth(second, buyer, USDC_PRICE, keccak256("s1"))
         );
 
         uint256 fee = _expectedFee(USDC_PRICE, FEE_BPS);
-        assertEq(sub.tokenFeesAccrued(address(usdc)), fee);
+        assertEq(second.tokenFeesAccrued(address(usdc)), fee);
 
         vm.prank(submitter);
-        sub.renewWithAuthorization(id, _renewAuth(sub, id, USDC_PRICE, keccak256("s2")));
+        second.purchaseWithAuthorization(
+            buyer, _purchaseAuth(second, buyer, USDC_PRICE, keccak256("s2"))
+        );
 
-        assertEq(sub.tokenFeesAccrued(address(usdc)), fee * 2);
+        assertEq(second.tokenFeesAccrued(address(usdc)), fee * 2);
 
-        sub.withdrawTokenFees(address(usdc));
+        second.withdrawTokenFees(address(usdc));
         vm.prank(developer);
-        sub.withdrawToken(address(usdc), developer);
+        second.withdrawToken(address(usdc), developer);
         assertEq(usdc.balanceOf(treasury) + usdc.balanceOf(developer), USDC_PRICE * 2);
     }
 
@@ -1033,41 +1017,7 @@ contract Rub3FactoryTest is Test {
     function test_predecessor_zeroIsAlwaysCanonical() public view {
         assertTrue(factory.isCanonicalPredecessor(address(0)));
         assertEq(nft.predecessor(), address(0));
-        assertEq(sub.predecessor(), address(0));
-    }
-
-    /// Both deploy paths carry the guard. Not a copy of the access case: a
-    /// subscription predecessor has to answer `period()`, so both the rejected
-    /// and the accepted contract here are subscriptions.
-    function test_predecessor_subscriptionPathIsGuardedToo() public {
-        vm.prank(developer);
-        Rub3Subscription shadow = new Rub3Subscription(
-            "Shadow",
-            "SHD",
-            _identity(),
-            _hashes(WRAPPER_HASH),
-            _saleEthOnly(PRICE),
-            _noFee(),
-            0,
-            PERIOD,
-            COOLDOWN_BLOCKS,
-            address(0),
-            developer
-        );
-
-        vm.prank(developer);
-        vm.expectRevert(
-            abi.encodeWithSelector(Rub3Factory.PredecessorNotCanonical.selector, address(shadow))
-        );
-        factory.deploySubscription(
-            _paramsWithPredecessor(_saleEthOnly(PRICE), address(shadow)), PERIOD
-        );
-
-        vm.prank(developer);
-        address v2 = factory.deploySubscription(
-            _paramsWithPredecessor(_saleEthOnly(PRICE), address(sub)), PERIOD
-        );
-        assertTrue(factory.isDeployed(v2));
+        assertEq(second.predecessor(), address(0));
     }
 
     /// rub3 changes its take by deploying a *new* factory, so contracts the old

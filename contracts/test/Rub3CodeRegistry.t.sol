@@ -472,7 +472,7 @@ contract Rub3CodeRegistryTest is Test {
         registry.publish(
             keccak256("a differently shaped release"),
             Rub3CodeRegistry.Role.Licence,
-            "Rub3Subscription",
+            "Rub3Access",
             VERSION,
             COMMIT,
             SOLC,

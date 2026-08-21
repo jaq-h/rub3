@@ -69,8 +69,6 @@ fn pack_args() -> Vec<&'static str> {
 fn deploy_args() -> Vec<&'static str> {
     vec![
         "deploy",
-        "--type",
-        "access",
         "--name",
         "My App License",
         "--symbol",
@@ -334,15 +332,8 @@ fn a_direct_deploy_passes_no_factory_at_all() {
 fn an_account_model_deploy_needs_its_tba_implementation() {
     let repo = checkout(POPULATED_MANIFEST);
     let mut args = deploy_args();
+    // The one `access` left on the line is --identity's value.
     let identity = args.iter().position(|a| *a == "access").unwrap();
-    // The second `access` is --identity's value; the first is --type's.
-    let identity = args
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| **a == "access")
-        .map(|(i, _)| i)
-        .nth(1)
-        .unwrap_or(identity);
     args[identity] = "account";
     let output = rub3(repo.path(), &args);
 
@@ -352,18 +343,6 @@ fn an_account_model_deploy_needs_its_tba_implementation() {
         "{}",
         stderr(&output)
     );
-}
-
-#[test]
-fn a_subscription_needs_its_period() {
-    let repo = checkout(POPULATED_MANIFEST);
-    let mut args = deploy_args();
-    let kind = args.iter().position(|a| *a == "access").unwrap();
-    args[kind] = "subscription";
-    let output = rub3(repo.path(), &args);
-
-    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
-    assert!(stderr(&output).contains("--period"), "{}", stderr(&output));
 }
 
 #[test]
@@ -499,12 +478,16 @@ fn a_malformed_command_line_is_never_reported_as_the_missing_factory() {
     // before validating the rest would give every typo that same answer.
     let repo = checkout(COMMITTED_MANIFEST);
 
-    let mut bad_type = deploy_args();
-    let kind = bad_type.iter().position(|a| *a == "access").unwrap();
-    bad_type[kind] = "bogus";
-    let output = rub3(repo.path(), &bad_type);
+    let mut bad_identity = deploy_args();
+    let model = bad_identity.iter().position(|a| *a == "access").unwrap();
+    bad_identity[model] = "bogus";
+    let output = rub3(repo.path(), &bad_identity);
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
-    assert!(stderr(&output).contains("--type"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--identity"),
+        "{}",
+        stderr(&output)
+    );
 
     let mut bad_owner = deploy_args();
     bad_owner.extend(["--owner", "notanaddress"]);

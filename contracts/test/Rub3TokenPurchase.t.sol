@@ -4,7 +4,6 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {Rub3Access} from "../src/Rub3Access.sol";
 import {Rub3License} from "../src/Rub3License.sol";
-import {Rub3Subscription} from "../src/Rub3Subscription.sol";
 import {
     MockEIP3009Token,
     NoSignatureOverloadEIP3009Token,
@@ -13,8 +12,8 @@ import {
     SmartWallet
 } from "./mocks/MockEIP3009Token.sol";
 
-/// @notice The stablecoin rail: `purchaseWithAuthorization` /
-///         `renewWithAuthorization` (implementation.md §2.2).
+/// @notice The stablecoin rail: `purchaseWithAuthorization`
+///         (implementation.md §2.2).
 ///
 /// The premise under test is that an agent holds USDC and no ETH, so the buyer
 /// in every test below is funded with stablecoin and *deliberately left with a
@@ -39,7 +38,6 @@ contract Rub3TokenPurchaseTest is Test {
     uint256 internal constant PRICE = 0.05 ether;
     uint256 internal constant USDC_PRICE = 5_000_000; // 5 USDC, 6 decimals
     uint256 internal constant COOLDOWN_BLOCKS = 15;
-    uint256 internal constant PERIOD = 30 days;
 
     address internal owner = address(0x00E);
     address internal submitter = address(0x5B417); // facilitator: pays gas, nothing else
@@ -49,7 +47,6 @@ contract Rub3TokenPurchaseTest is Test {
 
     MockEIP3009Token internal usdc;
     Rub3Access internal nft;
-    Rub3Subscription internal sub;
 
     function setUp() public {
         buyer = vm.addr(BUYER_PK);
@@ -57,7 +54,6 @@ contract Rub3TokenPurchaseTest is Test {
 
         usdc = new MockEIP3009Token();
         nft = _deployAccess(_sale(PRICE, address(usdc), USDC_PRICE));
-        sub = _deploySubscription(_sale(PRICE, address(usdc), USDC_PRICE));
 
         usdc.mint(buyer, 1_000_000_000); // 1000 USDC
         vm.deal(submitter, 10 ether);
@@ -106,25 +102,6 @@ contract Rub3TokenPurchaseTest is Test {
             sale,
             _noFee(),
             0,
-            COOLDOWN_BLOCKS,
-            address(0),
-            owner
-        );
-    }
-
-    function _deploySubscription(Rub3License.SaleTerms memory sale)
-        internal
-        returns (Rub3Subscription)
-    {
-        return new Rub3Subscription(
-            "Rub3 Sub",
-            "R3S",
-            _identity(0, address(0)),
-            _hashes(WRAPPER_HASH),
-            sale,
-            _noFee(),
-            0,
-            PERIOD,
             COOLDOWN_BLOCKS,
             address(0),
             owner
@@ -222,28 +199,6 @@ contract Rub3TokenPurchaseTest is Test {
             auth.validAfter,
             auth.validBefore,
             target.purchaseAuthorizationNonce(recipient, salt)
-        );
-    }
-
-    function _renewAuth(
-        uint256 pk,
-        Rub3Subscription target,
-        uint256 tokenId,
-        uint256 value,
-        bytes32 salt
-    ) internal view returns (Rub3License.PaymentAuthorization memory auth) {
-        auth.from = vm.addr(pk);
-        auth.validAfter = 0;
-        auth.validBefore = block.timestamp + 1 hours;
-        auth.salt = salt;
-        auth.signature = _sign(
-            pk,
-            vm.addr(pk),
-            address(target),
-            value,
-            auth.validAfter,
-            auth.validBefore,
-            target.renewAuthorizationNonce(tokenId, salt)
         );
     }
 
@@ -403,41 +358,6 @@ contract Rub3TokenPurchaseTest is Test {
         assertEq(usdc.balanceOf(address(nft)), 0);
     }
 
-    /// A smart wallet renews on the same terms, so the rail is not
-    /// purchase-only for the buyers it was widened for.
-    function test_smartWallet_renewsItsOwnSubscription() public {
-        SmartWallet wallet = new SmartWallet(vm.addr(WALLET_OWNER_PK));
-        usdc.mint(address(wallet), 1_000_000_000);
-
-        Rub3License.PaymentAuthorization memory buy = _purchaseAuthFrom(
-            WALLET_OWNER_PK, address(wallet), sub, address(wallet), USDC_PRICE, "salt-1"
-        );
-        vm.prank(submitter);
-        uint256 tokenId = sub.purchaseWithAuthorization(address(0), buy);
-        uint256 before = sub.expiresAt(tokenId);
-
-        Rub3License.PaymentAuthorization memory renewal;
-        renewal.from = address(wallet);
-        renewal.validAfter = 0;
-        renewal.validBefore = block.timestamp + 1 hours;
-        renewal.salt = "salt-2";
-        renewal.signature = _sign(
-            WALLET_OWNER_PK,
-            address(wallet),
-            address(sub),
-            USDC_PRICE,
-            renewal.validAfter,
-            renewal.validBefore,
-            sub.renewAuthorizationNonce(tokenId, renewal.salt)
-        );
-
-        vm.prank(submitter);
-        sub.renewWithAuthorization(tokenId, renewal);
-
-        assertEq(sub.expiresAt(tokenId), before + PERIOD);
-        assertEq(usdc.balanceOf(address(sub)), USDC_PRICE * 2);
-    }
-
     // ══════════════════════════════════════════════════════════════════════════
     // 2. Replay, front-running, and misdirection
     // ══════════════════════════════════════════════════════════════════════════
@@ -552,33 +472,6 @@ contract Rub3TokenPurchaseTest is Test {
         vm.prank(submitter);
         vm.expectRevert(MockEIP3009Token.InvalidSignature.selector);
         other.purchaseWithAuthorization(address(0), auth);
-    }
-
-    /// A purchase authorization is not a renewal authorization. The domain tags
-    /// keep the two derivations disjoint even for the same salt and signer.
-    function test_wrongIntent_purchaseAuthorizationCannotRenew() public {
-        uint256 tokenId = _buySubscriptionWithUsdc("salt-1");
-
-        Rub3License.PaymentAuthorization memory auth =
-            _purchaseAuth(BUYER_PK, sub, buyer, USDC_PRICE, "salt-2");
-
-        vm.prank(submitter);
-        vm.expectRevert(MockEIP3009Token.InvalidSignature.selector);
-        sub.renewWithAuthorization(tokenId, auth);
-    }
-
-    /// And a renewal authorization is bound to one token id, so it cannot be
-    /// redirected onto somebody else's subscription.
-    function test_wrongIntent_renewalAuthorizationIsBoundToItsToken() public {
-        uint256 mine = _buySubscriptionWithUsdc("salt-1");
-        uint256 theirs = _buySubscriptionWithUsdc("salt-2");
-
-        Rub3License.PaymentAuthorization memory auth =
-            _renewAuth(BUYER_PK, sub, mine, USDC_PRICE, "salt-3");
-
-        vm.prank(submitter);
-        vm.expectRevert(MockEIP3009Token.InvalidSignature.selector);
-        sub.renewWithAuthorization(theirs, auth);
     }
 
     /// The validity window is the token's to enforce, and it does.
@@ -893,153 +786,26 @@ contract Rub3TokenPurchaseTest is Test {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // 4. Subscriptions: two frozen rails per token
+    // 4. Payment lands before the mint is visible to anyone
     // ══════════════════════════════════════════════════════════════════════════
 
-    function _buySubscriptionWithUsdc(bytes32 salt) internal returns (uint256 tokenId) {
-        Rub3License.PaymentAuthorization memory auth =
-            _purchaseAuth(BUYER_PK, sub, buyer, USDC_PRICE, salt);
-        vm.prank(submitter);
-        tokenId = sub.purchaseWithAuthorization(address(0), auth);
-    }
-
-    function test_subscription_purchaseSnapshotsBothRails() public {
-        uint256 tokenId = _buySubscriptionWithUsdc("salt-1");
-
-        assertEq(sub.ownerOf(tokenId), buyer);
-        assertEq(sub.expiresAt(tokenId), block.timestamp + PERIOD);
-        assertEq(sub.renewPrice(tokenId), PRICE, "ETH rail frozen");
-        assertEq(sub.renewPriceToken(tokenId), address(usdc), "token rail frozen");
-        assertEq(sub.renewPriceAmount(tokenId), USDC_PRICE, "token amount frozen");
-        assertEq(buyer.balance, 0);
-    }
-
-    function test_subscription_renewsOnTheStablecoinRail() public {
-        uint256 tokenId = _buySubscriptionWithUsdc("salt-1");
-        uint256 before = sub.expiresAt(tokenId);
+    /// The authorization rail takes payment and then mints, in that order, and
+    /// `_safeMint` hands control to a contract recipient while the token
+    /// already exists. So a recipient reading from inside `onERC721Received`
+    /// must find the money already in the contract and itself already the
+    /// owner - never a token minted against a payment still in flight.
+    function test_recipientCallbackSeesAPaidForToken() public {
+        AuthMintProbe probe = new AuthMintProbe(nft, usdc);
 
         Rub3License.PaymentAuthorization memory auth =
-            _renewAuth(BUYER_PK, sub, tokenId, USDC_PRICE, "salt-2");
-
-        vm.expectEmit(true, false, false, true);
-        emit Rub3Subscription.Renewed(tokenId, before + PERIOD, address(usdc), USDC_PRICE);
+            _purchaseAuth(BUYER_PK, nft, address(probe), USDC_PRICE, "salt-1");
         vm.prank(submitter);
-        sub.renewWithAuthorization(tokenId, auth);
-
-        assertEq(sub.expiresAt(tokenId), before + PERIOD);
-        assertEq(buyer.balance, 0, "renewed without ever holding ETH");
-        assertEq(usdc.balanceOf(address(sub)), USDC_PRICE * 2);
-    }
-
-    /// The renewal snapshot is the whole point of §2.4, and it now covers both
-    /// rails: repricing reaches new buyers only.
-    function test_subscription_ownerCannotRepriceAHeldTokenOnEitherRail() public {
-        uint256 tokenId = _buySubscriptionWithUsdc("salt-1");
-
-        vm.prank(owner);
-        sub.setTokenPrice(address(usdc), USDC_PRICE * 100);
-
-        // Renewal still charges the snapshot: an authorization for the *new*
-        // amount is not what the contract asks the token for, so it fails.
-        Rub3License.PaymentAuthorization memory tooMuch =
-            _renewAuth(BUYER_PK, sub, tokenId, USDC_PRICE * 100, "salt-2");
-        vm.prank(submitter);
-        vm.expectRevert(MockEIP3009Token.InvalidSignature.selector);
-        sub.renewWithAuthorization(tokenId, tooMuch);
-
-        // The frozen amount is what goes through.
-        Rub3License.PaymentAuthorization memory snapshot =
-            _renewAuth(BUYER_PK, sub, tokenId, USDC_PRICE, "salt-3");
-        vm.prank(submitter);
-        sub.renewWithAuthorization(tokenId, snapshot);
-
-        assertEq(usdc.balanceOf(address(sub)), USDC_PRICE * 2);
-    }
-
-    /// A token minted before the contract offered a stablecoin rail has no
-    /// stablecoin renewal - and does not need one, because the ETH rail is
-    /// always there.
-    function test_subscription_tokenMintedBeforeTheRailRenewsInEthOnly() public {
-        Rub3Subscription ethOnly = _deploySubscription(_sale(PRICE, address(0), 0));
-
-        vm.deal(outsider, 10 ether);
-        vm.prank(outsider);
-        uint256 tokenId = ethOnly.purchase{value: PRICE}(outsider);
-
-        vm.prank(owner);
-        ethOnly.setTokenPrice(address(usdc), USDC_PRICE);
-
-        assertEq(ethOnly.renewPriceToken(tokenId), address(0), "no rail was snapshotted");
-
-        Rub3License.PaymentAuthorization memory auth =
-            _renewAuth(OUTSIDER_PK, ethOnly, tokenId, USDC_PRICE, "salt-1");
-        vm.prank(submitter);
-        vm.expectRevert(Rub3License.TokenPaymentUnavailable.selector);
-        ethOnly.renewWithAuthorization(tokenId, auth);
-
-        // ETH renewal is unaffected.
-        vm.prank(outsider);
-        ethOnly.renew{value: PRICE}(tokenId);
-        assertEq(ethOnly.expiresAt(tokenId), block.timestamp + PERIOD * 2);
-    }
-
-    /// A new buyer gets the new rate; the held token does not. Both frozen
-    /// rails are independent per token.
-    function test_subscription_snapshotsAreIndependentAcrossAPriceChange() public {
-        uint256 first = _buySubscriptionWithUsdc("salt-1");
-
-        vm.prank(owner);
-        sub.setTokenPrice(address(usdc), USDC_PRICE * 2);
-
-        // The second buyer signs for the *new* listed amount, which is what the
-        // contract now asks the token for.
-        Rub3License.PaymentAuthorization memory auth =
-            _purchaseAuth(BUYER_PK, sub, buyer, USDC_PRICE * 2, "salt-2");
-        vm.prank(submitter);
-        uint256 second = sub.purchaseWithAuthorization(address(0), auth);
-
-        assertEq(sub.renewPriceAmount(first), USDC_PRICE);
-        assertEq(sub.renewPriceAmount(second), USDC_PRICE * 2);
-    }
-
-    function test_subscription_ethAndTokenRailsMintIdentically() public {
-        vm.deal(outsider, 10 ether);
-        vm.prank(outsider);
-        uint256 ethId = sub.purchase{value: PRICE}(outsider);
-        uint256 usdcId = _buySubscriptionWithUsdc("salt-1");
-
-        assertEq(sub.expiresAt(ethId), sub.expiresAt(usdcId));
-        assertEq(sub.renewPrice(ethId), sub.renewPrice(usdcId));
-        assertEq(sub.renewPriceToken(ethId), sub.renewPriceToken(usdcId));
-        assertEq(sub.renewPriceAmount(ethId), sub.renewPriceAmount(usdcId));
-    }
-
-    function test_subscription_renewalOfAnUnknownTokenReverts() public {
-        Rub3License.PaymentAuthorization memory auth =
-            _renewAuth(BUYER_PK, sub, 42, USDC_PRICE, "salt-1");
-
-        vm.prank(submitter);
-        vm.expectRevert();
-        sub.renewWithAuthorization(42, auth);
-    }
-
-    /// §2.4's mint-ordering guarantee, re-checked on the new rail: a contract
-    /// recipient reading its own token from inside `onERC721Received` finds both
-    /// frozen rails already written. The payment happens first, so by the time
-    /// the callback runs the money is in and the terms are set.
-    function test_subscription_recipientCallbackSeesFrozenTermsOnTheTokenRail() public {
-        AuthMintProbe probe = new AuthMintProbe(sub);
-
-        Rub3License.PaymentAuthorization memory auth =
-            _purchaseAuth(BUYER_PK, sub, address(probe), USDC_PRICE, "salt-1");
-        vm.prank(submitter);
-        uint256 tokenId = sub.purchaseWithAuthorization(address(probe), auth);
+        uint256 tokenId = nft.purchaseWithAuthorization(address(probe), auth);
 
         assertTrue(probe.fired(), "the recipient callback must have run");
-        assertEq(probe.seenRenewPrice(), PRICE);
-        assertEq(probe.seenRenewPriceToken(), address(usdc));
-        assertEq(probe.seenRenewPriceAmount(), USDC_PRICE);
-        assertEq(sub.ownerOf(tokenId), address(probe));
+        assertEq(probe.seenOwner(), address(probe), "the token is already the recipient's");
+        assertEq(probe.seenContractBalance(), USDC_PRICE, "and it was already paid for in full");
+        assertEq(nft.ownerOf(tokenId), address(probe));
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1069,19 +835,20 @@ contract Rub3TokenPurchaseTest is Test {
     }
 }
 
-/// @notice Reads its own subscription's terms from inside `onERC721Received`,
-///         so a test can prove they were frozen before the token existed for
-///         anyone else to see.
+/// @notice Reads the licence contract from inside `onERC721Received`, while the
+///         mint that created the token is still executing, so a test can prove
+///         the payment landed before anyone could observe the token.
 contract AuthMintProbe {
-    Rub3Subscription public sub;
+    Rub3Access public nft;
+    MockEIP3009Token public token;
 
     bool public fired;
-    uint256 public seenRenewPrice;
-    address public seenRenewPriceToken;
-    uint256 public seenRenewPriceAmount;
+    address public seenOwner;
+    uint256 public seenContractBalance;
 
-    constructor(Rub3Subscription sub_) {
-        sub = sub_;
+    constructor(Rub3Access nft_, MockEIP3009Token token_) {
+        nft = nft_;
+        token = token_;
     }
 
     function onERC721Received(address, address, uint256 tokenId, bytes calldata)
@@ -1089,9 +856,8 @@ contract AuthMintProbe {
         returns (bytes4)
     {
         fired = true;
-        seenRenewPrice = sub.renewPrice(tokenId);
-        seenRenewPriceToken = sub.renewPriceToken(tokenId);
-        seenRenewPriceAmount = sub.renewPriceAmount(tokenId);
+        seenOwner = nft.ownerOf(tokenId);
+        seenContractBalance = token.balanceOf(address(nft));
         return this.onERC721Received.selector;
     }
 }
