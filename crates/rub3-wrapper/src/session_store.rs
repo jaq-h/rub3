@@ -95,7 +95,8 @@ pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
     latest_session_where(app_id, |s| !is_expired(s))
 }
 
-/// The most recently issued session for `app_id`, **expired or not**.
+/// The most recently issued session **written against `contract`**, expired or
+/// not.
 ///
 /// For the seat teardown path (§3.4), which is asking a different question
 /// from every other caller here: not "may this session launch" but "which seat
@@ -106,10 +107,20 @@ pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
 /// out here would leave the seat held for the rest of the contract's TTL with
 /// nothing left on disk naming it.
 ///
+/// **The contract narrows the scan rather than filtering its result**, for the
+/// same reason [`load_latest_session_for_wallet`]'s wallet does: a §2.4
+/// successor migration keeps the packed `app_id`, so this directory can hold a
+/// newer record written against another deploy, and rejecting the newest record
+/// after choosing it would report "nothing to release" while a seat this
+/// machine really holds stays taken for the rest of its TTL.
+///
 /// The signature is still checked: a record this machine did not write is not
 /// evidence of a seat it took.
-pub fn load_latest_session_any_expiry(app_id: &str) -> Result<Session, StoreError> {
-    latest_session_where(app_id, |_| true)
+pub fn load_latest_session_for_contract(
+    app_id: &str,
+    contract: &str,
+) -> Result<Session, StoreError> {
+    latest_session_where(app_id, |s| s.contract.eq_ignore_ascii_case(contract))
 }
 
 /// The most recently issued valid session **signed by `wallet`**.
@@ -170,6 +181,12 @@ fn latest_session_where(
 mod tests {
     use super::*;
     use crate::session::{new_nonce, session_message, Session};
+
+    /// The contract `signed_session` writes into every record it builds.
+    const TEST_CONTRACT: &str = "0x0000000000000000000000000000000000000002";
+    /// A second deploy under the same `app_id`, as a §2.4 successor migration
+    /// leaves behind.
+    const OTHER_CONTRACT: &str = "0x0000000000000000000000000000000000000003";
 
     fn signed_session(app_id: &str, token_id: u64, expires_at: &str) -> Session {
         use k256::ecdsa::SigningKey;
@@ -305,7 +322,7 @@ mod tests {
             load_latest_session("com.rub3.test"),
             Err(StoreError::NotFound)
         ));
-        let found = load_latest_session_any_expiry("com.rub3.test")
+        let found = load_latest_session_for_contract("com.rub3.test", TEST_CONTRACT)
             .expect("the seat this machine took is still nameable");
         assert_eq!(found.token_id, 7);
 
@@ -325,9 +342,40 @@ mod tests {
         save_session(&tampered).unwrap();
 
         assert!(matches!(
-            load_latest_session_any_expiry("com.rub3.test"),
+            load_latest_session_for_contract("com.rub3.test", TEST_CONTRACT),
             Err(StoreError::NotFound)
         ));
+
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
+    /// **A newer record for another deploy must not hide this one's seat.** A
+    /// §2.4 successor migration keeps the `app_id`, so the newest record under
+    /// it can belong to a contract this build is not pointed at. Choosing it
+    /// and then rejecting it would report "nothing to release" while a seat
+    /// this machine really holds stays taken for the rest of its TTL.
+    #[test]
+    fn the_teardown_scan_chooses_the_newest_record_for_this_contract() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        // Neither `contract` nor `issued_at` is in the signed preimage, so both
+        // records still verify as the ones their own keys wrote.
+        let mut ours = signed_session("com.rub3.test", 9, "2000-01-01T00:00:00Z");
+        ours.issued_at = "2020-01-01T00:00:00Z".into();
+        let mut foreign = signed_session("com.rub3.test", 5, "2000-01-01T00:00:00Z");
+        foreign.contract = OTHER_CONTRACT.into();
+        foreign.issued_at = "2030-01-01T00:00:00Z".into();
+        save_session(&ours).unwrap();
+        save_session(&foreign).unwrap();
+
+        let found = load_latest_session_for_contract("com.rub3.test", TEST_CONTRACT)
+            .expect("this contract's own record is still nameable");
+        assert_eq!(
+            found.token_id, 9,
+            "a newer record for another deploy must not be chosen and then rejected",
+        );
 
         std::env::remove_var("RUB3_SESSION_DIR");
     }

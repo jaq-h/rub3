@@ -1540,6 +1540,8 @@ mod headless {
     /// one, which is the case this exists for. Nothing left to hand back is
     /// [`ReleaseOutcome::NoSeatHeld`] and a success, never an error: a
     /// teardown that has already happened is the state the caller asked for.
+    /// Which record counts as this machine's own is [`own_seat_record`]'s
+    /// question, and every answer here rests on it.
     pub fn release_headless(
         signer: &dyn Signer,
         ctx: &HeadlessContext,
@@ -1547,30 +1549,15 @@ mod headless {
         let contract = parse_contract(&ctx.contract)?;
         preflight_chain_id(ctx)?;
 
-        let stored = match ctx.token_id {
-            Some(token_id) => crate::session_store::load_session(&ctx.app_id, token_id),
-            None => crate::session_store::load_latest_session_any_expiry(&ctx.app_id),
-        };
-        let session = match stored {
-            Ok(session) => session,
-            Err(crate::session_store::StoreError::NotFound) => {
+        let session = match own_seat_record(ctx, signer.address(), ctx.token_id) {
+            Some(session) => session,
+            None => {
                 return Ok(ReleaseOutcome::NoSeatHeld {
                     token_id: ctx.token_id,
                 })
             }
-            Err(e) => return Err(HeadlessError::Persist(e.to_string())),
         };
         let token_id = session.token_id;
-        // A record written against another contract names a seat on that
-        // contract, not on this one. Session ids start at 1 on every deploy, so
-        // a successor migration under the same `app_id` (§2.4) can hold a
-        // record whose (token, session) pair also exists here and is live -
-        // releasing it would be this wrapper ending another instance's session.
-        if !session.contract.eq_ignore_ascii_case(&ctx.contract) {
-            return Ok(ReleaseOutcome::NoSeatHeld {
-                token_id: Some(token_id),
-            });
-        }
         let session_id = match session.session_id {
             // A tier-0..2 session never took a seat, so there is nothing on
             // chain to hand back and saying so is the whole answer.
@@ -1630,12 +1617,12 @@ mod headless {
     /// holding, when it holds one. Returns whether a seat was released.
     ///
     /// **Only ever this machine's own session, and that limit is the whole
-    /// function.** The session id comes from the local store and the chain is
-    /// asked whether it still holds a seat, so the worst a stale or hostile
-    /// file can do is name a session the contract says holds nothing. A wrapper
-    /// must never free a seat another live instance is using: that is one
-    /// machine ending another's session, which is the revocation shape §2.4
-    /// rules out even between two machines holding the same key.
+    /// function.** A wrapper must never free a seat another live instance is
+    /// using: that is one machine ending another's session, which is the
+    /// revocation shape §2.4 rules out even between two machines holding the
+    /// same key. The session directory is user-writable, so the store cannot be
+    /// taken at its word about which session that is - [`own_seat_record`] is
+    /// what authenticates the record, and it runs before any of this.
     ///
     /// This is the common case on any build whose packed session TTL is shorter
     /// than the contract's `sessionTtlSeconds`: the cached session lapses
@@ -1659,7 +1646,7 @@ mod headless {
         contract: Address,
         token_id: u64,
     ) -> Result<bool, HeadlessError> {
-        let session_id = match own_stale_session_id(ctx, contract, token_id)? {
+        let session_id = match own_stale_session_id(ctx, signer.address(), contract, token_id)? {
             Some(id) => id,
             None => return Ok(false),
         };
@@ -1684,21 +1671,81 @@ mod headless {
         }
     }
 
+    /// The one place a teardown path decides that a session record on disk names
+    /// a seat *this* machine took, and the only way either of them reaches the
+    /// store.
+    ///
+    /// **Everything downstream broadcasts `release(tokenId, sessionId)` with
+    /// the ids this record carries, so an unauthenticated record here is a
+    /// wrapper ending somebody else's session** - the revocation shape §2.4
+    /// rules out even between two machines holding the same key. The session
+    /// directory is user-writable, and `session_store::load_session` is a bare
+    /// read and parse, so a hand-written file naming this contract and another
+    /// fleet instance's session id would otherwise be honoured.
+    ///
+    /// Four things have to hold, and they are the pairing
+    /// [`super::try_session_fast_path`] already makes on the launch side:
+    ///
+    /// - the signature verifies, so the record is one *some* key wrote whole;
+    /// - `wallet` is this signer's own address, which is what ties it to *this*
+    ///   key - a signature alone proves only self-consistency, and a tamperer
+    ///   can re-sign with any key they hold;
+    /// - `contract` is the one this build acts on, since session ids start at 1
+    ///   on every deploy and a §2.4 successor migration keeps the `app_id`;
+    /// - the record's own signed `token_id` is the one that was asked for, since
+    ///   the filename it was read from is not signed and proves nothing.
+    ///
+    /// [`crate::session::verify_signature`] rather than
+    /// [`crate::session::verify_local`], deliberately: the launch paths want
+    /// the expiry check too, and these paths exist precisely to act on a record
+    /// whose local expiry has passed while its on-chain seat has not.
+    fn own_seat_record(
+        ctx: &HeadlessContext,
+        wallet: Address,
+        token_id: Option<u64>,
+    ) -> Option<crate::session::Session> {
+        let session = match token_id {
+            Some(token_id) => crate::session_store::load_session(&ctx.app_id, token_id).ok()?,
+            None => {
+                crate::session_store::load_latest_session_for_contract(&ctx.app_id, &ctx.contract)
+                    .ok()?
+            }
+        };
+
+        if crate::session::verify_signature(&session).is_err() {
+            return None;
+        }
+        if !session
+            .wallet
+            .eq_ignore_ascii_case(&crate::identity::format_addr(wallet))
+        {
+            return None;
+        }
+        if !session.contract.eq_ignore_ascii_case(&ctx.contract) {
+            return None;
+        }
+        if let Some(token_id) = token_id {
+            if session.token_id != token_id {
+                return None;
+            }
+        }
+
+        Some(session)
+    }
+
     /// The id of a session this machine cached, has finished with, and which
     /// the chain says still holds a seat.
     fn own_stale_session_id(
         ctx: &HeadlessContext,
+        wallet: Address,
         contract: Address,
         token_id: u64,
     ) -> Result<Option<u64>, HeadlessError> {
-        let session = match crate::session_store::load_session(&ctx.app_id, token_id) {
-            Ok(session) => session,
-            Err(_) => return Ok(None),
+        // Only a session this wrapper wrote, with this key, for this contract.
+        let session = match own_seat_record(ctx, wallet, Some(token_id)) {
+            Some(session) => session,
+            None => return Ok(None),
         };
-        // Only a session this wrapper could have written, for this contract.
-        if !session.contract.eq_ignore_ascii_case(&ctx.contract) {
-            return Ok(None);
-        }
         let session_id = match session.session_id {
             Some(id) => id,
             None => return Ok(None),

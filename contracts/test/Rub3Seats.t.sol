@@ -485,8 +485,13 @@ contract Rub3SeatsTest is Test {
         assertEq(full.blocksRemaining, 0, "no number of blocks frees a full fleet");
     }
 
-    /// The two refusals are told apart by `seatsInUse == seats`, which is what
-    /// lets a caller branch without reading a revert string.
+    /// The two refusals are told apart by the `fleetExhausted` field, which is
+    /// what lets a caller branch without reading a revert string.
+    ///
+    /// A field rather than the `seatsInUse == seats` comparison it looks like:
+    /// a single-seat licence's one occupied seat is its holder's to retake, so
+    /// the counts say "full" about a seat that is not, and a client deriving
+    /// the answer from them refuses an activation the contract would accept.
     function test_activationStatus_tellsCooldownApartFromExhaustion() public {
         Rub3Access pair = _deploy(2, COOLDOWN_BLOCKS, SESSION_TTL);
         uint256 id = _mintOn(pair, alice);

@@ -748,14 +748,26 @@
   // guaranteed not to have. Both wait: the wrapper holds its watch until the
   // cooldown ends, and the copy says so rather than promising to be looking
   // already.
+  //
+  // Both sentences live in the Auto-detect panel, and the seat wait is the one
+  // case that panel is never on screen for: a licence can only report a full
+  // fleet above one seat, and above one seat the screen offers the Manual tab
+  // alone (§3.4). So when the seat wait ends its sentence is also written to
+  // the manual panel's hint, which is the surface a Manual-only screen always
+  // shows - otherwise the caveat that the contract may still refuse would be
+  // set on a hidden element and the wait box would simply vanish. Only the
+  // exhausted case touches the hint, so a cooldown screen is left exactly as it
+  // was, including any sentence a failed watch put there.
   function setCooldownWatchCopy(waiting, exhausted) {
     const head = document.getElementById('cd-watch-head');
     const sub  = document.getElementById('cd-watch-sub');
     if (!waiting) {
+      const freed = 'A seat has freed. It keeps its own cooldown, so the contract may still refuse for a while - send the transaction above when you are ready and we will pick it up on our own, or try again if it reverts.';
       head.textContent = 'Waiting for your wallet to broadcast the tx…';
       sub.textContent  = exhausted
-        ? 'A seat has freed. It keeps its own cooldown, so the contract may still refuse for a while - send the transaction above when you are ready and we will pick it up on our own, or try again if it reverts.'
+        ? freed
         : 'Send the transaction above from your wallet. We are watching the chain and will pick it up on our own.';
+      if (exhausted) setTabHint('cooldown', freed);
       return;
     }
     if (exhausted) {
