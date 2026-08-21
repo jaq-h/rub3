@@ -241,7 +241,7 @@ To build or deploy against a factory you deployed yourself, name it with
 
 ```bash
 cargo run -p rub3-cli -- deploy \
-  --type access --name "My App License" --symbol MAL \
+  --name "My App License" --symbol MAL \
   --identity access --price-eth 0.05 --chain base \
   --broadcast -- --private-key $DEPLOYER_KEY
 ```
