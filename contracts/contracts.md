@@ -209,20 +209,28 @@ Nothing on-chain can check this for you. The constructor probe reads `authorizat
 
 **Resolve the implementation first.** USDC is deployed behind a `FiatTokenProxy`, and `cast interface` reads the ABI the explorer has for the address you give it. Asked about the proxy address - the one you configure as `PRICE_TOKEN` - it returns the proxy's own ABI (`implementation()`, `admin()`, `upgradeTo`, a fallback) and no `receiveWithAuthorization` at all. An empty grep against a proxy address therefore says nothing about the token; it is the same trap that makes a bytecode selector scan useless here.
 
-**`cast implementation` does not resolve a `FiatTokenProxy`.** It reads the EIP-1967 implementation slot (or, with `--beacon`, the beacon slot), and Circle's proxy predates EIP-1967: it keeps the address in the pre-standard `keccak256("org.zeppelinos.proxy.implementation")` slot. So `cast implementation` answers the **zero address** for USDC on Base and on Base Sepolia alike, and reading that as "not a proxy, use the token itself" walks straight into the trap the paragraph above describes. Ask the proxy instead, and confirm the answer against the slot it actually lives in:
+**`cast implementation` alone does not resolve a `FiatTokenProxy`.** It reads the EIP-1967 implementation slot (or, with `--beacon`, the beacon slot), which resolves an EIP-1967 proxy. Circle's proxy predates EIP-1967 and keeps the address in the pre-standard `keccak256("org.zeppelinos.proxy.implementation")` slot instead, so `cast implementation` answers the **zero address** for USDC on Base and on Base Sepolia alike, and reading that zero as "not a proxy, use the token itself" walks straight into the trap the paragraph above describes. Try every slot convention, and conclude "not a proxy" only when all of them come back empty:
 
 ```bash
-# 1a. The proxy's own getter. Circle's proxy answers this from any caller
-#     on Base and on Base Sepolia.
+# 1a. The EIP-1967 implementation slot, then the beacon slot. Resolves an
+#     EIP-1967 proxy; answers zero for Circle's, which predates that standard.
+cast implementation <PRICE_TOKEN> --rpc-url $RPC
+cast implementation <PRICE_TOKEN> --beacon --rpc-url $RPC
+
+# 1b. The proxy's own getter. Circle's proxy answers this from any caller on
+#     Base and on Base Sepolia. On an EIP-1967 transparent proxy the getter is
+#     admin-gated and delegates for any other caller, so an error here is not
+#     evidence of anything on its own.
 cast call <PRICE_TOKEN> "implementation()(address)" --rpc-url $RPC
 
-# 1b. The same value, read straight out of the pre-EIP-1967 slot it is stored
-#     in, as a cross-check that 1a was not served by a fallback.
+# 1c. The pre-EIP-1967 slot, read directly as a cross-check that 1b was not
+#     served by a fallback.
 cast storage <PRICE_TOKEN> \
   0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3 --rpc-url $RPC
 
-#     A token that is genuinely not a proxy answers 1a with an error and 1b with
-#     zero - then use <PRICE_TOKEN> itself in step 2.
+#     Any non-zero address from 1a, 1b or 1c is the implementation to ask in
+#     step 2. Use <PRICE_TOKEN> itself in step 2 only when both 1a reads and 1c
+#     are zero and 1b yields nothing.
 
 # 2. Ask the implementation what it exposes. The `bytes` overload must be
 #    listed alongside (or instead of) the (v, r, s) one.

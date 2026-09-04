@@ -898,11 +898,11 @@ cast code $IMPL --rpc-url $RPC | grep -c 88b7ab63   # 1: the bytes overload
 cast code $IMPL --rpc-url $RPC | grep -c ef55bec6   # 1: the (v, r, s) form too
 ```
 
-`cast implementation` is **not** the way to resolve this token: it reads the
+`cast implementation` alone does **not** resolve this token: it reads the
 EIP-1967 slot and Circle's proxy predates it, so it answers the zero address for
-USDC on both Base and Base Sepolia. That correction now lives in
-[contracts.md](contracts/contracts.md#which-payment-tokens-work) with the
-storage-slot cross-check beside it.
+USDC on both Base and Base Sepolia. The full recipe, which tries the EIP-1967
+slots, the getter and the pre-EIP-1967 slot before concluding anything, lives in
+[contracts.md](contracts/contracts.md#which-payment-tokens-work).
 
 The overload is also observable behaviourally, which settles it beyond a
 selector scan. Called with `msg.sender == to` and an empty signature it reverts
@@ -1013,7 +1013,9 @@ The single `Rub3Factory` and `Rub3CodeRegistry` that
 `--factory` flag, and that the one-shot quickstart of `implementation.md` §3.3
 will target. **This tier is never used for an experiment**, and this plan neither
 performs nor schedules it: it waits on the treasury decision and on the standing
-sequencing in which the factory and the registry launch together.
+sequencing in which the factory launches together with the discovery registry,
+`Rub3Registry` (`implementation.md` §3.2), which is not the code registry this
+tier deploys.
 
 Mainnet discipline applies here, not testnet discipline, because two of the three
 things it does are permanent:
