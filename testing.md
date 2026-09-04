@@ -1025,13 +1025,11 @@ things it does are permanent:
   deployed contract, so the pre-mainnet proof in
   [contracts.md](contracts/contracts.md#treasury-custody-and-the-pre-mainnet-proof)
   runs first.
-- **A custodied owner key for the code registry.** It can only ever add, and
-  every addition is a permanent public `Published` event, so a compromise cannot
-  rewrite anything. Rotation is supported while the key is still held
-  (`Ownable2Step`) and renouncing is refused outright, so the failure to guard
-  against is loss rather than handover: a key nobody holds can no longer be
-  rotated, and it freezes the version authority for that chain, leaving every
-  fielded binary refusing on a pinned-table miss with nothing left to ask.
+- **A custodied owner key for the code registry.** The key is the whole of the
+  registry's authority, rotation is supported and renouncing is refused, so the
+  failure to guard against is loss rather than handover;
+  [contracts.md](contracts/contracts.md#deploying-one) states the rule and why
+  it argues for a custodied key on a canonical deploy.
 - **`attest::CANONICAL` becomes accumulate-only.** The rule is stated in that
   table's own doc comment and enforced by
   `attest::tests::nothing_is_deployed_so_the_accumulate_only_rule_is_not_live_yet`,
