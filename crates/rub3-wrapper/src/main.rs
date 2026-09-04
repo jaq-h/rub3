@@ -249,17 +249,32 @@ fn run_release_seat(token_id: Option<u64>) -> i32 {
         // Nothing to hand back is the outcome an orchestrator asked for, so it
         // is a success. The `released=false` key is how it tells the two apart
         // without parsing the sentence above it.
-        Ok(ReleaseOutcome::NoSeatHeld { token_id }) => {
+        //
+        // A record that was found and refused gets said out loud, because the
+        // seat it names may really be held: unreported, an operator whose
+        // session file a crash truncated reads the same `released=false` as one
+        // whose teardown had nothing to do, and waits out the contract's whole
+        // `sessionTtlSeconds` without knowing there is a seat to recover. The
+        // exit code is unchanged - this is still the outcome that was asked
+        // for - so nothing branching on the code is affected.
+        Ok(ReleaseOutcome::NoSeatHeld { token_id, rejected }) => {
+            if let Some(why) = &rejected {
+                eprintln!("rub3: warning: a session record was found and not released: {why}");
+            }
+            let rejected = rejected
+                .as_ref()
+                .map(|why| format!(" rejected={}", why.key()))
+                .unwrap_or_default();
             match token_id {
                 Some(token_id) => {
                     eprintln!("rub3: no seat held for token {token_id}; nothing to release");
-                    eprintln!("rub3-detail: token_id={token_id} released=false");
+                    eprintln!("rub3-detail: token_id={token_id} released=false{rejected}");
                 }
                 None => {
                     eprintln!(
                         "rub3: this machine holds no seat on this contract; nothing to release"
                     );
-                    eprintln!("rub3-detail: released=false");
+                    eprintln!("rub3-detail: released=false{rejected}");
                 }
             }
             activation::EXIT_OK

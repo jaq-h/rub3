@@ -43,8 +43,8 @@ use std::time::{Duration, Instant};
 use alloy::primitives::{Address, B256};
 use rub3_wrapper::activation::{
     ensure_headless, release_headless, HeadlessContext, HeadlessError, HeadlessOutcome,
-    PaymentRail, ReleaseOutcome, DEFAULT_MAX_ETH_WEI, ENV_MAX_ETH_WEI, ENV_MAX_TOKEN_AMOUNT,
-    EXIT_FLEET_EXHAUSTED, EXIT_PRICE_ABOVE_POLICY,
+    PaymentRail, RecordRefusal, ReleaseOutcome, DEFAULT_MAX_ETH_WEI, ENV_MAX_ETH_WEI,
+    ENV_MAX_TOKEN_AMOUNT, EXIT_FLEET_EXHAUSTED, EXIT_PRICE_ABOVE_POLICY,
 };
 use rub3_wrapper::rpc;
 use rub3_wrapper::signer::{resolve_signer, Signer, SignerError, ENV_AGENT_KEY};
@@ -3449,6 +3449,127 @@ fn headless_seats_admit_a_fleet_then_report_exhaustion_e2e() {
     }
 }
 
+/// **The seat bound is enforced at launch too, on the launches it samples.**
+///
+/// A session file is an ordinary file, so a copy of one launches wherever it is
+/// put; nothing in the record says which machine took the seat. `activate()`
+/// bounds how many sessions a token has, and the launch path is where that
+/// bound is re-read - `verify_onchain` asks the contract whether the seat is
+/// still this session's, on the launches [`should_reverify`] samples, which is
+/// about one in five.
+///
+/// So the guarantee is exactly this, and no more: a copy runs while the seat it
+/// names is live, and once that seat belongs to somebody else the copy runs
+/// until its next sampled launch. Both halves are asserted here, because a test
+/// that only showed the refusal would be evidence for a stronger claim than the
+/// code makes. The loop is what stands in for sampling: each pass is one launch,
+/// and the refusal has to arrive within a run of them rather than on the first.
+///
+/// [`should_reverify`]: rub3_wrapper::session::should_reverify
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn headless_a_sampled_launch_refuses_a_session_whose_seat_is_gone_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let contract = deploy_access_with_seats(PRICE_WEI, ZERO_ADDR, "0", "0", "15", 2);
+    let contract_addr: Address = contract
+        .parse()
+        .expect("forge returned a malformed address");
+
+    let agent = Agent::new();
+    fund(agent.address(), FUNDING_ETH);
+
+    // Two machines, two seats: the fleet the licence sold.
+    let first_dir = next_machine();
+    let (first, _) =
+        ensure_headless(agent.signer.as_ref(), &ctx(&contract, None)).expect("the first seat");
+    let record =
+        std::fs::read(session_store::session_path(APP_ID, first.token_id).expect("a session path"))
+            .expect("the first machine's record");
+
+    mine(16);
+    let _second = next_machine();
+    let (second, _) =
+        ensure_headless(agent.signer.as_ref(), &ctx(&contract, None)).expect("the second seat");
+
+    // The copy. Byte for byte the first machine's record, on a machine that
+    // never activated anything.
+    let copy = next_machine();
+    let copied_path = session_store::session_path(APP_ID, first.token_id).expect("a session path");
+    std::fs::create_dir_all(copied_path.parent().unwrap()).expect("the session directory");
+    std::fs::write(&copied_path, &record).expect("the copy is writable");
+
+    // While the seat it names is live, the copy is a session like any other and
+    // it launches. Two instances share one seat, and only a device key (tier 4)
+    // could tell them apart - so this half is the honest limit of the bound,
+    // not a defect being tolerated quietly.
+    let (from_copy, _) = ensure_headless(agent.signer.as_ref(), &ctx(&contract, None))
+        .expect("a copy of a live record launches");
+    assert_eq!(from_copy.session_id, first.session_id);
+
+    // The first machine retires and hands its seat back; a fourth machine takes
+    // the freed seat. The copy's session id now belongs to nobody, and the
+    // fleet is full without it.
+    std::env::set_var("RUB3_SESSION_DIR", first_dir.path());
+    mine(16);
+    release_headless(agent.signer.as_ref(), &ctx(&contract, None)).expect("its own seat");
+    mine(16);
+    let _fourth = next_machine();
+    let (fourth, _) =
+        ensure_headless(agent.signer.as_ref(), &ctx(&contract, None)).expect("the freed seat");
+    assert_ne!(fourth.session_id, first.session_id, "a fresh session id");
+
+    let (live, _) = rpc::session_seat(
+        &rpc_url(),
+        contract_addr,
+        first.token_id,
+        first.session_id.unwrap(),
+    )
+    .expect("sessionSeat read");
+    assert!(!live, "the copy names a seat that is nobody's");
+
+    // The copy launching now would be a third instance on a two-seat licence.
+    // Sampled, the launch reads the seat, misses the fast path, finds both
+    // seats taken by the machines that really hold them, and says so.
+    std::env::set_var("RUB3_SESSION_DIR", copy.path());
+    let mut refused = None;
+    for _ in 0..80 {
+        match ensure_headless(agent.signer.as_ref(), &ctx(&contract, None)) {
+            Ok((launched, _)) => assert_eq!(
+                launched.session_id, first.session_id,
+                "an unsampled launch still runs from the cached record",
+            ),
+            Err(HeadlessError::FleetExhausted { token_id, .. }) => {
+                refused = Some(token_id);
+                break;
+            }
+            other => panic!("expected a launch or FleetExhausted, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        refused,
+        Some(first.token_id),
+        "a sampled launch must refuse the instance beyond K",
+    );
+
+    // And the two machines that really hold the seats are untouched by any of
+    // it: the copy's refusal is never somebody else's session ending.
+    for session in [&second, &fourth] {
+        let (live, _) = rpc::session_seat(
+            &rpc_url(),
+            contract_addr,
+            session.token_id,
+            session.session_id.unwrap(),
+        )
+        .expect("sessionSeat read");
+        assert!(live, "the seats the fleet really holds must survive");
+    }
+}
+
 /// **The teardown half.** `--release-seat` hands a seat back at once instead of
 /// after the contract's TTL, and the seat really is available to another
 /// instance afterwards.
@@ -3532,12 +3653,40 @@ fn headless_release_seat_frees_it_for_another_instance_e2e() {
     // a teardown that has already happened is the state the caller asked for,
     // which is what `released=false` and exit 0 promise.
     match release_headless(agent.signer.as_ref(), &ctx(&contract, None)) {
-        Ok(ReleaseOutcome::NoSeatHeld { token_id }) => assert_eq!(
-            token_id, None,
-            "nothing was asked for by id and the store holds nothing to name"
-        ),
+        Ok(ReleaseOutcome::NoSeatHeld { token_id, rejected }) => {
+            assert_eq!(
+                token_id, None,
+                "nothing was asked for by id and the store holds nothing to name"
+            );
+            assert_eq!(
+                rejected, None,
+                "an empty store is nothing to report: no record was found and refused",
+            );
+        }
         other => panic!("expected NoSeatHeld, got {other:?}"),
     }
+
+    // **A record too damaged to parse must not read as an empty store.** A
+    // crash between opening the session file and finishing the write leaves
+    // exactly this, and the seat it named is held until the contract's own
+    // `sessionTtlSeconds` runs out. Reported as a refusal with a reason, at the
+    // same exit code, so an operator sees there is a seat to recover.
+    let truncated = session_store::session_path(APP_ID, first.token_id).expect("a session path");
+    std::fs::create_dir_all(truncated.parent().unwrap()).expect("the session directory");
+    std::fs::write(&truncated, "{\"app_id\": \"com.rub3").expect("a half-written record");
+    match release_headless(agent.signer.as_ref(), &ctx(&contract, Some(first.token_id)))
+        .expect("an unreadable record is nothing to release, not a failure")
+    {
+        ReleaseOutcome::NoSeatHeld { token_id, rejected } => {
+            assert_eq!(token_id, Some(first.token_id));
+            assert!(
+                matches!(rejected, Some(RecordRefusal::Unreadable(_))),
+                "a truncated record must be named, not silently absent: {rejected:?}",
+            );
+        }
+        other => panic!("expected NoSeatHeld, got {other:?}"),
+    }
+    std::fs::remove_file(&truncated).expect("the damaged record is this test's to clean up");
 
     // The waiting machine can now start.
     std::env::set_var("RUB3_SESSION_DIR", _third_machine.path());
@@ -3766,7 +3915,14 @@ fn headless_release_seat_refuses_a_session_written_for_another_contract_e2e() {
     match release_headless(agent.signer.as_ref(), &ctx(&successor, None))
         .expect("a foreign record is nothing to release, not a failure")
     {
-        ReleaseOutcome::NoSeatHeld { token_id } => assert_eq!(token_id, None),
+        ReleaseOutcome::NoSeatHeld { token_id, rejected } => {
+            assert_eq!(token_id, None);
+            // The predecessor's record is still on disk, so this is not an
+            // empty store: the seat it names may really be held, and the
+            // teardown says so rather than reporting the same silence as a
+            // machine with nothing to hand back.
+            assert_eq!(rejected, Some(RecordRefusal::NoneUsable { records: 1 }));
+        }
         other => panic!("expected NoSeatHeld, got {other:?}"),
     }
 
@@ -3778,7 +3934,13 @@ fn headless_release_seat_refuses_a_session_written_for_another_contract_e2e() {
     )
     .expect("a foreign record is nothing to release by id either")
     {
-        ReleaseOutcome::NoSeatHeld { token_id } => assert_eq!(token_id, Some(stale.token_id)),
+        ReleaseOutcome::NoSeatHeld { token_id, rejected } => {
+            assert_eq!(token_id, Some(stale.token_id));
+            assert!(
+                matches!(rejected, Some(RecordRefusal::AnotherDeploy { .. })),
+                "the named record is the predecessor's, and the refusal says which: {rejected:?}",
+            );
+        }
         other => panic!("expected NoSeatHeld, got {other:?}"),
     }
 
@@ -3875,6 +4037,8 @@ fn plant_session_record(
     let expires_at = "2000-01-01T00:00:00Z";
     let preimage = session::session_message(
         APP_ID,
+        CHAIN_ID,
+        contract,
         token_id,
         "access",
         &wallet,
@@ -3900,6 +4064,7 @@ fn plant_session_record(
         expires_at: Some(expires_at.into()),
         signature,
         chain: "base".into(),
+        chain_id: CHAIN_ID,
         contract: contract.to_string(),
         activation_tx: None,
         activation_block: None,
@@ -3922,9 +4087,11 @@ fn plant_session_record(
 /// exposure: `--release-seat --token-id N`, and the flagless reclaim an
 /// ordinary launch performs when it finds the fleet full.
 ///
-/// Two forgeries, because the two failures are different: one whose signature
-/// verifies but belongs to another key - which signature checking alone would
-/// admit - and one whose signature is not a signature at all.
+/// Three forgeries, because the three failures are different: one whose
+/// signature verifies but belongs to another key - which signature checking
+/// alone would admit - one whose signature is not a signature at all, and one
+/// this machine really did write, on another deploy, with `contract` rewritten
+/// to name this one.
 #[test]
 #[ignore = "requires anvil + forge + cast on PATH"]
 fn headless_a_planted_session_file_cannot_release_another_instances_seat_e2e() {
@@ -3969,7 +4136,13 @@ fn headless_a_planted_session_file_cannot_release_another_instances_seat_e2e() {
     match release_headless(&counter, &ctx(&contract, Some(victim.token_id)))
         .expect("a record this machine did not write is nothing to release, not a failure")
     {
-        ReleaseOutcome::NoSeatHeld { token_id } => assert_eq!(token_id, Some(victim.token_id)),
+        ReleaseOutcome::NoSeatHeld { token_id, rejected } => {
+            assert_eq!(token_id, Some(victim.token_id));
+            assert!(
+                matches!(rejected, Some(RecordRefusal::AnotherKey { .. })),
+                "the refusal must name the key, not read as an empty store: {rejected:?}",
+            );
+        }
         other => panic!("expected NoSeatHeld, got {other:?}"),
     }
     assert_eq!(
@@ -3993,11 +4166,48 @@ fn headless_a_planted_session_file_cannot_release_another_instances_seat_e2e() {
     match release_headless(&counter, &ctx(&contract, Some(victim.token_id)))
         .expect("an unverifiable record is nothing to release either")
     {
-        ReleaseOutcome::NoSeatHeld { token_id } => assert_eq!(token_id, Some(victim.token_id)),
+        ReleaseOutcome::NoSeatHeld { token_id, rejected } => {
+            assert_eq!(token_id, Some(victim.token_id));
+            assert_eq!(rejected, Some(RecordRefusal::Unverifiable));
+        }
         other => panic!("expected NoSeatHeld, got {other:?}"),
     }
     assert_eq!(counter.calls(), 0, "nor for an unverifiable one");
     assert_victim_untouched("after the mangled-signature forgery");
+
+    // (c) A record this machine genuinely wrote, on another deploy, repointed
+    //     at this one. Session ids start at 1 on every contract, so the ids in
+    //     a record from deploy B name somebody else's live session here; the
+    //     record is signed, its wallet is this run's own key, and its local
+    //     expiry has passed, so `contract` being in the preimage is the whole
+    //     of what stops it.
+    let other_deploy = deploy_access_with_seats(PRICE_WEI, ZERO_ADDR, "0", "0", "15", 2);
+    let mut repointed = plant_session_record(
+        agent.signer.as_ref(),
+        &other_deploy,
+        victim.token_id,
+        victim_session,
+    );
+    repointed.contract = contract.clone();
+    session_store::save_session(&repointed).expect("the session directory is writable");
+    let counter = CountingSigner::wrapping(agent.signer.as_ref());
+    match release_headless(&counter, &ctx(&contract, Some(victim.token_id)))
+        .expect("a record signed for another deploy is nothing to release here")
+    {
+        ReleaseOutcome::NoSeatHeld { token_id, rejected } => {
+            assert_eq!(token_id, Some(victim.token_id));
+            // Signed, this key's own, and locally expired: only the preimage
+            // covering `contract` stands between it and a broadcast release.
+            assert_eq!(rejected, Some(RecordRefusal::Unverifiable));
+        }
+        other => panic!("expected NoSeatHeld, got {other:?}"),
+    }
+    assert_eq!(
+        counter.calls(),
+        0,
+        "nor for a record whose contract was rewritten after signing",
+    );
+    assert_victim_untouched("after the repointed-contract forgery");
 
     // ── The flagless door: the reclaim inside an ordinary launch ─────────────
     //

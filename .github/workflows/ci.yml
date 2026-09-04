@@ -556,7 +556,7 @@ jobs:
         if: always()
         env:
           # Update when a test is added to or removed from this suite.
-          EXPECTED_TESTS: 30
+          EXPECTED_TESTS: 39
         run: |
           set -o pipefail
           log="${RUNNER_TEMP:-/tmp}/headless_e2e.log"
@@ -580,7 +580,7 @@ jobs:
         if: always()
         env:
           # Update when a test is added to or removed from this suite.
-          EXPECTED_TESTS: 5
+          EXPECTED_TESTS: 6
         run: |
           set -o pipefail
           log="${RUNNER_TEMP:-/tmp}/webview_session_flow.log"

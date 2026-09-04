@@ -34,9 +34,12 @@ pub enum ActivationResult {
         proof: LicenseProof,
     },
     /// Tier-3 session issued after a confirmed `activate()` tx.
+    ///
+    /// Boxed because a `Session` is several times the size of every other
+    /// variant here, and this enum is passed by value down the result channel.
     #[cfg(feature = "cooldown")]
     SessionSuccess {
-        session: Session,
+        session: Box<Session>,
     },
     Cancelled,
     Error(String),
@@ -1239,6 +1242,7 @@ impl IpcState {
             expires_at: Some(a.expires_at),
             signature: a.signature,
             chain: "base".to_string(),
+            chain_id: self.chain_id,
             contract: self.contract.clone(),
             activation_tx: Some(a.activation_tx),
             activation_block: Some(a.activation_block),
@@ -1252,9 +1256,9 @@ impl IpcState {
             return;
         }
 
-        let _ = self
-            .result_tx
-            .send(ActivationResult::SessionSuccess { session });
+        let _ = self.result_tx.send(ActivationResult::SessionSuccess {
+            session: Box::new(session),
+        });
         let _ = self.cmd_tx.send(Cmd::Close);
     }
 

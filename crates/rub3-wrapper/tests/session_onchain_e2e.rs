@@ -1,8 +1,9 @@
 //! End-to-end test for `session::verify_onchain` against a live EVM node.
 //!
 //! Spawns `anvil`, deploys `Rub3Access`, executes a purchase + activate,
-//! extracts the real tx hash + block hash, and exercises both the happy path
-//! and the three tampered-field failure modes of `verify_onchain`.
+//! extracts the real tx hash + block hash, and exercises the happy path, the
+//! three tampered-field failure modes of `verify_onchain`, and the seat bound
+//! it re-reads (§3.4).
 //!
 //! Requires the Foundry toolchain (`anvil`, `forge`, `cast`) on PATH.
 //! Ignored by default - run with:
@@ -290,6 +291,7 @@ fn session_verify_onchain_e2e() {
         expires_at: Some("2099-01-01T00:00:00Z".into()),
         signature: "0x00".into(),
         chain: "31337".into(),
+        chain_id: 31_337,
         contract: contract.clone(),
         activation_tx: Some(activate_tx.clone()),
         activation_block: None,
@@ -326,5 +328,38 @@ fn session_verify_onchain_e2e() {
     match session::verify_onchain(&missing_tx, &rpc_url()) {
         Err(VerifyError::ReceiptNotFound) => {}
         other => panic!("expected ReceiptNotFound, got {other:?}"),
+    }
+
+    // ── The seat bound (§3.4) ────────────────────────────────────────────────
+    //
+    // The receipt says an activation happened; it does not say the seat it took
+    // is still this session's. A session id that never held one is refused
+    // first, because the receipt checks above cannot see the difference.
+    let mut foreign_session = session.clone();
+    foreign_session.session_id = Some(99);
+    match session::verify_onchain(&foreign_session, &rpc_url()) {
+        Err(VerifyError::SeatNotHeld {
+            token_id,
+            session_id,
+        }) => {
+            assert_eq!(token_id, 0);
+            assert_eq!(session_id, 99);
+        }
+        other => panic!("expected SeatNotHeld, got {other:?}"),
+    }
+
+    // And the same record that passed above stops passing the moment its seat
+    // is handed back - which is the whole of what a sampled launch adds: the
+    // activation transaction it is bound to is unchanged and still valid.
+    cast_send(&contract, "release(uint256,uint256)", &["0", "1"]);
+    match session::verify_onchain(&session, &rpc_url()) {
+        Err(VerifyError::SeatNotHeld {
+            token_id,
+            session_id,
+        }) => {
+            assert_eq!(token_id, 0);
+            assert_eq!(session_id, 1);
+        }
+        other => panic!("expected SeatNotHeld after release, got {other:?}"),
     }
 }

@@ -36,12 +36,12 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --li
 cargo test -p rub3-wrapper --no-default-features --features tier-3,webview --lib
 ```
 
-For reference, `--lib` counts per bundle: `tier-0` 65, `tier-1` 97, `tier-2` 137,
-`tier-3`/`tier-4` 177, `tier-2,webview` 138, `tier-3,webview` 215,
-`tier-3,headless` 243, `tier-0,sdk` 77, `tier-3,sdk` 194. Every count on this
+For reference, `--lib` counts per bundle: `tier-0` 65, `tier-1` 103, `tier-2` 143,
+`tier-3`/`tier-4` 183, `tier-2,webview` 144, `tier-3,webview` 221,
+`tier-3,headless` 249, `tier-0,sdk` 77, `tier-3,sdk` 200. Every count on this
 page is the number libtest reports as *running* - passed plus `#[ignore]`d, not
-passed alone - so a plain run of `tier-3,webview` prints 208 passed and 7 ignored
-against the 215 above. The five `packed` tests are in every bundle, which is why
+passed alone - so a plain run of `tier-3,webview` prints 214 passed and 7 ignored
+against the 221 above. The five `packed` tests are in every bundle, which is why
 every bundle is five higher than the one `implementation.md` §3.5 recorded when
 it was written; §3.4's three seat-teardown store tests are three higher again
 in every bundle that has a session model, which is every one of them except
@@ -166,7 +166,9 @@ Exercises `session::verify_onchain` against a live EVM node. Requires the Foundr
   - asserts `verify_onchain` succeeds for a correctly-populated session,
   - tampers the `contract` field → `VerifyError::ContractMismatch`,
   - tampers the `activation_block_hash` → `VerifyError::BlockHashMismatch`,
-  - points `activation_tx` at a non-existent hash → `VerifyError::ReceiptNotFound`.
+  - points `activation_tx` at a non-existent hash → `VerifyError::ReceiptNotFound`,
+  - names a session id that never took a seat → `VerifyError::SeatNotHeld` (§3.4), which the receipt checks above cannot see,
+  - releases the seat on-chain and re-runs the record that passed → `VerifyError::SeatNotHeld` again, with the activation transaction it is bound to unchanged. That pair is the seat bound as a launch reads it.
 
 Run with:
 
@@ -242,10 +244,11 @@ Drives `activation::ensure_headless` end to end with no webview involved: the te
 - `headless_sold_out_e2e` - supply cap of 1, already minted → exit code 12
 - `headless_cooldown_active_then_ready_e2e` - exit code 13 reporting `blocks_remaining`, then succeeds after `anvil_mine` with `session_id` bumped to 2. Single-seat, so the retake is the contract's own tier-3 behaviour and the cooldown is the only refusal
 - `headless_seats_admit_a_fleet_then_report_exhaustion_e2e` (§3.4) - a three-seat contract and three "machines" (the session store moved between calls, one wallet and one token), each activating on a seat of its own with three distinct live sessions, then a fourth refused `FleetExhausted` at exit code 24 with `seats_in_use`, `seats` and `seconds_remaining` on the detail line
-- `headless_release_seat_frees_it_for_another_instance_e2e` (§3.4) - `release_headless` on a retiring machine frees its seat on-chain, leaves the other instance's session live, deletes the local record, answers a second call with `NoSeatHeld` carrying no token to name, and lets the waiting machine start
+- `headless_release_seat_frees_it_for_another_instance_e2e` (§3.4) - `release_headless` on a retiring machine frees its seat on-chain, leaves the other instance's session live, deletes the local record, answers a second call with `NoSeatHeld` carrying no token to name and no refusal to report, and lets the waiting machine start. A half-written record is then dropped where the deleted one was: it comes back as `NoSeatHeld` with `RecordRefusal::Unreadable` rather than as the same silence an empty store gives, because the seat a truncated record names is held until the contract's own TTL runs out
+- `headless_a_sampled_launch_refuses_a_session_whose_seat_is_gone_e2e` (§3.4) - the launch-time half of the seat bound, asserted at the rate it actually holds. A live record is copied byte for byte onto a machine that never activated, and it launches, because two instances on one session id are one seat to the contract and only a device key could tell them apart. The original then hands its seat back and a fourth machine takes it, so the copy names a seat that is nobody's; launching in a loop, a sampled launch (`should_reverify`, about one in five) reads `sessionSeat`, misses the fast path, finds both seats held by the machines that really hold them and refuses with `FleetExhausted`. Both halves are asserted deliberately: a test showing only the refusal would be evidence for a stronger claim than the code makes
 - `headless_release_seat_frees_a_session_that_lapsed_locally_e2e` (§3.4) - a one-second packed TTL against a contract granting a day, which is the state every retiring instance is in on a build whose TTL is the shorter one: the cached session has lapsed locally, the seat is still live on-chain, and `--release-seat` hands back exactly that seat rather than reporting nothing to release
 - `headless_release_seat_refuses_a_session_written_for_another_contract_e2e` (§3.4) - a §2.4 successor migration keeps the packed `APP_ID`, and session ids start at 1 on every deploy, so a predecessor's record can name a `(token, session)` pair that is live here and another instance's. The release is refused as `NoSeatHeld` through both doors - the scan never selects the foreign record, so the flagless door names no token at all, while the named-token door loads what the caller pointed at and rejects it on its own - the other instance's session survives, and the record is still there to release against the contract it names
-- `headless_a_planted_session_file_cannot_release_another_instances_seat_e2e` (§3.4) - the session directory is user-writable and `load_session` is a bare read and parse, so a hand-written record naming this contract and *another instance's* session id would otherwise make the wrapper sign and broadcast `release()` and end that session. Both teardown doors are driven against two forgeries - one internally consistent but signed by a key this run does not hold, which a signature check alone would admit, and one whose signature is not a signature - and each must sign nothing at all and leave the victim's seat live. The honest release runs at the end of the same test, so the refusals are about who wrote the record rather than about refusing everything
+- `headless_a_planted_session_file_cannot_release_another_instances_seat_e2e` (§3.4) - the session directory is user-writable and `load_session` is a bare read and parse, so a hand-written record naming this contract and *another instance's* session id would otherwise make the wrapper sign and broadcast `release()` and end that session. Both teardown doors are driven against three forgeries - one internally consistent but signed by a key this run does not hold, which a signature check alone would admit; one whose signature is not a signature; and one this machine really wrote on another deploy with `contract` rewritten to name this one, which only `contract` being in the signed preimage catches - and each must sign nothing at all and leave the victim's seat live. The honest release runs at the end of the same test, so the refusals are about who wrote the record rather than about refusing everything
 - `headless_a_lapsed_seat_reads_as_free_e2e` (§3.4) - the chain's clock moved past a seat's TTL with nothing sweeping the record: `rpc::occupied_seat` reads the seat as free, the way the contract's own `activate()` would hand it to the next caller, rather than reporting the stale session id `seatAt` still carries
 - `headless_releasing_a_seat_does_not_beat_the_cooldown_e2e` (§3.4) - the wrapper meeting the contract's churn defence: release one block in, come straight back, and get `CooldownActive` rather than a seat - still refused at the last block of the window and only granted at the one after it
 - `headless_session_never_outlives_the_seat_that_admits_it_e2e` (§3.4) - the contract's `sessionTtlSeconds` is authoritative over the packed one, so a build packing seven days against a contract granting one mints a session whose `expires_at` equals its seat's on-chain expiry to the second, and which still verifies over it

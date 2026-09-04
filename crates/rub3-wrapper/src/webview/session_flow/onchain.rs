@@ -476,7 +476,7 @@ impl Holder {
         self.sign(window, &confirmed);
 
         match window.result() {
-            ActivationResult::SessionSuccess { session } => session,
+            ActivationResult::SessionSuccess { session } => *session,
             other => panic!("expected SessionSuccess, got {}", describe(&other)),
         }
     }
@@ -558,8 +558,13 @@ impl Drop for Holder {
 /// Writes a session where the launch fast path will look for it, through the
 /// same call `activation::ensure` makes when the window succeeds.
 fn persist(session: crate::session::Session) {
-    crate::activation::persist_activation(APP_ID, ActivationResult::SessionSuccess { session })
-        .expect("the session should be written to the session store");
+    crate::activation::persist_activation(
+        APP_ID,
+        ActivationResult::SessionSuccess {
+            session: Box::new(session),
+        },
+    )
+    .expect("the session should be written to the session store");
 }
 
 // ── The full flow ─────────────────────────────────────────────────────────────
@@ -659,7 +664,7 @@ fn a_connected_wallet_activates_signs_and_the_session_survives_a_restart_e2e() {
     // ── The wallet signs, and the window hands back a session ────────────────
     holder.sign(&window, &confirmed);
     let session = match window.result() {
-        ActivationResult::SessionSuccess { session } => session,
+        ActivationResult::SessionSuccess { session } => *session,
         other => panic!("expected SessionSuccess, got {}", describe(&other)),
     };
 
@@ -969,7 +974,7 @@ fn auto_detect_finds_the_activation_and_the_session_completes_e2e() {
     // preimage produces the same result.
     holder.sign(&window, &confirmed);
     let session = match window.result() {
-        ActivationResult::SessionSuccess { session } => session,
+        ActivationResult::SessionSuccess { session } => *session,
         other => panic!("expected SessionSuccess, got {}", describe(&other)),
     };
     assert_eq!(session.activation_tx.as_deref(), Some(tx_hash.as_str()));

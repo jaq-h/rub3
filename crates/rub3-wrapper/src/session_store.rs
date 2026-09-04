@@ -175,6 +175,31 @@ fn latest_session_where(
     Ok(sessions.into_iter().next().unwrap())
 }
 
+/// How many session records sit under `app_id`, whatever their state.
+///
+/// The teardown path (§3.4) needs it to tell "this machine kept no record" from
+/// "it kept records and none of them is one it may release from": the scan
+/// above answers both with [`StoreError::NotFound`], and the second is the
+/// state that leaves a seat held for the rest of the contract's TTL with
+/// nothing on this machine able to hand it back. Counts files rather than
+/// parsing them, because the record that most needs reporting is the one too
+/// damaged to parse.
+///
+/// A directory that cannot be read holds nothing this machine can act on, which
+/// is the same answer as an empty one.
+pub fn stored_record_count(app_id: &str) -> usize {
+    let Ok(root) = sessions_root() else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(root.join(app_id)) else {
+        return 0;
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .count()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -188,7 +213,19 @@ mod tests {
     /// leaves behind.
     const OTHER_CONTRACT: &str = "0x0000000000000000000000000000000000000003";
 
+    /// The chain every record here is signed against.
+    const TEST_CHAIN_ID: u64 = 8453;
+
     fn signed_session(app_id: &str, token_id: u64, expires_at: &str) -> Session {
+        signed_session_on(app_id, token_id, expires_at, TEST_CONTRACT)
+    }
+
+    /// A record signed against a named deploy.
+    ///
+    /// `contract` is in the preimage, so a record for another deploy has to be
+    /// signed for it rather than rewritten afterwards - rewriting it is exactly
+    /// the tamper the signature now catches.
+    fn signed_session_on(app_id: &str, token_id: u64, expires_at: &str, contract: &str) -> Session {
         use k256::ecdsa::SigningKey;
         use rand::rngs::OsRng;
 
@@ -199,6 +236,8 @@ mod tests {
         let user_id = wallet.clone();
         let msg = session_message(
             app_id,
+            TEST_CHAIN_ID,
+            contract,
             token_id,
             identity,
             &user_id,
@@ -233,7 +272,8 @@ mod tests {
             expires_at: Some(expires_at.into()),
             signature: format!("0x{}", hex::encode(&sig_bytes)),
             chain: "base".into(),
-            contract: "0x0000000000000000000000000000000000000002".into(),
+            chain_id: TEST_CHAIN_ID,
+            contract: contract.into(),
             activation_tx: None,
             activation_block: None,
             activation_block_hash: None,
@@ -360,12 +400,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("RUB3_SESSION_DIR", dir.path());
 
-        // Neither `contract` nor `issued_at` is in the signed preimage, so both
-        // records still verify as the ones their own keys wrote.
+        // `issued_at` is not in the signed preimage, so moving it leaves both
+        // records verifying as the ones their own keys wrote. `contract` is,
+        // which is why the foreign record is signed for its own deploy rather
+        // than rewritten to name it.
         let mut ours = signed_session("com.rub3.test", 9, "2000-01-01T00:00:00Z");
         ours.issued_at = "2020-01-01T00:00:00Z".into();
-        let mut foreign = signed_session("com.rub3.test", 5, "2000-01-01T00:00:00Z");
-        foreign.contract = OTHER_CONTRACT.into();
+        let mut foreign =
+            signed_session_on("com.rub3.test", 5, "2000-01-01T00:00:00Z", OTHER_CONTRACT);
         foreign.issued_at = "2030-01-01T00:00:00Z".into();
         save_session(&ours).unwrap();
         save_session(&foreign).unwrap();

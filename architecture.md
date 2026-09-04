@@ -177,8 +177,9 @@ Signature-only verification. The wallet signs once at activation, the proof is s
 
 Adds a session with TTL. The wallet signs a session message at activation. The wrapper checks signature and expiry locally on each launch. On expiry, the user must re-authenticate with their wallet (re-sign). No on-chain calls at launch.
 
-- **Hash inputs**: `SHA-256(app_id || token_id || wallet || nonce || expires_at)`
+- **Hash inputs**: `SHA-256(app_id || chain_id || contract || token_id || identity || user_id || wallet || nonce || expires_at)`
 - **Verification**: Signature recovery + expiry check
+- **What the deploy fields buy**: `chain_id` + `contract` name the deploy the record belongs to. Every guard that asks "is this record one this build may act on" compares them, and the session directory is user-writable, so unsigned they would be the one part of a genuine record a tamperer could rewrite.
 - **Renewal**: Wallet re-signs a new session (off-chain, no gas)
 - **Sharing risk**: Copied session file works until `expires_at`. Setting a shorter TTL reduces the window.
 
@@ -195,10 +196,11 @@ Adds an `ownerOf()` RPC read on every launch. The wrapper confirms the wallet in
 
 Adds on-chain activation with a cooldown and a per-token seat table. At activation, the wallet sends an `activate()` transaction that takes a seat and stamps it with the current block, and the contract assigns a fresh `sessionId`. A token grants `seatsPerToken` seats, so a licence admits that many live sessions at once; the single-seat default is the classic tier-3 licence, where opening a session ends the previous one.
 
-- **Hash inputs**: `SHA-256(app_id || token_id || wallet || nonce || expires_at || activation_block_hash || session_id)`
+- **Hash inputs**: `SHA-256(app_id || chain_id || contract || token_id || identity || user_id || wallet || nonce || expires_at || activation_block_hash || session_id)`
 - **On-chain state**: see [Rub3Access (one-time purchase)](#rub3access-one-time-purchase) below for the shape as built. The parameters a buyer reads before paying are `cooldownBlocks`, `seatsPerToken` and `sessionTtlSeconds`, all `immutable`.
 - **Verification**: Signature + expiry + `ownerOf()`. The wrapper binds a session to the activation transaction's own receipt rather than re-reading contract state, because under seats a fleet coming up puts several activations in one block; `sessionSeat(tokenId, sessionId)` is the read that says whether a specific session still holds a seat.
-- **Sharing risk**: A token lands at most `seatsPerToken` activations per cooldown window - `seatsPerToken` times the single-seat rate and not one more, whatever anybody releases or lets lapse. At one seat, creating a session for a pirate kills the holder's own session, so the holder must choose between keeping access and giving it away. Above one seat, concurrency is what the holder paid for, and the licence refuses the instance beyond it rather than evicting anybody.
+- **Sharing risk**: A token lands at most `seatsPerToken` activations per cooldown window - `seatsPerToken` times the single-seat rate and not one more, whatever anybody releases or lets lapse. At one seat, creating a session for a pirate kills the holder's own session, so the holder must choose between keeping access and giving it away. Above one seat, concurrency is what the holder paid for, and the licence refuses the K+1th *activation* rather than evicting anybody.
+- **Where the seat bound is enforced**: unconditionally at activation, since `activate()` is the contract admitting the session at all. At launch it is re-read only on the launches `should_reverify` samples, about one in five: `verify_onchain` asks `sessionSeat(tokenId, sessionId)` whether the seat is still that session's, and a released or lapsed seat fails the launch. So a copied session file whose seat has since gone to somebody else keeps running until its next sampled launch, and a copy taken while the original's seat is live shares that seat and is not detected at all - two instances on one session id are one seat to the contract. Binding a session to the machine that took the seat is tier 4's job, and tier 4 is deferred.
 
 ### Tier 4: `hardened` *(deferred)*
 
@@ -213,10 +215,10 @@ Would bind a session to the machine that created it with an on-chain registered 
 | **Launch cost** | 0 | 0 | 0 (view call) | 0 (view call) | 0 (view call) |
 | **Network at launch** | No | No | Yes | Yes | Yes |
 | **Offline support** | Full | Within TTL | Grace window | Grace window | None |
-| **Copy session file** | Works | Works until TTL | Fails on transfer | Fails (session_id) | Fails (no device key) |
+| **Copy session file** | Works | Works until TTL | Fails on transfer | Works while the seat is live; fails on a sampled launch once the seat is gone | Fails (no device key) |
 | **Signing oracle** | Works | Works until TTL | Works (real owner) | K per cooldown, and every seat handed out is one the holder loses | K per cooldown + bound to K devices |
-| **VM clone attack** | Works | Works | Works | Works (K active, K bought) | Blocked by enclave; possible with vTPM |
-| **Hash components** | `app_id`, `token_id` | + `wallet`, `nonce`, `expires_at` | Same as 1 | + `block_hash`, `session_id` | + `device_pubkey` |
+| **VM clone attack** | Works | Works | Works | K activations per cooldown window are bought; clones sharing one session id share its seat | Blocked by enclave; possible with vTPM |
+| **Hash components** | `app_id`, `token_id` | + `chain_id`, `contract`, `identity`, `user_id`, `wallet`, `nonce`, `expires_at` | Same as 1 | + `block_hash`, `session_id` | + `device_pubkey` |
 
 ---
 
@@ -898,6 +900,7 @@ Stored at `~/.rub3/licenses/<app_id>.json`.
   "expires_at":             "2026-04-17T09:00:00Z",
   "signature":              "0x...",
   "chain":                  "base",
+  "chain_id":               8453,
   "contract":               "0x1234...abcd",
   "activation_tx":          "0x...",
   "activation_block":       12345678,
@@ -908,7 +911,7 @@ Stored at `~/.rub3/licenses/<app_id>.json`.
 
 Tiers 1-2 omit `activation_tx`, `activation_block`, `activation_block_hash`, `session_id`. Access model omits `tba` and sets `user_id` to the wallet address.
 
-Signature covers: `SHA-256(app_id || token_id || wallet || nonce || expires_at [|| activation_block_hash || session_id])`.
+Signature covers: `SHA-256(app_id || chain_id || contract || token_id || identity || user_id || wallet || nonce || expires_at [|| activation_block_hash || session_id])`.
 
 ### Tier 4 (hardened, device-bound)
 

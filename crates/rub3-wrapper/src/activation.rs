@@ -143,7 +143,7 @@ pub(crate) fn persist_activation(
         #[cfg(feature = "cooldown")]
         ActivationResult::SessionSuccess { session } => {
             crate::session_store::save_session(&session)
-                .map(|()| Launch::from_session(session))
+                .map(|()| Launch::from_session(*session))
                 .map_err(|e| ActivationError::Error(e.to_string()))
         }
         ActivationResult::Cancelled => Err(ActivationError::Cancelled),
@@ -446,7 +446,13 @@ Teardown:
                   hand back, which is also a success. The `token_id=`
                   key is absent from that second line in the one case
                   with no token to name: no `--token-id` was given and
-                  this machine holds no session for this contract
+                  this machine holds no session for this contract.
+                  A record that was found and refused adds
+                  `rejected=<reason>` to that line and one warning above
+                  it, because the seat it names may really be held: the
+                  reasons are `unreadable`, `unverifiable`,
+                  `another_key`, `another_deploy`, `another_token` and
+                  `none_usable`. The exit code is unchanged
 
 Signer sources, highest precedence first:
   RUB3_AGENT_KEY                        raw hex private key (dev / CI only)
@@ -488,8 +494,8 @@ Spend policy:
 #[cfg(feature = "headless")]
 pub use self::headless::{
     ensure_headless, release_headless, HeadlessContext, HeadlessError, HeadlessOutcome,
-    PaymentRail, ReleaseOutcome, SpendPolicy, SpendVerdict, DEFAULT_MAX_ETH_WEI, ENV_MAX_ETH_WEI,
-    ENV_MAX_TOKEN_AMOUNT,
+    PaymentRail, RecordRefusal, ReleaseOutcome, SpendPolicy, SpendVerdict, DEFAULT_MAX_ETH_WEI,
+    ENV_MAX_ETH_WEI, ENV_MAX_TOKEN_AMOUNT,
 };
 
 #[cfg(feature = "headless")]
@@ -812,7 +818,109 @@ mod headless {
         ///
         /// `token_id` is `None` in the one case where there is no token to
         /// name: nothing was asked for by id and the store holds nothing.
-        NoSeatHeld { token_id: Option<u64> },
+        ///
+        /// `rejected` separates the two ways of holding no seat. `None` is an
+        /// empty store: this machine has nothing, and nothing is what the
+        /// caller asked to hand back. `Some` means a record was found and
+        /// refused, and that is the one worth saying out loud - the seat it
+        /// names may really be held, and refusing its record is exactly what
+        /// leaves it held for the rest of the contract's `sessionTtlSeconds`
+        /// with nothing on this machine able to give it back.
+        NoSeatHeld {
+            token_id: Option<u64>,
+            rejected: Option<RecordRefusal>,
+        },
+    }
+
+    /// Why a session record on disk is not one this machine may release from.
+    ///
+    /// **A refusal here is a correct refusal.** Every variant is a record that
+    /// is not evidence of a seat *this* machine took, and acting on one would
+    /// be a wrapper ending somebody else's session - the revocation shape §2.4
+    /// rules out. What the variant adds is a name for it: an operator whose
+    /// teardown reports `released=false` because a session file was truncated
+    /// by a crash has a seat stranded until the contract frees it, and
+    /// unreported that is indistinguishable from a teardown that had nothing to
+    /// do.
+    ///
+    /// Carried on [`ReleaseOutcome::NoSeatHeld`] rather than raised as an
+    /// error, and reported on stderr rather than through the exit code: the
+    /// outcome is still the one the caller asked for, and an orchestrator
+    /// branching on the code sees no change.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum RecordRefusal {
+        /// A record exists for this token and could not be read or parsed - a
+        /// truncated write, or a file something else corrupted.
+        Unreadable(String),
+        /// The signature does not recover to the record's own `wallet`, so the
+        /// record was not written whole by any single key.
+        Unverifiable,
+        /// Signed, but by a key this run does not hold.
+        AnotherKey { wallet: String },
+        /// Signed by this key, for a different deploy. Session ids start at 1
+        /// on every contract, so its ids name a stranger's session here.
+        AnotherDeploy { contract: String },
+        /// Signed by this key, for a different token than the one asked for.
+        AnotherToken { token_id: u64 },
+        /// The store holds records for this app and the scan chose none of
+        /// them. Reached only when no `--token-id` narrowed the search, so
+        /// there is no single record to name.
+        NoneUsable { records: usize },
+    }
+
+    impl RecordRefusal {
+        /// A stable one-word key for the `rub3-detail:` line, so an
+        /// orchestrator branches on the reason without reading the sentence.
+        pub fn key(&self) -> &'static str {
+            match self {
+                RecordRefusal::Unreadable(_) => "unreadable",
+                RecordRefusal::Unverifiable => "unverifiable",
+                RecordRefusal::AnotherKey { .. } => "another_key",
+                RecordRefusal::AnotherDeploy { .. } => "another_deploy",
+                RecordRefusal::AnotherToken { .. } => "another_token",
+                RecordRefusal::NoneUsable { .. } => "none_usable",
+            }
+        }
+    }
+
+    impl std::fmt::Display for RecordRefusal {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                RecordRefusal::Unreadable(e) => {
+                    write!(f, "its session record could not be read: {e}")
+                }
+                RecordRefusal::Unverifiable => write!(
+                    f,
+                    "its session record's signature does not recover to the wallet it names"
+                ),
+                RecordRefusal::AnotherKey { wallet } => {
+                    write!(f, "its session record belongs to another key ({wallet})")
+                }
+                RecordRefusal::AnotherDeploy { contract } => write!(
+                    f,
+                    "its session record was written for another deploy ({contract})"
+                ),
+                RecordRefusal::AnotherToken { token_id } => {
+                    write!(f, "its session record was written for token {token_id}")
+                }
+                RecordRefusal::NoneUsable { records } => write!(
+                    f,
+                    "{records} session record(s) are stored for this app and none is one \
+                     this machine wrote for this deploy"
+                ),
+            }
+        }
+    }
+
+    /// What [`own_seat_record`] found.
+    enum SeatRecord {
+        /// A record this machine wrote, for this deploy, for the token asked
+        /// for.
+        Own(Box<crate::session::Session>),
+        /// Nothing on disk to consider.
+        Absent,
+        /// Something was there and it is not this machine's to act on.
+        Refused(RecordRefusal),
     }
 
     /// Everything that can stop a headless activation, in a shape an
@@ -1379,6 +1487,7 @@ mod headless {
             expires_at: Some(draft.expires_at),
             signature,
             chain: "base".to_string(),
+            chain_id: ctx.chain_id,
             contract: ctx.contract.clone(),
             activation_tx: Some(tx_hash),
             activation_block: Some(receipt.block_number),
@@ -1550,10 +1659,17 @@ mod headless {
         preflight_chain_id(ctx)?;
 
         let session = match own_seat_record(ctx, signer.address(), ctx.token_id) {
-            Some(session) => session,
-            None => {
+            SeatRecord::Own(session) => *session,
+            SeatRecord::Absent => {
                 return Ok(ReleaseOutcome::NoSeatHeld {
                     token_id: ctx.token_id,
+                    rejected: None,
+                })
+            }
+            SeatRecord::Refused(why) => {
+                return Ok(ReleaseOutcome::NoSeatHeld {
+                    token_id: ctx.token_id,
+                    rejected: Some(why),
                 })
             }
         };
@@ -1565,6 +1681,7 @@ mod headless {
                 forget_session(&ctx.app_id, token_id)?;
                 return Ok(ReleaseOutcome::NoSeatHeld {
                     token_id: Some(token_id),
+                    rejected: None,
                 });
             }
             Some(id) => id,
@@ -1576,6 +1693,7 @@ mod headless {
                 forget_session(&ctx.app_id, token_id)?;
                 return Ok(ReleaseOutcome::NoSeatHeld {
                     token_id: Some(token_id),
+                    rejected: None,
                 });
             }
             Err(e) => return Err(HeadlessError::Rpc(e.to_string())),
@@ -1703,34 +1821,59 @@ mod headless {
         ctx: &HeadlessContext,
         wallet: Address,
         token_id: Option<u64>,
-    ) -> Option<crate::session::Session> {
+    ) -> SeatRecord {
+        use crate::session_store::StoreError;
+
         let session = match token_id {
-            Some(token_id) => crate::session_store::load_session(&ctx.app_id, token_id).ok()?,
+            Some(token_id) => match crate::session_store::load_session(&ctx.app_id, token_id) {
+                Ok(session) => session,
+                Err(StoreError::NotFound) => return SeatRecord::Absent,
+                Err(e) => return SeatRecord::Refused(RecordRefusal::Unreadable(e.to_string())),
+            },
             None => {
-                crate::session_store::load_latest_session_for_contract(&ctx.app_id, &ctx.contract)
-                    .ok()?
+                match crate::session_store::load_latest_session_for_contract(
+                    &ctx.app_id,
+                    &ctx.contract,
+                ) {
+                    Ok(session) => session,
+                    // The scan answers "nothing chosen" the same way whether
+                    // the directory was empty or held only records it filtered
+                    // out, so the count is what separates them.
+                    Err(_) => {
+                        return match crate::session_store::stored_record_count(&ctx.app_id) {
+                            0 => SeatRecord::Absent,
+                            records => SeatRecord::Refused(RecordRefusal::NoneUsable { records }),
+                        }
+                    }
+                }
             }
         };
 
         if crate::session::verify_signature(&session).is_err() {
-            return None;
+            return SeatRecord::Refused(RecordRefusal::Unverifiable);
         }
         if !session
             .wallet
             .eq_ignore_ascii_case(&crate::identity::format_addr(wallet))
         {
-            return None;
+            return SeatRecord::Refused(RecordRefusal::AnotherKey {
+                wallet: session.wallet,
+            });
         }
         if !session.contract.eq_ignore_ascii_case(&ctx.contract) {
-            return None;
+            return SeatRecord::Refused(RecordRefusal::AnotherDeploy {
+                contract: session.contract,
+            });
         }
         if let Some(token_id) = token_id {
             if session.token_id != token_id {
-                return None;
+                return SeatRecord::Refused(RecordRefusal::AnotherToken {
+                    token_id: session.token_id,
+                });
             }
         }
 
-        Some(session)
+        SeatRecord::Own(Box::new(session))
     }
 
     /// The id of a session this machine cached, has finished with, and which
@@ -1742,9 +1885,15 @@ mod headless {
         token_id: u64,
     ) -> Result<Option<u64>, HeadlessError> {
         // Only a session this wrapper wrote, with this key, for this contract.
+        //
+        // A refusal is silent here, unlike on the teardown path: this runs
+        // inside an ordinary launch that has already found the fleet full and
+        // is about to report [`HeadlessError::FleetExhausted`], so the launch
+        // says what happened either way. `--release-seat` has no such second
+        // line, which is why that path names the refusal.
         let session = match own_seat_record(ctx, wallet, Some(token_id)) {
-            Some(session) => session,
-            None => return Ok(None),
+            SeatRecord::Own(session) => *session,
+            SeatRecord::Absent | SeatRecord::Refused(_) => return Ok(None),
         };
         let session_id = match session.session_id {
             Some(id) => id,
@@ -3093,6 +3242,11 @@ mod tests {
         std::env::remove_var("RUB3_SESSION_DIR");
     }
 
+    /// The deploy every session built here is signed against. Both fields are
+    /// in the preimage, so a record for another deploy has to be signed for it.
+    const TEST_CONTRACT: &str = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+    const TEST_CHAIN_ID: u64 = 8453;
+
     /// Builds a locally signed, unexpired session for `token_id`, persisted the
     /// way the headless door persists one.
     fn signed_session(
@@ -3106,6 +3260,8 @@ mod tests {
         let expires_at = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
         let message = crate::session::session_message(
             app_id,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
             token_id,
             "access",
             &wallet,
@@ -3130,7 +3286,8 @@ mod tests {
             expires_at: Some(expires_at),
             signature,
             chain: "base".to_string(),
-            contract: "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(),
+            chain_id: TEST_CHAIN_ID,
+            contract: TEST_CONTRACT.to_string(),
             activation_tx: None,
             activation_block: None,
             activation_block_hash: None,
