@@ -306,7 +306,21 @@ cargo test -p rub3-wrapper --no-default-features --features tier-3 \
 # Headless: fresh key → funded → purchase → activate → persist → fast path
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
     -- --ignored headless
+
+# The webview front door's session flows. Lib tests, because the seam they drive
+# is private to src/webview.rs, so the module path is part of the selection.
+cargo test -p rub3-wrapper --no-default-features --features tier-3,webview \
+    --lib -- --ignored webview::session_flow
+
+# The code registry over a real chain, against the wrapper's own ABI mirror
+cargo test -p rub3-wrapper --no-default-features --features tier-2 \
+    --test code_registry_e2e -- --ignored code_registry
 ```
+
+Each of the four self-skips when Foundry is absent, so a pass in 0.00s is a skip.
+[testing.md](testing.md) section 7 is the on-chain test plan these sit inside:
+what a local Anvil run proves, what only a Base Sepolia run can, and the rule
+that keeps a scratch deployment out of `contracts/deployments.json`.
 
 ### Contracts
 

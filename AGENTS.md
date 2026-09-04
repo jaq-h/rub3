@@ -119,7 +119,7 @@ These are the spec; this file is only the map. Read the relevant one before chan
 | `architecture.md` | system design: security tiers, session model, identity models, launch flows, components |
 | `ideation.md` | vision, principles, what rub3 is and isn't |
 | `contracts/contracts.md` | local Anvil and Base Sepolia setup, deploy env-var reference, the EIP-3009 purchase recipe, the pre-purchase audit |
-| `testing.md` | per-suite test inventory, manual testing, seeding a license proof |
+| `testing.md` | per-suite test inventory, manual testing, seeding a license proof, and the three-tier on-chain test plan (local anvil, unrecorded Base Sepolia scratch, the one recorded canonical set) |
 
 The wrapper's app identity (`APP_ID`, `CONTRACT`, `CHAIN_ID`, `RPC_URL`, `FACTORY`) lives in `src/packed.rs`: a placeholder an ordinary `cargo build` compiles, or the value `rub3 pack` injects through a `RUB3_PACK_*` variable and `build.rs` validates. `CONTRACT` defaults to the zero address, which the wrapper reads as "no contract configured" and skips on-chain ownership checks, so a stock build never touches the chain. `FACTORY` is the one constant with no placeholder: it comes out of `contracts/deployments.json` at pack time, and a `null` entry there is a hard error rather than a fallback, at the CLI *and* again in `build.rs`. Never add a fallback; see `implementation.md` §2.5. `rub3-wrapper --version` prints the whole packed identity. See `testing.md` → "App constants".
 
