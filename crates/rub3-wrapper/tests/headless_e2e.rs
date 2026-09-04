@@ -4032,12 +4032,24 @@ fn plant_session_record(
     token_id: u64,
     session_id: u64,
 ) -> session::Session {
+    plant_session_record_on_chain(author, CHAIN_ID, contract, token_id, session_id)
+}
+
+/// [`plant_session_record`] signed for `chain_id`, which is in the preimage:
+/// a record for another chain has to be signed for it rather than rewritten.
+fn plant_session_record_on_chain(
+    author: &dyn Signer,
+    chain_id: u64,
+    contract: &str,
+    token_id: u64,
+    session_id: u64,
+) -> session::Session {
     let wallet = rub3_wrapper::identity::format_addr(author.address());
     let nonce = session::new_nonce();
     let expires_at = "2000-01-01T00:00:00Z";
     let preimage = session::session_message(
         APP_ID,
-        CHAIN_ID,
+        chain_id,
         contract,
         token_id,
         "access",
@@ -4064,7 +4076,7 @@ fn plant_session_record(
         expires_at: Some(expires_at.into()),
         signature,
         chain: "base".into(),
-        chain_id: CHAIN_ID,
+        chain_id,
         contract: contract.to_string(),
         activation_tx: None,
         activation_block: None,
@@ -4087,11 +4099,12 @@ fn plant_session_record(
 /// exposure: `--release-seat --token-id N`, and the flagless reclaim an
 /// ordinary launch performs when it finds the fleet full.
 ///
-/// Three forgeries, because the three failures are different: one whose
+/// Four forgeries, because the four failures are different: one whose
 /// signature verifies but belongs to another key - which signature checking
-/// alone would admit - one whose signature is not a signature at all, and one
-/// this machine really did write, on another deploy, with `contract` rewritten
-/// to name this one.
+/// alone would admit - one whose signature is not a signature at all, one this
+/// machine really did write, on another deploy, with `contract` rewritten to
+/// name this one, and one it really did write for this contract's address on
+/// another chain, which verifies exactly as signed.
 #[test]
 #[ignore = "requires anvil + forge + cast on PATH"]
 fn headless_a_planted_session_file_cannot_release_another_instances_seat_e2e() {
@@ -4208,6 +4221,53 @@ fn headless_a_planted_session_file_cannot_release_another_instances_seat_e2e() {
         "nor for a record whose contract was rewritten after signing",
     );
     assert_victim_untouched("after the repointed-contract forgery");
+
+    // (d) A record this machine genuinely wrote for this contract's address on
+    //     another chain. The factory deploys with `CREATE`, so one deploy
+    //     sequence lands the licence at the same address on Base Sepolia and
+    //     on Base, and session ids start at 1 on each: the record verifies
+    //     exactly as signed, the wallet is this run's own, the contract
+    //     matches, and only the signed `chain_id` says it is not this deploy.
+    plant_session_record_on_chain(
+        agent.signer.as_ref(),
+        CHAIN_ID + 1,
+        &contract,
+        victim.token_id,
+        victim_session,
+    );
+    let counter = CountingSigner::wrapping(agent.signer.as_ref());
+    match release_headless(&counter, &ctx(&contract, Some(victim.token_id)))
+        .expect("a record signed for another chain is nothing to release here")
+    {
+        ReleaseOutcome::NoSeatHeld { token_id, rejected } => {
+            assert_eq!(token_id, Some(victim.token_id));
+            assert_eq!(
+                rejected,
+                Some(RecordRefusal::AnotherDeploy {
+                    chain_id: CHAIN_ID + 1,
+                    contract: contract.clone(),
+                }),
+                "the refusal names the chain the record was signed for",
+            );
+        }
+        other => panic!("expected NoSeatHeld, got {other:?}"),
+    }
+    // And through the scan, which must never select it in the first place.
+    match release_headless(&counter, &ctx(&contract, None))
+        .expect("nor is it anything to release without a token id")
+    {
+        ReleaseOutcome::NoSeatHeld { token_id, rejected } => {
+            assert_eq!(token_id, None);
+            assert_eq!(rejected, Some(RecordRefusal::NoneUsable { records: 1 }));
+        }
+        other => panic!("expected NoSeatHeld, got {other:?}"),
+    }
+    assert_eq!(
+        counter.calls(),
+        0,
+        "nor for a record signed for this address on another chain",
+    );
+    assert_victim_untouched("after the other-chain forgery");
 
     // ── The flagless door: the reclaim inside an ordinary launch ─────────────
     //

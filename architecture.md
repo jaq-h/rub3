@@ -200,6 +200,7 @@ Adds on-chain activation with a cooldown and a per-token seat table. At activati
 - **On-chain state**: see [Rub3Access (one-time purchase)](#rub3access-one-time-purchase) below for the shape as built. The parameters a buyer reads before paying are `cooldownBlocks`, `seatsPerToken` and `sessionTtlSeconds`, all `immutable`.
 - **Verification**: Signature + expiry + `ownerOf()`. The wrapper binds a session to the activation transaction's own receipt rather than re-reading contract state, because under seats a fleet coming up puts several activations in one block; `sessionSeat(tokenId, sessionId)` is the read that says whether a specific session still holds a seat.
 - **Sharing risk**: A token lands at most `seatsPerToken` activations per cooldown window - `seatsPerToken` times the single-seat rate and not one more, whatever anybody releases or lets lapse. At one seat, creating a session for a pirate kills the holder's own session, so the holder must choose between keeping access and giving it away. Above one seat, concurrency is what the holder paid for, and the licence refuses the K+1th *activation* rather than evicting anybody.
+- **Transfer**: the seats follow the token. A transfer ends every session the previous holder had open, freeing each live seat's occupancy and leaving its cooldown stamp where it was, so a resold fleet licence is its buyer's to fill as soon as the seats' own cooldowns allow and a sale buys no churn. A mint frees nothing. The seller's cached session fails its next sampled launch, since its seat is gone.
 - **Where the seat bound is enforced**: unconditionally at activation, since `activate()` is the contract admitting the session at all. At launch it is re-read only on the launches `should_reverify` samples, about one in five: `verify_onchain` asks `sessionSeat(tokenId, sessionId)` whether the seat is still that session's, and a released or lapsed seat fails the launch. So a copied session file whose seat has since gone to somebody else keeps running until its next sampled launch, and a copy taken while the original's seat is live shares that seat and is not detected at all - two instances on one session id are one seat to the contract. Binding a session to the machine that took the seat is tier 4's job, and tier 4 is deferred.
 
 ### Tier 4: `hardened` *(deferred)*
@@ -376,6 +377,7 @@ Key behaviors:
 - **Cooldown, per seat**: `activate()` reverts if fewer than `cooldownBlocks` have elapsed since that *seat's* last activation. Per seat rather than per token because a token-level cooldown would serialise a fleet's start-up; the rate is unchanged per seat, so a token lands at most `seatsPerToken` activations per window.
 - **Freeing a seat**: `release(tokenId, sessionId)` hands one back at once, and `sessionTtlSeconds` frees it anyway if nobody does - a fleet instance that dies without releasing must not strand a seat forever. Expiry is lazy: nothing sweeps, and a lapsed seat is simply free the next time anything looks. **Neither frees the seat's cooldown stamp**, which is what stops release-then-activate churning faster than `cooldownBlocks` intends.
 - **Only a holder ends a session**: `release` requires `ownerOf(tokenId) == msg.sender`. There is no admin path to a live session, and the two signatures that would be one are on the forbidden-selector list.
+- **A transfer ends the previous holder's sessions**: `_update` frees every live seat's occupancy on a transfer, never on a mint, and leaves every `activatedAt` stamp alone, so the buyer inherits free seats that still owe whatever cooldown they were serving. Internal behaviour only: nothing owner-callable or admin-callable frees a seat.
 - **One seat is the tier-3 licence**: at `seatsPerToken == 1` the single seat is always its holder's to retake, so opening a session ends the previous one and the cooldown is the only thing that refuses. A sole holder is never locked out of their own licence by a lost session record.
 - **Device binding (tier 4)**: `registeredDevice` would store the public key of the device that activated. Deferred; see "Deferred designs".
 
@@ -956,7 +958,7 @@ In account model, the TBA address (`user_id`) is stable across transfers. An att
 Invalidation timing depends on tier:
 - Tiers 1: old session valid until TTL expires (time-limited lame duck)
 - Tier 2: invalid on next launch (`ownerOf` check fails)
-- Tier 3: invalid immediately if new holder activates (session_id changes)
+- Tier 3: the transfer itself ends every session the old holder had open, so the cached session fails at its next sampled launch (about one in five) and cannot be re-activated by a wallet that no longer holds the token
 - Tier 4: invalid immediately (device key + session_id)
 
 This is intentional and matches the semantics: **transfer sells the account to the new holder, who takes full control at the next activation.** Higher tiers make the handover faster.

@@ -410,11 +410,11 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         /// Block of the most recent activation on this seat. `0` means the seat
         /// has never been taken.
         ///
-        /// **Never cleared.** This is the cooldown stamp, and {release} and a
-        /// TTL lapse both free the seat's *occupancy* while leaving it exactly
-        /// where it was. Clearing it here would make release-then-activate a way
-        /// to churn faster than `cooldownBlocks` intends, which is the one thing
-        /// seats must not buy.
+        /// **Never cleared.** This is the cooldown stamp, and {release}, a
+        /// TTL lapse and a transfer of the token all free the seat's
+        /// *occupancy* while leaving it exactly where it was. Clearing it here
+        /// would make release-then-activate a way to churn faster than
+        /// `cooldownBlocks` intends, which is the one thing seats must not buy.
         uint64 activatedAt;
         /// Unix timestamp this seat frees itself at. `0`, or any value at or
         /// before `block.timestamp`, means the seat is free.
@@ -515,7 +515,9 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         uint256 expiresAt
     );
 
-    /// @notice A seat was handed back before its TTL lapsed.
+    /// @notice A seat was handed back before its TTL lapsed: by {release}, or
+    ///         by a transfer, which ends every session the previous holder had
+    ///         open. `owner` is the holder whose session it was.
     event Released(
         uint256 indexed tokenId,
         address indexed owner,
@@ -919,9 +921,12 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///
     /// The whole answer, because the two ways an activation can be refused need
     /// different responses and an orchestrator must not have to guess which it
-    /// is looking at. `!ready && seatsInUse < seats` is a cooldown, and
-    /// `blocksRemaining` says how long. `!ready && seatsInUse == seats` is a
-    /// full fleet, and `secondsRemaining` says when the next seat lapses.
+    /// is looking at. `!ready && !fleetExhausted` is a cooldown, and
+    /// `blocksRemaining` says how long. `fleetExhausted` is a full fleet, and
+    /// `secondsRemaining` says when the next seat lapses. Branch on that field
+    /// rather than on `seatsInUse == seats`: on a single-seat licence the one
+    /// occupied seat is its holder's to retake, so the counts read "full" about
+    /// a seat that is not.
     function activationStatus(uint256 tokenId) external view returns (ActivationStatus memory) {
         Selection memory selected = _selectSeat(tokenId);
         return ActivationStatus({
@@ -1417,12 +1422,36 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
 
     // ── Required overrides (ERC721 + ERC721Enumerable) ────────────────────────
 
+    /// @dev A transfer hands the token's seats to its new holder with nothing on
+    ///      them. Every session the previous holder had open is ended here, so
+    ///      a resold fleet licence is its buyer's to use at once rather than
+    ///      after the seller's sessions lapse; and every seat's `activatedAt`
+    ///      stamp is left exactly where it was, so a transfer buys no churn
+    ///      beyond what `cooldownBlocks` allows. Not a revocation surface: the
+    ///      seller holds no token once this runs, and the licence following the
+    ///      token is what `ownerOf` being validity means. A mint (`from` is the
+    ///      zero address) frees nothing.
     function _update(address to, uint256 tokenId, address auth)
         internal
         override(ERC721, ERC721Enumerable)
-        returns (address)
+        returns (address from)
     {
-        return super._update(to, tokenId, auth);
+        from = super._update(to, tokenId, auth);
+        if (from != address(0)) _endSessionsOnTransfer(tokenId, from);
+    }
+
+    /// @dev Frees the occupancy of every live seat on `tokenId`, and nothing
+    ///      else: the same write {release} makes, for every seat at once.
+    function _endSessionsOnTransfer(uint256 tokenId, address previousHolder) private {
+        uint256 seats = seatsPerToken;
+        for (uint256 i = 0; i < seats; ++i) {
+            Seat storage seat = _seats[tokenId][i];
+            if (seat.expiresAt <= block.timestamp) continue;
+            uint256 sessionId = seat.sessionId;
+            seat.sessionId = 0;
+            seat.expiresAt = 0;
+            emit Released(tokenId, previousHolder, sessionId, i);
+        }
     }
 
     function _increaseBalance(address account, uint128 value)

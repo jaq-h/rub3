@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {Rub3Access} from "../src/Rub3Access.sol";
 import {Rub3License} from "../src/Rub3License.sol";
 
@@ -725,5 +725,154 @@ contract Rub3SeatsTest is Test {
         wide.activate(id);
         uint256 spent = before - gasleft();
         assertLt(spent, 400_000, "a full-width scan must stay well inside a block");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // 7. Transfer: the seats follow the token
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// A resold fleet licence is its buyer's to use at once. Without this, a
+    /// buyer whose seller left every seat live is refused `FleetExhausted` for
+    /// up to a whole `sessionTtlSeconds`, with no record on any machine of
+    /// theirs to release from, while the seller's instances keep running on a
+    /// licence they no longer hold.
+    function test_transfer_endsThePreviousHoldersSessions() public {
+        Rub3Access pair = _deploy(2, COOLDOWN_BLOCKS, SESSION_TTL);
+        uint256 id = _mintOn(pair, alice);
+        vm.prank(alice);
+        uint256 s1 = pair.activate(id);
+        vm.prank(alice);
+        uint256 s2 = pair.activate(id);
+        assertEq(pair.seatsInUse(id), 2, "both seats live before the sale");
+
+        vm.expectEmit(true, true, false, true, address(pair));
+        emit Rub3License.Released(id, alice, s1, 0);
+        vm.expectEmit(true, true, false, true, address(pair));
+        emit Rub3License.Released(id, alice, s2, 1);
+        vm.prank(alice);
+        pair.transferFrom(alice, bob, id);
+
+        (bool live1,) = pair.sessionSeat(id, s1);
+        (bool live2,) = pair.sessionSeat(id, s2);
+        assertFalse(live1, "the seller's first session ended with the sale");
+        assertFalse(live2, "and the second");
+        assertEq(pair.seatsInUse(id), 0, "the buyer receives every seat free");
+        assertFalse(
+            pair.activationStatus(id).fleetExhausted,
+            "a fleet the seller filled is not exhausted for the buyer"
+        );
+
+        // Past the seats' own cooldown, the buyer fills the fleet they bought.
+        vm.roll(block.number + COOLDOWN_BLOCKS);
+        vm.prank(bob);
+        uint256 s3 = pair.activate(id);
+        vm.prank(bob);
+        uint256 s4 = pair.activate(id);
+        (bool live3,) = pair.sessionSeat(id, s3);
+        (bool live4,) = pair.sessionSeat(id, s4);
+        assertTrue(live3 && live4, "both seats are the buyer's");
+        assertGt(s3, s2, "session ids are never reused across a sale");
+    }
+
+    /// **The stamps survive the sale.** A transfer frees occupancy exactly as
+    /// {Rub3License-release} does and, exactly as it does, leaves every seat's
+    /// `activatedAt` where it was: a token sold inside a seat's cooldown still
+    /// owes that seat's blocks to its new holder, and `activationStatus` calls
+    /// that a cooldown rather than a full fleet.
+    function test_churnDefence_transferDoesNotClearTheCooldownStamp() public {
+        uint256 id = _mint(alice);
+        uint256 stamped = block.number;
+        for (uint256 i = 0; i < SEATS; i++) {
+            _activate(id, alice);
+        }
+
+        uint256 elapsed = 5;
+        vm.roll(block.number + elapsed);
+        vm.prank(alice);
+        nft.transferFrom(alice, bob, id);
+
+        for (uint256 i = 0; i < SEATS; i++) {
+            Rub3License.Seat memory seat = nft.seatAt(id, i);
+            assertEq(seat.activatedAt, stamped, "the stamp is not the sale's to clear");
+            assertEq(seat.expiresAt, 0, "the occupancy is");
+        }
+
+        Rub3License.ActivationStatus memory status = nft.activationStatus(id);
+        assertFalse(status.ready);
+        assertFalse(status.fleetExhausted, "free seats inside their cooldown are not a full fleet");
+        assertEq(status.seatsInUse, 0);
+        assertEq(status.blocksRemaining, COOLDOWN_BLOCKS - elapsed);
+
+        vm.prank(bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.CooldownActive.selector, COOLDOWN_BLOCKS - elapsed)
+        );
+        nft.activate(id);
+    }
+
+    /// **A sale buys no churn.** The window that held K activations before the
+    /// transfer holds none after it until it closes, and then exactly K again:
+    /// the same budget `test_churnDefence_atMostKActivationsPerCooldownWindow`
+    /// measures for one holder, measured across two.
+    function test_churnDefence_transferDoesNotBuyAFasterChurn() public {
+        uint256 id = _mint(alice);
+        assertEq(_greedyActivationsNow(id, alice), SEATS, "the seller spends the window");
+
+        vm.roll(block.number + 1);
+        vm.prank(alice);
+        nft.transferFrom(alice, bob, id);
+
+        for (uint256 b = 1; b < COOLDOWN_BLOCKS; b++) {
+            assertEq(_greedyActivationsNow(id, bob), 0, "the buyer inherits the spent window");
+            vm.roll(block.number + 1);
+        }
+        assertEq(_greedyActivationsNow(id, bob), SEATS, "and K again when it closes, never more");
+    }
+
+    /// Only a transfer ends sessions. A mint frees nothing and emits nothing,
+    /// so the freeing above cannot be made unconditional on the `from` side by
+    /// a later edit without this going red.
+    function test_mint_endsNoSession() public {
+        vm.recordLogs();
+        uint256 id = _mint(alice);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != Rub3License.Released.selector, "a mint has no session to end"
+            );
+        }
+        assertEq(nft.seatsInUse(id), 0);
+        for (uint256 i = 0; i < SEATS; i++) {
+            Rub3License.Seat memory seat = nft.seatAt(id, i);
+            assertEq(seat.activatedAt, 0);
+            assertEq(seat.expiresAt, 0);
+            assertEq(seat.sessionId, 0);
+        }
+    }
+
+    /// A seat that has already lapsed has no session to end, so a transfer
+    /// reports nothing for it: `Released` names sessions that were live.
+    function test_transfer_reportsOnlyTheSessionsItEnded() public {
+        Rub3Access pair = _deploy(2, COOLDOWN_BLOCKS, SESSION_TTL);
+        uint256 id = _mintOn(pair, alice);
+        vm.prank(alice);
+        pair.activate(id);
+        vm.warp(block.timestamp + SESSION_TTL + 1);
+        vm.roll(block.number + COOLDOWN_BLOCKS);
+        vm.prank(alice);
+        uint256 s2 = pair.activate(id);
+
+        vm.recordLogs();
+        vm.prank(alice);
+        pair.transferFrom(alice, bob, id);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 released;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] != Rub3License.Released.selector) continue;
+            released++;
+            (uint256 sessionId,) = abi.decode(logs[i].data, (uint256, uint256));
+            assertEq(sessionId, s2, "only the live session is reported");
+        }
+        assertEq(released, 1, "one live session, one Released");
     }
 }

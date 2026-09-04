@@ -857,9 +857,10 @@ mod headless {
         Unverifiable,
         /// Signed, but by a key this run does not hold.
         AnotherKey { wallet: String },
-        /// Signed by this key, for a different deploy. Session ids start at 1
-        /// on every contract, so its ids name a stranger's session here.
-        AnotherDeploy { contract: String },
+        /// Signed by this key, for a different deploy - another contract, or
+        /// the same address on another chain. Session ids start at 1 on every
+        /// deploy, so its ids name a stranger's session here.
+        AnotherDeploy { chain_id: u64, contract: String },
         /// Signed by this key, for a different token than the one asked for.
         AnotherToken { token_id: u64 },
         /// The store holds records for this app and the scan chose none of
@@ -896,9 +897,10 @@ mod headless {
                 RecordRefusal::AnotherKey { wallet } => {
                     write!(f, "its session record belongs to another key ({wallet})")
                 }
-                RecordRefusal::AnotherDeploy { contract } => write!(
+                RecordRefusal::AnotherDeploy { chain_id, contract } => write!(
                     f,
-                    "its session record was written for another deploy ({contract})"
+                    "its session record was written for another deploy \
+                     ({contract} on chain {chain_id})"
                 ),
                 RecordRefusal::AnotherToken { token_id } => {
                     write!(f, "its session record was written for token {token_id}")
@@ -1808,8 +1810,10 @@ mod headless {
     /// - `wallet` is this signer's own address, which is what ties it to *this*
     ///   key - a signature alone proves only self-consistency, and a tamperer
     ///   can re-sign with any key they hold;
-    /// - `contract` is the one this build acts on, since session ids start at 1
-    ///   on every deploy and a §2.4 successor migration keeps the `app_id`;
+    /// - `chain_id` and `contract` name the deploy this build acts on, since
+    ///   session ids start at 1 on every deploy, a §2.4 successor migration
+    ///   keeps the `app_id`, and the factory's `CREATE` deploys can put the
+    ///   same address on two chains;
     /// - the record's own signed `token_id` is the one that was asked for, since
     ///   the filename it was read from is not signed and proves nothing.
     ///
@@ -1831,9 +1835,11 @@ mod headless {
                 Err(e) => return SeatRecord::Refused(RecordRefusal::Unreadable(e.to_string())),
             },
             None => {
-                match crate::session_store::load_latest_session_for_contract(
+                match crate::session_store::load_latest_session_for_deploy(
                     &ctx.app_id,
+                    ctx.chain_id,
                     &ctx.contract,
+                    &crate::identity::format_addr(wallet),
                 ) {
                     Ok(session) => session,
                     // The scan answers "nothing chosen" the same way whether
@@ -1860,8 +1866,10 @@ mod headless {
                 wallet: session.wallet,
             });
         }
-        if !session.contract.eq_ignore_ascii_case(&ctx.contract) {
+        if session.chain_id != ctx.chain_id || !session.contract.eq_ignore_ascii_case(&ctx.contract)
+        {
             return SeatRecord::Refused(RecordRefusal::AnotherDeploy {
+                chain_id: session.chain_id,
                 contract: session.contract,
             });
         }

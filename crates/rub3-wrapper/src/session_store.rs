@@ -95,8 +95,8 @@ pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
     latest_session_where(app_id, |s| !is_expired(s))
 }
 
-/// The most recently issued session **written against `contract`**, expired or
-/// not.
+/// The most recently issued session **signed by `wallet` against the deploy
+/// `(chain_id, contract)`**, expired or not.
 ///
 /// For the seat teardown path (§3.4), which is asking a different question
 /// from every other caller here: not "may this session launch" but "which seat
@@ -107,20 +107,29 @@ pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
 /// out here would leave the seat held for the rest of the contract's TTL with
 /// nothing left on disk naming it.
 ///
-/// **The contract narrows the scan rather than filtering its result**, for the
-/// same reason [`load_latest_session_for_wallet`]'s wallet does: a §2.4
-/// successor migration keeps the packed `app_id`, so this directory can hold a
-/// newer record written against another deploy, and rejecting the newest record
-/// after choosing it would report "nothing to release" while a seat this
-/// machine really holds stays taken for the rest of its TTL.
+/// **All three narrow the scan rather than filtering its result**, for the
+/// same reason [`load_latest_session_for_wallet`]'s wallet does: rejecting the
+/// newest record after choosing it would report "nothing to release" while a
+/// seat this machine really holds stays taken for the rest of its TTL. Each
+/// names a way the newest record can be somebody else's. A §2.4 successor
+/// migration keeps the packed `app_id`, so the directory can hold a newer
+/// record for another contract; the factory deploys with `CREATE`, so the same
+/// contract address can exist on another chain with its own session ids; and
+/// a second agent on the same machine writes records under its own key.
 ///
 /// The signature is still checked: a record this machine did not write is not
 /// evidence of a seat it took.
-pub fn load_latest_session_for_contract(
+pub fn load_latest_session_for_deploy(
     app_id: &str,
+    chain_id: u64,
     contract: &str,
+    wallet: &str,
 ) -> Result<Session, StoreError> {
-    latest_session_where(app_id, |s| s.contract.eq_ignore_ascii_case(contract))
+    latest_session_where(app_id, |s| {
+        s.chain_id == chain_id
+            && s.contract.eq_ignore_ascii_case(contract)
+            && s.wallet.eq_ignore_ascii_case(wallet)
+    })
 }
 
 /// The most recently issued valid session **signed by `wallet`**.
@@ -220,12 +229,23 @@ mod tests {
         signed_session_on(app_id, token_id, expires_at, TEST_CONTRACT)
     }
 
-    /// A record signed against a named deploy.
-    ///
-    /// `contract` is in the preimage, so a record for another deploy has to be
-    /// signed for it rather than rewritten afterwards - rewriting it is exactly
-    /// the tamper the signature now catches.
+    /// A record signed against a named contract on the test chain.
     fn signed_session_on(app_id: &str, token_id: u64, expires_at: &str, contract: &str) -> Session {
+        signed_session_for(app_id, token_id, expires_at, TEST_CHAIN_ID, contract)
+    }
+
+    /// A record signed against a named deploy, under a fresh key.
+    ///
+    /// `chain_id` and `contract` are in the preimage, so a record for another
+    /// deploy has to be signed for it rather than rewritten afterwards -
+    /// rewriting either is exactly the tamper the signature catches.
+    fn signed_session_for(
+        app_id: &str,
+        token_id: u64,
+        expires_at: &str,
+        chain_id: u64,
+        contract: &str,
+    ) -> Session {
         use k256::ecdsa::SigningKey;
         use rand::rngs::OsRng;
 
@@ -236,7 +256,7 @@ mod tests {
         let user_id = wallet.clone();
         let msg = session_message(
             app_id,
-            TEST_CHAIN_ID,
+            chain_id,
             contract,
             token_id,
             identity,
@@ -272,7 +292,7 @@ mod tests {
             expires_at: Some(expires_at.into()),
             signature: format!("0x{}", hex::encode(&sig_bytes)),
             chain: "base".into(),
-            chain_id: TEST_CHAIN_ID,
+            chain_id,
             contract: contract.into(),
             activation_tx: None,
             activation_block: None,
@@ -362,7 +382,7 @@ mod tests {
             load_latest_session("com.rub3.test"),
             Err(StoreError::NotFound)
         ));
-        let found = load_latest_session_for_contract("com.rub3.test", TEST_CONTRACT)
+        let found = own_latest("com.rub3.test", &expired.wallet)
             .expect("the seat this machine took is still nameable");
         assert_eq!(found.token_id, 7);
 
@@ -382,7 +402,7 @@ mod tests {
         save_session(&tampered).unwrap();
 
         assert!(matches!(
-            load_latest_session_for_contract("com.rub3.test", TEST_CONTRACT),
+            own_latest("com.rub3.test", &tampered.wallet),
             Err(StoreError::NotFound)
         ));
 
@@ -412,7 +432,7 @@ mod tests {
         save_session(&ours).unwrap();
         save_session(&foreign).unwrap();
 
-        let found = load_latest_session_for_contract("com.rub3.test", TEST_CONTRACT)
+        let found = own_latest("com.rub3.test", &ours.wallet)
             .expect("this contract's own record is still nameable");
         assert_eq!(
             found.token_id, 9,
@@ -420,5 +440,82 @@ mod tests {
         );
 
         std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
+    /// **The same contract on another chain is another deploy.** The factory
+    /// deploys with `CREATE`, so one deploy sequence lands the licence at the
+    /// same address on Base Sepolia and on Base, and session ids start at 1 on
+    /// each. A record signed for the other chain names a stranger's session
+    /// here, so the scan must never choose it - and, since `chain_id` is
+    /// signed, it cannot be repointed at this chain either.
+    #[test]
+    fn the_teardown_scan_refuses_a_record_signed_for_another_chain() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        let elsewhere = signed_session_for(
+            "com.rub3.test",
+            4,
+            "2000-01-01T00:00:00Z",
+            TEST_CHAIN_ID + 1,
+            TEST_CONTRACT,
+        );
+        save_session(&elsewhere).unwrap();
+        assert!(matches!(
+            own_latest("com.rub3.test", &elsewhere.wallet),
+            Err(StoreError::NotFound)
+        ));
+
+        let mut repointed = elsewhere.clone();
+        repointed.chain_id = TEST_CHAIN_ID;
+        save_session(&repointed).unwrap();
+        assert!(
+            matches!(
+                own_latest("com.rub3.test", &repointed.wallet),
+                Err(StoreError::NotFound)
+            ),
+            "a chain id rewritten after signing no longer verifies",
+        );
+
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
+    /// **A newer record under another key must not hide this key's seat.** One
+    /// machine can run two agents with two keys against one contract, and the
+    /// launch path already lets each reuse its own cache. Choosing the newest
+    /// record and then refusing it as another key's would leave the older
+    /// agent unable to release the seat its own record names.
+    #[test]
+    fn the_teardown_scan_chooses_the_newest_record_for_this_wallet() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        let mut ours = signed_session("com.rub3.test", 1, "2000-01-01T00:00:00Z");
+        ours.issued_at = "2020-01-01T00:00:00Z".into();
+        let mut theirs = signed_session("com.rub3.test", 2, "2000-01-01T00:00:00Z");
+        theirs.issued_at = "2030-01-01T00:00:00Z".into();
+        assert_ne!(ours.wallet, theirs.wallet, "two agents, two keys");
+        save_session(&ours).unwrap();
+        save_session(&theirs).unwrap();
+
+        let found = own_latest("com.rub3.test", &ours.wallet)
+            .expect("this key's own record is still nameable");
+        assert_eq!(
+            found.token_id, 1,
+            "the newer record belongs to the other agent"
+        );
+        let found =
+            own_latest("com.rub3.test", &theirs.wallet).expect("and the other agent's is its own");
+        assert_eq!(found.token_id, 2);
+
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
+    /// The teardown scan as the release path calls it: this key's newest
+    /// record on the test deploy.
+    fn own_latest(app_id: &str, wallet: &str) -> Result<Session, StoreError> {
+        load_latest_session_for_deploy(app_id, TEST_CHAIN_ID, TEST_CONTRACT, wallet)
     }
 }
