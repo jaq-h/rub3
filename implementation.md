@@ -589,7 +589,7 @@ Threaded through `script/Deploy.s.sol`, all four Foundry fixtures, and both wrap
 
 **Docs** - `architecture.md` North Star mutability table corrected (`supplyCap` is immutable, so supply cannot change at all; added the other immutables) and its Ownership-invariants section rewritten with the successor pattern and a **bytecode vs convention** breakdown naming what an agent can verify before buying and what remains a promise (registry and factory properties, both unbuilt; a revoked binary already running; the developer continuing to publish). `contracts/contracts.md` gains hash-set management, the migration runbook, and the copy-pasteable pre-purchase audit. Both docs also state the duplicate-seat consequence of snapshot-claim plainly, and the audit snippet's conclusion claims only what a selector-name scan can prove: full assurance needs a name-independent comparison of the deployed runtime bytecode against the canonical template. **Built in §2.6** - the wrapper performs exactly that comparison before it buys, and the snippet is now labelled a diagnostic in every doc that carries it. `README.md` moves §2.4 out of "not yet implemented" and matches the corrected mutability table. `AGENTS.md` now points at `.github/workflows/ci.yml` instead of claiming the repo has no CI.
 
-### 2.5 - rub3 CLI `[partial]`
+### 2.5 - rub3 CLI `[complete]`
 
 Pulled forward from the old Phase 2 - a CLI is the natural agent interface, and every step is already scriptable. New workspace member `crates/rub3-cli/`, package `rub3-cli` and binary `rub3`, off the wrapper's dependency path exactly as §3.3's docs server is.
 
@@ -606,10 +606,7 @@ rub3 deploy --name "My App License" --symbol MAL \
 
 - `pack` `[complete]`: single distributable binary (wrapper + embedded app + config); `--headless` selects the no-webview build; cross-platform targets via `--target`.
 - `deploy` `[complete]`: factory-mediated; `--identity` sets `identityModel`; `--price-usdc` configures the EIP-3009 path. `--type` and `--period` went with §2.10: there is one licence contract, so a flag naming which one is a choice with one option.
-- `fetch` `[not started]`: the agent-side half of distribution (§3.1).
-- `register` `[not started]`: registry entry (§3.2).
-
-**`fetch` and `register` are deliberately absent rather than stubbed.** Both are the agent-side halves of sections that do not exist: there is no content-addressed distribution to fetch from (§3.1) and no registry to register with (§3.2), so neither subcommand has anything to talk to. A subcommand that cannot work is worse than an absent one - it is a promise in `--help` that fails at the moment somebody depends on it - so `rub3 fetch` and `rub3 register` are not present in any form, and a test asserts they are not. They land with the sections that give them something to do.
+**Two subcommands, and this section is both of them.** `rub3 fetch` and `rub3 register` were once listed here as a third and fourth; they are specified under the sections that give them something to talk to instead - `fetch` under §3.1, content-addressed distribution, and `register` under §3.2, the discovery registry. Each is the agent-side half of its section's on-chain surface, so its status is that section's status rather than this one's, and neither is a gap in the Phase 2 CLI. A subcommand that cannot work is worse than an absent one - it is a promise in `--help` that fails at the moment somebody depends on it - so neither is present in any form today, and a test asserts they are not.
 
 **`pack` compiles `contracts/deployments.json` into the wrapper.** `--chain base` resolves to a chain id, and the canonical `Rub3Factory` for that chain is read out of that file and baked into the packed binary's constants alongside `CONTRACT` and `CHAIN_ID`, so a wrapper can tell a canonical deploy from any other without a network round trip or a hardcoded address in Rust. A `null` entry - which is every entry until launch - is a hard error from `pack`, never a fallback to the zero address: a distributable that claims a canonical factory it cannot name is worse than one that refuses to build. Same rule for `deploy`, which resolves `FACTORY` the same way.
 
@@ -652,7 +649,7 @@ rub3 deploy --name "My App License" --symbol MAL \
 - Verified end to end by hand on a local anvil: `rub3 deploy --direct` deployed a `Rub3Access` through the real forge script, a token was purchased on it, `rub3 pack --tier verified` produced a 7.4 MB distributable, and running that single file verified ownership on-chain, extracted the application and ran it with its arguments. The same run confirmed the extraction ordering: with activation failing, nothing was written to the cache directory at all
 
 **Deliberately not built here**
-- **No `rub3 fetch` and no `rub3 register`**, for the reason above
+- **No `rub3 fetch` and no `rub3 register`**, for the reason above: they belong to §3.1 and §3.2 and are specified there
 - **No pack-time signing or notarization.** Producing a distributable is one thing; making the operating system accept it from a stranger is a distribution concern that belongs with §3.1, not a flag on `pack`
 - **No `--encrypt-binary`.** `binary-encryption` composes with tier-3 and up, but `src/decrypt.rs` is a deferred scaffold, so a flag for it would be a flag that does not work
 - **No factory deploy.** `rub3 deploy` deploys licence contracts. `contracts/script/DeployFactory.s.sol` deploys factories, it is run once per chain per generation by whoever operates rub3, and its most consequential argument is the immutable treasury - see `contracts/contracts.md` -> "Treasury custody, and the pre-mainnet proof"
@@ -919,7 +916,7 @@ Goal: close the loop - discover → pay → fetch → verify → run - so the co
 ### 3.1 - Content-addressed distribution `[not started]`
 
 - Contract gains `contentURI` (IPFS/Arweave) next to the wrapper hash set - the on-chain record now says *where* the binary lives and *what* it must hash to.
-- `rub3 fetch <contract>` downloads from `contentURI`, verifies against the hash set (rejecting `Revoked`), and reports which release it got.
+- `rub3 fetch <contract>` `[not started]` downloads from `contentURI`, verifies against the hash set (rejecting `Revoked`), and reports which release it got. It is the agent-side half of this section and carries its status; the CLI it lands in is §2.5's.
 - `rub3 pack --publish` pins the artifact and writes `contentURI` + hash in one step.
 - Hosted pinning is an optional paid convenience (off the enforcement path); any pinning service works.
 
@@ -928,6 +925,7 @@ Goal: close the loop - discover → pay → fetch → verify → run - so the co
 `Rub3Registry` is built and tested; nothing is deployed, and the ENS half is unbuilt. Contracts only.
 
 - Deploy `Rub3Registry` on Base: `register(appName, contract)` requires `factory.isDeployed(contract)` **and** contract ownership - only canonical deploys are listable. **Built**, as `register(address,string,string)`, with the factory reference read live and the ownership check read live.
+- `rub3 register` `[not started]`: the agent-side half of that call, listing a deployed licence contract from the §2.5 CLI. The contract is built and nothing is deployed, so there is no registry instance to register with; the subcommand lands when one exists.
 - **Discovery, never validity:** delisting removes the badge and the listing; it cannot invalidate a token or a session. This invariant is documented and tested. **Built**, and proved from the bytecode rather than documented as a commitment - see below.
 - Each entry doubles as an ERC-8004-style agent card: contract address, price(s), payment methods, `contentURI`, hash set, identity model - machine-readable, so agent spend policies can allowlist "verified rub3 contracts" and audit the §2.4 invariants before buying. **Built**, as `card(address)`, `cards(start,count)` and the bounded `cardWindow(start,count)`.
 - The recognised-token list and the live ranking. **Built.**

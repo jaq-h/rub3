@@ -695,7 +695,7 @@ fn a_developer_ens_that_was_asked_for_still_arrives() {
 
 #[test]
 fn there_is_no_fetch_and_no_register_subcommand() {
-    // implementation.md §2.5 lists four subcommands. `fetch` (§3.1) and
+    // implementation.md §2.5 is `pack` and `deploy`. `fetch` (§3.1) and
     // `register` (§3.2) have nothing to talk to yet, and a subcommand that
     // cannot work is worse than an absent one.
     let repo = checkout(COMMITTED_MANIFEST);

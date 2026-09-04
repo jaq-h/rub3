@@ -739,7 +739,7 @@ The crate a wrapped app links: `rub3::heartbeat()` and `rub3::session()`, talkin
 
 ### 4. rub3 CLI *(`pack` and `deploy` built - implementation.md §2.5)*
 
-`pack` and `deploy`. `fetch` and `register` are deliberately unbuilt: they are the agent-side halves of content-addressed distribution (§3.1) and the discovery registry (§3.2), and neither exists yet. The split that matters architecturally: `--tier` is a *pack*-time choice, baked into the wrapper binary, while `--identity` and `--cooldown-blocks` are *deploy*-time choices written into the contract. The two cannot be reconciled afterwards, which is why a repacked wrapper must still match a deployed contract's tier expectations. The command surface is in implementation.md §2.5.
+`pack` and `deploy` are the CLI. `rub3 fetch` and `rub3 register` are the agent-side halves of content-addressed distribution and of the discovery registry, so they are specified with those surfaces in implementation.md §3.1 and §3.2 rather than here, and neither is built. The split that matters architecturally: `--tier` is a *pack*-time choice, baked into the wrapper binary, while `--identity` and `--cooldown-blocks` are *deploy*-time choices written into the contract. The two cannot be reconciled afterwards, which is why a repacked wrapper must still match a deployed contract's tier expectations. The command surface is in implementation.md §2.5.
 
 ---
 
