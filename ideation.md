@@ -48,7 +48,7 @@ Humans complete the same loop through the wrapper's native activation window. Th
 
 - **rub3-wrapper** - Rust runtime that manages wallet sessions and gates the embedded application; headless and interactive modes
 - **rub3-sdk** - Rust crate apps link against for heartbeat and session access
-- **rub3-cli** - `pack`, `deploy`, `fetch`, `register` - the agent-facing interface to everything
+- **rub3-cli** - `pack` and `deploy` today, with `fetch` and `register` planned alongside distribution and the registry - the agent-facing interface to everything
 - **License contracts** - the one-time purchase licence, with metered planned; audited templates stamped by the factory
 - **tauri-plugin-rub3** - first-class Tauri integration (human-surface phase)
 

@@ -316,6 +316,12 @@ fn seed_licence(contract: &str, owner: &str) -> u64 {
 
 /// Broadcasts raw calldata to `contract` from `wallet`, the way the screen asks
 /// the user to. Returns the transaction hash, or the node's refusal.
+///
+/// The refusal is both output streams, because where `cast` writes it moved
+/// between releases: up to 1.5 a failed `cast send --json` printed the error
+/// on stderr, and from 1.8 it prints a JSON envelope on stdout and nothing on
+/// stderr. CI installs the current stable, so reading one stream alone hands
+/// [`names_the_cooldown`] an empty string on one side of that line.
 fn wallet_sends(wallet: &Wallet, contract: &str, calldata: &str) -> Result<String, String> {
     let key = format!("0x{}", hex::encode(wallet.key.to_bytes()));
     let output = Command::new("cast")
@@ -333,7 +339,12 @@ fn wallet_sends(wallet: &Wallet, contract: &str, calldata: &str) -> Result<Strin
         .expect("failed to run cast send");
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        let refusal = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Err(refusal);
     }
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("cast send returned non-json");

@@ -1,10 +1,11 @@
 //! `rub3`, the developer- and agent-facing CLI of implementation.md §2.5.
 //!
-//! Two subcommands, and the plan lists two more that are deliberately absent:
-//! `fetch` (§3.1) and `register` (§3.2) are the agent-side halves of content
-//! addressed distribution and of the discovery registry, and neither of those
-//! exists yet. A subcommand that cannot work is worse than an absent one, so
-//! they are not here in any form.
+//! Two subcommands, and they are the whole of §2.5. `fetch` and `register`
+//! are the agent-side halves of content-addressed distribution and of the
+//! discovery registry, so they are specified under §3.1 and §3.2 rather than
+//! here, and neither of those surfaces exists to talk to yet. A subcommand
+//! that cannot work is worse than an absent one, so they are not here in any
+//! form.
 //!
 //! | Module | What |
 //! |---|---|
