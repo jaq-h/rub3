@@ -121,7 +121,7 @@ Edit `.env`:
 | `DEPLOYER_KEY` | Private key of the deploying wallet (hex, no `0x` prefix) |
 | `BASESCAN_API_KEY` | [Basescan](https://basescan.org/register) → API keys |
 
-Fund the deployer wallet with Base Sepolia ETH from the [Base Sepolia faucet](https://docs.base.org/tools/network-faucets).
+Fund the deployer wallet with Base Sepolia ETH from the [Base network faucets](https://docs.base.org/get-started/get-funds).
 
 ### 2. Dry run (no broadcast)
 
@@ -209,11 +209,20 @@ Nothing on-chain can check this for you. The constructor probe reads `authorizat
 
 **Resolve the implementation first.** USDC is deployed behind a `FiatTokenProxy`, and `cast interface` reads the ABI the explorer has for the address you give it. Asked about the proxy address - the one you configure as `PRICE_TOKEN` - it returns the proxy's own ABI (`implementation()`, `admin()`, `upgradeTo`, a fallback) and no `receiveWithAuthorization` at all. An empty grep against a proxy address therefore says nothing about the token; it is the same trap that makes a bytecode selector scan useless here.
 
+**`cast implementation` does not resolve a `FiatTokenProxy`.** It reads the EIP-1967 implementation slot (or, with `--beacon`, the beacon slot), and Circle's proxy predates EIP-1967: it keeps the address in the pre-standard `keccak256("org.zeppelinos.proxy.implementation")` slot. So `cast implementation` answers the **zero address** for USDC on Base and on Base Sepolia alike, and reading that as "not a proxy, use the token itself" walks straight into the trap the paragraph above describes. Ask the proxy instead, and confirm the answer against the slot it actually lives in:
+
 ```bash
-# 1. If the token is a proxy, this prints the implementation address.
-#    A non-proxy answers with the zero address or an error - then just use
-#    <PRICE_TOKEN> itself in step 2.
-cast implementation <PRICE_TOKEN> --rpc-url $RPC
+# 1a. The proxy's own getter. Circle's proxy answers this from any caller
+#     on Base and on Base Sepolia.
+cast call <PRICE_TOKEN> "implementation()(address)" --rpc-url $RPC
+
+# 1b. The same value, read straight out of the pre-EIP-1967 slot it is stored
+#     in, as a cross-check that 1a was not served by a fallback.
+cast storage <PRICE_TOKEN> \
+  0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3 --rpc-url $RPC
+
+#     A token that is genuinely not a proxy answers 1a with an error and 1b with
+#     zero - then use <PRICE_TOKEN> itself in step 2.
 
 # 2. Ask the implementation what it exposes. The `bytes` overload must be
 #    listed alongside (or instead of) the (v, r, s) one.
@@ -221,6 +230,17 @@ cast interface <IMPLEMENTATION_OR_TOKEN> --chain <CHAIN> | grep receiveWithAutho
 ```
 
 Read the output rather than the exit status: what you need is a line ending in `bytes signature)` (or `bytes)`). A listing that shows only the `(uint8, bytes32, bytes32)` form means the token cannot be used as `PRICE_TOKEN`. An *empty* result means the check did not answer - an unverified contract, the wrong chain, or a proxy address you have not resolved - and is not itself grounds to conclude anything about the token.
+
+**Step 2 needs a `BASESCAN_API_KEY`, and fails with `Error: Invalid API Key` without one.** When there is no key, or the implementation is unverified, scan the *implementation's* runtime code for the selector instead. That is a different check from the useless one above: the trap is scanning a **proxy**, whose code carries no selector at all because it delegates everything. An implementation contract is an ordinary solc dispatcher, and its selector is in its code or the function is not there.
+
+```bash
+cast sig "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)"
+# 0x88b7ab63 - the bytes overload the licence contracts require
+cast sig "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)"
+# 0xef55bec6 - the (v, r, s) form, which is not sufficient on its own
+
+cast code <IMPLEMENTATION> --rpc-url $RPC | grep -c 88b7ab63   # must be 1
+```
 
 A misconfiguration is not silent at runtime either, and it costs nobody a licence: the wrapper pre-flights the `purchaseWithAuthorization` call as an `eth_call` before broadcasting anything, differing from the broadcast one only in the authorization's validity window, and a token that reverts there selects the ETH rail with a printed reason naming the likely cause. No gas is spent and no activation is lost.
 
@@ -726,6 +746,19 @@ The manifest keys contracts by name, so a name declared in two different files u
 - **A record says the code is a genuine rub3 release. It says nothing about a deployment.** Which address runs that code, who deployed it, what the immutables behind the mask were set to, and how the owner will behave are all outside it. "Was this deployed through the canonical factory" is `Rub3Factory.isDeployed` on a specific factory address, and the two questions must not be run together.
 - **`Deprecated` means "not recommended for new purchases". It never means "stop honouring".** The record stays whole, offsets included, and a held token is untouched - the registry has no status that could invalidate one, and nothing on any launch path reads it. An agent meeting a deprecated hash warns and buys.
 - **Nothing can be removed, overwritten, or moved backwards.** `publish` reverts on a hash that already has a record, deprecated ones included. There is no proxy, no removal, and no un-deprecate. A compromise of the owner key can therefore only *add*, and every addition is a permanent public `Published` event. `test/Rub3CodeRegistry.t.sol` asserts the removal and rewrite surfaces are absent from the deployed runtime bytecode, the way the licence contracts' forbidden selectors are - with its own 10-name list, because the shared 25-name list is about tokens and says nothing about a registry.
+
+### Deploying one
+
+There is no `script/` entry for the registry: its constructor takes one argument, the owner, so `forge create` is the whole of it. This is the line `crates/rub3-wrapper/tests/code_registry_e2e.rs` drives on anvil, which is the only deploy of this contract the repository performs today.
+
+```bash
+# from contracts/
+forge create src/Rub3CodeRegistry.sol:Rub3CodeRegistry \
+  --broadcast --constructor-args <OWNER> \
+  --rpc-url $RPC --private-key $DEPLOYER_KEY
+```
+
+**The owner key is the whole of the registry's authority, and who holds it is a deployment decision this repository deliberately does not make.** It can only ever *add*, and every addition is a permanent public `Published` event, so a compromise cannot rewrite history. `Rub3CodeRegistry` is `Ownable2Step`, so ownership can be handed to a new key while the current one still holds it; `renounceOwnership` always reverts `OwnershipCannotBeRenounced`, because handing the authority to nobody would freeze it. The failure to guard against is therefore **loss**, not handover: a key nobody holds can no longer be rotated, and the version authority for that chain is frozen with it, leaving every fielded binary refusing on a pinned-table miss with nothing left to ask. On a canonical deploy that argues for a custodied key rather than a laptop one. On a scratch registry it argues for nothing: throw the key away with the deploy. See [testing.md](../testing.md#7-the-on-chain-test-plan) for which of those a given deploy is.
 
 ### Publishing a release
 

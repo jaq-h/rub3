@@ -1,6 +1,6 @@
 # Testing Guide
 
-This file owns the test inventory: what each suite covers, how to run it, and how to set up manual testing. Per-test descriptions and suite counts belong here rather than in [implementation.md](implementation.md), which records status and cites the headline numbers. Contract-side operational recipes are in [contracts/contracts.md](contracts/contracts.md), the tier feature bundles the suites compile under are described in [README.md](README.md) and [AGENTS.md](AGENTS.md), and design rationale is in [architecture.md](architecture.md).
+This file owns the test inventory: what each suite covers, how to run it, and how to set up manual testing. It also owns the on-chain test plan (section 7): the three tiers a run can belong to, what each one may touch, and the rule that keeps a scratch deployment out of the canonical record. Per-test descriptions and suite counts belong here rather than in [implementation.md](implementation.md), which records status and cites the headline numbers. Contract-side operational recipes are in [contracts/contracts.md](contracts/contracts.md), the tier feature bundles the suites compile under are described in [README.md](README.md) and [AGENTS.md](AGENTS.md), and design rationale is in [architecture.md](architecture.md).
 
 ## Prerequisites
 
@@ -677,3 +677,399 @@ with `cooldownSecsRemaining: 3600`:
   detect watch is
 - a `ready: true` payload starting no clock at all: the wait box stays hidden and
   the value under it does not move
+
+## 7. The on-chain test plan
+
+Three tiers, separated by one question: **is what this run deploys written into
+[`contracts/deployments.json`](contracts/deployments.json)?** Tier 1 deploys to a
+throwaway local chain, tier 2 deploys to a public testnet and records nothing,
+and tier 3 is the single recorded canonical set that the quickstart, the packed
+wrappers and `attest::REGISTRIES` all point at. Everything about custody,
+permanence and blast radius follows from that one distinction, so it is the
+first thing to settle about any run.
+
+| Tier | Chain | Recorded in `deployments.json` | What it is for |
+|---|---|---|---|
+| 1 | local anvil (ports 8547, 8549, 8551, 8553) and the in-process EVM | never | every automated suite; the per-PR gate |
+| 2 | Base Sepolia, own factory and own registry | **never** | rehearsing the deploy scripts, the treasury proof, and the real USDC rail |
+| 3 | Base Sepolia, one canonical set | **yes, once** | what the quickstart and packed wrappers target |
+
+**The rule, and it is not a preference.** A tier-2 deployment is scratch: its
+addresses live in a shell history and a scratch note, never in
+`deployments.json`, never in `attest::REGISTRIES`, and never in a binary handed
+to anyone else. A tier-3 deployment is canonical: it is written down once, it is
+never used for an experiment, and what it puts on chain is permanent. There is
+no third state and nothing gets promoted from one to the other: a scratch
+factory that turned out to work is still a scratch factory, and the canonical
+one is a fresh deploy.
+
+### Tier 1: local Anvil
+
+Everything the automated suites already cover. Nothing here needs a key, a
+faucet, an endpoint or a decision, which is why all of it runs on every pull
+request.
+
+```bash
+scripts/check-deployments.sh                   # the manifest schema gate
+(cd contracts && forge test)                   # 255 tests, in-process EVM
+(cd contracts && forge fmt --check)
+
+cargo test -p rub3-wrapper --no-default-features --features tier-3 \
+    -- --ignored session_verify_onchain_e2e    # 1  test,  port 8547
+cargo test -p rub3-wrapper --no-default-features --features tier-3,headless \
+    -- --ignored headless                      # 30 tests, port 8549
+cargo test -p rub3-wrapper --no-default-features --features tier-3,webview \
+    --lib -- --ignored webview::session_flow   # 5  tests, port 8551
+cargo test -p rub3-wrapper --no-default-features --features tier-2 \
+    --test code_registry_e2e -- --ignored code_registry  # 1 test, port 8553
+
+cargo test -p rub3-cli
+cargo test -p rub3-cli --test pack_build_gate -- --ignored   # 6 real cargo checks
+```
+
+Section 2 above is the per-suite inventory. All four anvil suites self-skip when
+Foundry is absent, so **a pass in 0.00s is a skip**; CI holds each one to the
+count in its `EXPECTED_TESTS` through `scripts/assert-e2e-ran.sh` for exactly
+that reason.
+
+**What tier 1 proves.** Contract logic and the ownership invariants against a
+real EVM; both payment rails, including the EIP-712 domain, the derived nonce,
+`msg.sender == to`, replay and front-running; the protocol fee split and both
+sweeps; the pre-purchase code gate, including a modified licence that passes the
+selector scan; the registry consult over a real ABI, with the pinned
+fingerprints checked against contracts actually compiled and deployed; the
+headless exit-code table; and session persistence and re-verification.
+
+**What tier 1 cannot prove**, which is the whole reason tiers 2 and 3 exist:
+
+- **Real USDC.** The stablecoin rail runs against
+  `contracts/test/mocks/MockEIP3009Token.sol`, whose own header says what it
+  deliberately does not model: USDC's blocklist, its pausing, and its upgrade
+  proxy. It reproduces the authorization protocol faithfully and it is not
+  Circle's code.
+- **Real RPC behaviour.** Anvil answers instantly, without rate limits, without
+  a log-range cap and without reorgs. The watch loop's retry budget and
+  `rpc::WATCH_REQUEST_TIMEOUT` are exercised against scripted stubs
+  (`rpc::watch_loop_tests`, `rpc::watch_rpc_tests`) and against anvil, never
+  against an endpoint that throttles or lags.
+- **Real signing custody.** Every anvil suite uses anvil's own published
+  deployer key or a key the test generated in-process. No keystore under a real
+  password file, no hardware signer, and no Safe.
+- **The deploy scripts.** No automated suite executes
+  `contracts/script/Deploy.s.sol` or `contracts/script/DeployFactory.s.sol`
+  against any chain. The anvil suites deploy with `forge create`, and
+  `tests/cli.rs` asserts the *printed plan* names the script, replacing `forge`
+  on `PATH` with a stand-in where it has to prove nothing ran. As section 2
+  already notes, `pack` and `deploy` have no anvil-gated suite at all.
+- **Anything about a canonical deployment.** `isDeployed` is per factory and per
+  chain, and there is no canonical factory anywhere yet.
+
+### Tier 2: unrecorded Base Sepolia scratch deployments
+
+A developer's or a maintainer's own `Rub3Factory`, own `Rub3CodeRegistry` and
+own licence contracts on Base Sepolia, deployed directly and **never written into
+`contracts/deployments.json`**. This tier rehearses everything tier 1 cannot
+reach, and it is not blocked by the treasury decision or by the launch
+sequencing, because it records nothing and therefore decides nothing.
+
+**Why the contracts permit this by design**, each point checkable rather than
+asserted:
+
+- **A scratch treasury is accepted.** `Rub3Factory`'s constructor rejects only
+  `address(0)` and performs no code check, so an EOA is a valid `TREASURY`. See
+  [contracts.md](contracts/contracts.md#treasury-custody-and-the-pre-mainnet-proof),
+  which states that same fact as the reason the mainnet address needs its own
+  check.
+- **`isDeployed` only means something at a published canonical address.** It is
+  per factory, so a row on a scratch factory is a row nobody agreed on.
+  [contracts.md](contracts/contracts.md#the-accepted-position-on-fee-free-deployment)
+  is explicit that a verifier must check `isDeployed` on a specific, known
+  factory address and must conclude nothing from a matching fingerprint.
+- **A scratch factory cannot become a predecessor of anything canonical by
+  accident.** `isCanonicalPredecessor` walks only the immutable `previousFactory`
+  chain, which is set once in the constructor. The one way a scratch factory
+  enters that chain is a later factory deployed with `PREVIOUS_FACTORY` naming
+  it, which is a tier-3 act performed on purpose.
+- **Nothing in the repository reads an unrecorded Sepolia address as canonical.**
+  `rub3 pack` and `rub3 deploy` take the factory from the manifest and refuse
+  when it is `null`; `--factory` is the only other route and says so on screen
+  (`pack` prints `named with --factory: not a canonical deploy`, `deploy` prints
+  `named with --factory: not the canonical factory`). `attest::REGISTRIES` is `None`
+  for chain 84532. And the wrapper never reads `isDeployed` at all:
+  `packed::FACTORY` is rendered by `--version` and consumed nowhere else.
+
+**What tier 2 therefore proves, and what it does not.** It proves that the
+scripts, the recipes and the real rails work against a public chain with real
+latency, real gas and real USDC. It proves nothing about canonicity: a licence
+deployed here has genuine rub3 *code* and no canonical *deployment*, and those
+two are different questions that
+[contracts.md](contracts/contracts.md#the-accepted-position-on-fee-free-deployment)
+keeps apart on purpose. It also cannot exercise the wrapper's code-registry
+consult; see [The code registry has no override](#the-code-registry-has-no-override)
+below.
+
+Every command below is either one run against Base Sepolia while writing this
+plan (the reads in [Real USDC on Base Sepolia](#real-usdc-on-base-sepolia)) or
+one lifted from the recipe that owns it in
+[contracts/contracts.md](contracts/contracts.md). Nothing here has been
+broadcast from this repository.
+
+#### Prerequisites
+
+- Foundry (`forge`, `cast`, `anvil`) on `PATH`.
+- A Base Sepolia endpoint. `https://sepolia.base.org` answers reads;
+  [contracts.md](contracts/contracts.md#1-copy-and-fill-env) lists the provider
+  options for anything heavier. `cast chain-id --rpc-url https://sepolia.base.org`
+  answers `84532`.
+- A **throwaway** deployer key, generated for this and nothing else
+  (`cast wallet new`), funded from the
+  [Base network faucets](https://docs.base.org/get-started/get-funds).
+- Test USDC from the [Circle faucet](https://faucet.circle.com), selecting Base
+  Sepolia.
+- A `BASESCAN_API_KEY` only if you want `--verify` on the deploys or
+  `cast interface` for the token check. Neither is required.
+
+#### The procedures
+
+1. **A generation-1 factory.** `forge script script/DeployFactory.s.sol` with
+   `FEE_BPS` and a `TREASURY` that is a throwaway EOA, and no `PREVIOUS_FACTORY`.
+   The variables are in
+   [contracts.md](contracts/contracts.md#environment-variable-reference); the
+   broadcast form of the command is in
+   [contracts.md](contracts/contracts.md#3-broadcast-and-verify).
+2. **A licence through it**, with the `FACTORY` grep guard from
+   [contracts.md](contracts/contracts.md#deploying-through-the-factory) kept
+   exactly as written: forge reads a `FACTORY` it cannot parse as an unset one,
+   so the guard is what stops a typo from becoming a silent direct deploy.
+   `rub3 deploy --factory <SCRATCH_FACTORY> --chain base_sepolia` drives the same
+   script and prints the plan first; `--dry-run` runs nothing at all.
+   Then confirm what was stamped with the three `cast call` reads in that same
+   section: `feeBps()`, `treasury()`, `isDeployed(address)`.
+3. **A generation-2 factory superseding it.** The same script with
+   `PREVIOUS_FACTORY=<the generation-1 factory>`, then
+   `cast call <GEN2> "isCanonicalPredecessor(address)(bool)" <LICENCE_FROM_GEN1>`,
+   which must answer `true`. This is the only way to observe the
+   `previousFactory` walk against a chain, and the pointer is immutable, so a
+   factory deployed without it is the failure being rehearsed against.
+4. **A scratch code registry.** `forge create` it with a throwaway owner as
+   described in [contracts.md](contracts/contracts.md#deploying-one), then
+   `publish` a real fingerprint out of `contracts/canonical-bytecode.json` and
+   `deprecate` it, both from
+   [contracts.md](contracts/contracts.md#publishing-a-release), and read the
+   result back with `latestOffsetTables` and `record` from
+   [contracts.md](contracts/contracts.md#reading-it-and-the-offsets-bootstrap).
+   Throw the owner key away afterwards: on a scratch registry it protects
+   nothing, and on a canonical one it is the one thing that must not be lost.
+5. **The pre-mainnet treasury proof.** This one has a fixed shape and
+   [contracts.md](contracts/contracts.md#treasury-custody-and-the-pre-mainnet-proof)
+   owns it: a factory whose `TREASURY` is **a Safe**, a licence through it, one
+   purchase on each rail, then `withdrawFees()` and `withdrawTokenFees(<USDC>)`
+   with the Safe's balances read before and after. **An EOA does not substitute
+   here.** The proposition under test is that a *contract* recipient receives on
+   both rails, and an EOA receives unconditionally, so an EOA rehearsal would
+   pass while proving nothing. Use a throwaway Safe: the section is explicit
+   that a Sepolia Safe is a separate deployment and that an identical CREATE2
+   address on mainnet can still be nothing but a counterfactual, so the Sepolia
+   Safe's own identity is never what is being established. Note also that both
+   sweeps revert `NoFeeConfigured` on a contract with no fee, so this proof needs
+   the factory path; a direct deploy cannot perform it.
+6. **A purchase on the real USDC rail**, covered next.
+
+### Real USDC on Base Sepolia
+
+Circle publishes the testnet addresses at
+[developers.circle.com](https://developers.circle.com/stablecoins/usdc-contract-addresses).
+On **Base Sepolia** it is `0x036CbD53842c5426634e7929541eC2318f3dCF7e`. Read off
+that address on 2026-09-04: `symbol()` `USDC`, `decimals()` `6`, `name()` `USDC`,
+`version()` `2`.
+
+**It exposes the `bytes` overload the licence contracts require.** The check that
+[contracts.md](contracts/contracts.md#which-payment-tokens-work) prescribes,
+run against it:
+
+```bash
+RPC=https://sepolia.base.org
+USDC=0x036CbD53842c5426634e7929541eC2318f3dCF7e
+
+IMPL=$(cast call $USDC "implementation()(address)" --rpc-url $RPC)
+# 0xd74cc5d436923b8ba2c179b4bCA2841D8A52C5B5
+
+cast code $IMPL --rpc-url $RPC | grep -c 88b7ab63   # 1: the bytes overload
+cast code $IMPL --rpc-url $RPC | grep -c ef55bec6   # 1: the (v, r, s) form too
+```
+
+`cast implementation` is **not** the way to resolve this token: it reads the
+EIP-1967 slot and Circle's proxy predates it, so it answers the zero address for
+USDC on both Base and Base Sepolia. That correction now lives in
+[contracts.md](contracts/contracts.md#which-payment-tokens-work) with the
+storage-slot cross-check beside it.
+
+The overload is also observable behaviourally, which settles it beyond a
+selector scan. Called with `msg.sender == to` and an empty signature it reverts
+`ECRecover: invalid signature length`, which is the `SignatureChecker` path the
+EIP-1271 support rests on; called from any other sender it reverts
+`FiatTokenV2: caller must be the payee`, which is the `receiveWithAuthorization`
+rule itself. A selector the token does not carry reverts with no data at all.
+
+**The EIP-712 domain a buyer signs under**, confirmed against the token's own
+`DOMAIN_SEPARATOR()` rather than assumed:
+
+| Field | Value |
+|---|---|
+| `name` | `USDC` |
+| `version` | `2` |
+| `chainId` | `84532` |
+| `verifyingContract` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+
+```bash
+cast call $USDC "DOMAIN_SEPARATOR()(bytes32)" --rpc-url $RPC
+# 0x71f17a3b2ff373b803d70a5a07c046c1a2bc8e89c09ef722fcb047abe94c9818
+cast keccak $(cast abi-encode "f(bytes32,bytes32,bytes32,uint256,address)" \
+  $(cast keccak "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)") \
+  $(cast keccak "USDC") $(cast keccak "2") 84532 $USDC)
+# the same digest
+```
+
+That is the `domain` block to put in the `auth.json` of
+[contracts.md](contracts/contracts.md#buying-with-an-authorization), whose worked
+example is written for chain `8453`. The rest of that recipe is unchanged: the
+nonce still comes from `purchaseAuthorizationNonce`, `value` is still
+`priceAmount()` exactly, and anyone may submit.
+
+Driving the same purchase through the wrapper rather than by hand means packing a
+headless binary against the scratch licence and setting the spend ceiling:
+`RUB3_AGENT_MAX_TOKEN_AMOUNT` unset leaves the stablecoin rail unavailable rather
+than unlimited, so a wrapper that "chose ETH" with the variable missing has
+tested nothing about USDC.
+
+```bash
+cargo run -p rub3-cli -- pack --binary <app> --app-id com.example.app \
+  --contract <SCRATCH_LICENCE> --chain base_sepolia --tier cooldown --headless \
+  --factory <SCRATCH_FACTORY> --rpc-url https://sepolia.base.org \
+  --output ./dist/scratch --dry-run
+```
+
+`--dry-run` prints the resolved plan and builds nothing; drop it to build. The
+`--factory` line is mandatory here and says on screen that the result is not a
+canonical deploy, which is the whole of tier 2 in one line of output.
+
+### The code registry has no override
+
+**There is no build-time flag, no pack-time flag and no environment variable that
+points a wrapper at a code registry.** The address comes from
+`attest::REGISTRIES` in `crates/rub3-wrapper/src/attest.rs`, a `pub static`
+carrying one entry per chain, and `attest::registry_for` is its only reader. The
+purchase path reaches it as `verify_before_purchase` to `decide` to
+`registry_for(chain_id)`, with no parameter a caller could supply instead.
+
+- **No environment override.** The wrapper reads no variable naming a registry.
+  The `RUB3_*` set it does read is the signer, spend-policy, SDK-channel and
+  directory variables, documented in [README.md](README.md) under "Signer
+  sources" and "Spend policy".
+- **No pack-time override.** `crates/rub3-wrapper/build.rs` lists the `RUB3_PACK_*`
+  variables it accepts and none of them is a registry, and `PackArgs` in
+  `crates/rub3-cli/src/pack.rs` has `--factory` and no counterpart for the
+  registry. `rub3-cli` does parse `code_registry` out of the manifest into
+  `deployments::ChainRecord`, and passes it nowhere.
+- **The table cannot be edited alone either.**
+  `attest::tests::registry_table_mirrors_the_deployment_manifest` fails when
+  `REGISTRIES` names an address `contracts/deployments.json` does not publish, in
+  every tier-2-and-up bundle.
+
+**So the only way to exercise the registry lookup on Base Sepolia is to build a
+wrapper from a modified `REGISTRIES` and a modified `deployments.json` in a
+working tree that is never committed.** That is a deliberate hole in tier 2, and
+the consequence is worth stating plainly: tier 2 can deploy a scratch registry
+and drive `publish`, `deprecate`, `latestOffsetTables` and `record` with `cast`,
+and it cannot observe a *wrapper* deciding a purchase on that registry's answer.
+That decision is covered by `tests/code_registry_e2e.rs`, which calls
+`attest::consult_registry` with an explicit address on anvil, bypassing
+`REGISTRIES` the same way. What remains untested anywhere is the resolution step
+answering with an address: `registry_for` runs on every purchase today and
+always returns `None`, so the wiring from a populated table into the gate's
+decision first executes in production on the day chain 84532 is populated.
+
+**A follow-up worth considering, and not built here.** A pack-time
+`--code-registry <ADDRESS>` would close that gap, and it is exactly the kind of
+knob this design refuses elsewhere. For it: the resolution step would get real
+coverage, and the flag would be no more trusted than `--factory` and
+`packed::CONTRACT` already are, since all three are build-time constants trusted
+because the user chose to run the binary, which is where `REGISTRIES`' own doc
+comment says the recursion stops. Against it: the registry is the *second*
+authority a wrapper consults when its first one missed, so a flag that redirects
+it turns "code neither table knows" into "code an address supplied at pack time
+vouched for", and the failure is silent by construction because the outcome is a
+successful purchase rather than a refusal. `--factory` is not the same risk: the
+wrapper never reads the factory at runtime at all. If it is ever built, it should
+print its non-canonicity on `--version` the way `--factory` prints it on the pack
+summary, and it should be refused outright unless the binary also declares itself
+non-canonical.
+
+### Tier 3: the one recorded canonical Sepolia set
+
+The single `Rub3Factory` and `Rub3CodeRegistry` that
+`contracts/deployments.json` will name for chain 84532, that
+`attest::REGISTRIES` will mirror, that `rub3 pack` will bake in with no
+`--factory` flag, and that the one-shot quickstart of `implementation.md` §3.3
+will target. **This tier is never used for an experiment**, and this plan neither
+performs nor schedules it: it waits on the treasury decision and on the standing
+sequencing in which the factory and the registry launch together.
+
+Mainnet discipline applies here, not testnet discipline, because two of the three
+things it does are permanent:
+
+- **A Safe as treasury.** Immutable on the factory and on every licence that
+  factory will ever deploy, with no setter and no migration that reaches a
+  deployed contract, so the pre-mainnet proof in
+  [contracts.md](contracts/contracts.md#treasury-custody-and-the-pre-mainnet-proof)
+  runs first.
+- **A custodied owner key for the code registry.** It can only ever add, and
+  every addition is a permanent public `Published` event, so a compromise cannot
+  rewrite anything. Rotation is supported while the key is still held
+  (`Ownable2Step`) and renouncing is refused outright, so the failure to guard
+  against is loss rather than handover: a key nobody holds can no longer be
+  rotated, and it freezes the version authority for that chain, leaving every
+  fielded binary refusing on a pinned-table miss with nothing left to ask.
+- **`attest::CANONICAL` becomes accumulate-only.** The rule is stated in that
+  table's own doc comment and enforced by
+  `attest::tests::nothing_is_deployed_so_the_accumulate_only_rule_is_not_live_yet`,
+  which reads `contracts/deployments.json` and asserts every `factory` and every
+  `code_registry` is still `null`. Quoting the trigger in the doc comment's own
+  words: the two records are separate deploys with separate lifecycles, so
+  **the rule goes live for a chain as soon as either of them stops being `null`,
+  and it goes live for whichever contracts that deploy actually put on chain**.
+  From that moment a row for a deployed contract is only ever added, never
+  overwritten and never dropped. Until then the table is corrected in place, and
+  the test is what turns the day it changes into a failing build rather than a
+  stale comment.
+
+Publishing either address is therefore a one-way step, and the test above fails
+in every tier-2-and-up matrix job the moment it is taken, which is the signal to
+update `CANONICAL`'s doc comment and the test itself rather than to work around
+them.
+
+### Faucets, RPC, keys, and CI
+
+**Tier 2 does not belong in CI.** `.github/workflows/ci.yml` uses no repository
+secrets at all: every job is hermetic, and each of the four on-chain steps runs
+its own anvil. Putting tier 2 in CI would mean a funded private key in repository
+secrets, and it would make every pull request depend on a public testnet's
+uptime, an endpoint's rate limit and a faucet balance nobody is watching. The
+value tier 2 delivers is a rehearsal before an irreversible act, which is a
+launch gate rather than a per-commit gate, and a flaky per-commit gate is the
+thing this repository's `assert-e2e-ran.sh` discipline exists to avoid.
+
+What tier 1 needs: a Rust toolchain, Foundry, and nothing else. What tier 2 adds:
+
+| Need | Where it comes from | Note |
+|---|---|---|
+| Base Sepolia RPC | `https://sepolia.base.org`, or a provider key in `BASE_SEPOLIA_RPC_URL` | the public endpoint answers reads; a broadcast run wants a provider |
+| Testnet ETH | [Base network faucets](https://docs.base.org/get-started/get-funds) | for the deployer and for an ETH-rail purchase |
+| Testnet USDC | [Circle faucet](https://faucet.circle.com), select Base Sepolia | for the stablecoin rail |
+| A deployer key | `cast wallet new`, used for this and discarded | never a key that holds anything |
+| A throwaway Safe | deployed on Base Sepolia, owners rotatable | only for the treasury proof; an EOA is enough for every other step |
+| `BASESCAN_API_KEY` | [Basescan](https://basescan.org/register) | optional: `--verify` and `cast interface` only |
+
+**Tier 3 needs a decision, not a faucet.** Its prerequisites are the treasury
+custody choice and the key-custody arrangement for the registry owner, both of
+which sit above this document.
