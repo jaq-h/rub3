@@ -750,13 +750,29 @@ fn a_second_activation_inside_the_cooldown_is_refused_and_the_window_says_how_lo
     // while it is on disk the launch path is served from it and opens no
     // window at all, inside the cooldown or out of it.
     assert!(
-        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_some(),
+        crate::activation::try_session_fast_path(
+            APP_ID,
+            CHAIN_ID,
+            &holder.contract,
+            &rpc_url(),
+            None,
+            None
+        )
+        .is_some(),
         "the session persisted above must still be served from cache",
     );
     std::fs::remove_file(crate::session_store::session_path(APP_ID, holder.token_id).unwrap())
         .expect("remove the cached session");
     assert!(
-        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_none(),
+        crate::activation::try_session_fast_path(
+            APP_ID,
+            CHAIN_ID,
+            &holder.contract,
+            &rpc_url(),
+            None,
+            None
+        )
+        .is_none(),
         "with the session gone the launch path has to open the window instead",
     );
 
@@ -847,7 +863,15 @@ fn an_expired_session_is_refused_and_a_fresh_activation_replaces_it_e2e() {
 
     // While it is live, the launch fast path serves it.
     assert!(
-        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_some(),
+        crate::activation::try_session_fast_path(
+            APP_ID,
+            CHAIN_ID,
+            &holder.contract,
+            &rpc_url(),
+            None,
+            None
+        )
+        .is_some(),
         "a live session must be served from cache",
     );
 
@@ -861,7 +885,15 @@ fn an_expired_session_is_refused_and_a_fresh_activation_replaces_it_e2e() {
         "the stored session should have lapsed",
     );
     assert!(
-        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_none(),
+        crate::activation::try_session_fast_path(
+            APP_ID,
+            CHAIN_ID,
+            &holder.contract,
+            &rpc_url(),
+            None,
+            None
+        )
+        .is_none(),
         "an expired session must not be honoured",
     );
 
@@ -884,7 +916,15 @@ fn an_expired_session_is_refused_and_a_fresh_activation_replaces_it_e2e() {
     persist(second);
 
     assert!(
-        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_some(),
+        crate::activation::try_session_fast_path(
+            APP_ID,
+            CHAIN_ID,
+            &holder.contract,
+            &rpc_url(),
+            None,
+            None
+        )
+        .is_some(),
         "the replacement session must be the one served",
     );
 }

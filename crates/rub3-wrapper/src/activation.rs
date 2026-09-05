@@ -80,7 +80,7 @@ pub fn ensure(
 ) -> Result<Launch, ActivationError> {
     // ── Fast path 1: existing session (tier 3) ───────────────────────────────
     #[cfg(feature = "cooldown")]
-    if let Some(session) = try_session_fast_path(app_id, rpc_url, None, None) {
+    if let Some(session) = try_session_fast_path(app_id, chain_id, contract, rpc_url, None, None) {
         return Ok(Launch::from_session(session));
     }
 
@@ -192,9 +192,19 @@ fn interactive_slow_path(
 /// reuse exactly as it constrains purchasing. Selecting rather than filtering
 /// matters once a signer holds several licenses: the requested token's session
 /// is reused even when another token was activated more recently.
+///
+/// `chain_id` and `contract` are the packed deploy, and a session signed for
+/// any other is a miss whichever way it was loaded: a testnet build and the
+/// production build share an `app_id`, session ids start at 1 on every deploy,
+/// and a §2.4 successor migration writes a fresh record for the successor, so
+/// no supported flow produces a record for another deploy that this build
+/// should launch from. Both fields are in the signed preimage, so the check is
+/// against the record's own statement rather than a rewritable label.
 #[cfg(feature = "cooldown")]
 pub(crate) fn try_session_fast_path(
     app_id: &str,
+    chain_id: u64,
+    contract: &str,
     rpc_url: &str,
     require_wallet: Option<Address>,
     require_token: Option<u64>,
@@ -203,10 +213,14 @@ pub(crate) fn try_session_fast_path(
         (Some(token_id), _) => crate::session_store::load_session(app_id, token_id).ok()?,
         (None, Some(wallet)) => crate::session_store::load_latest_session_for_wallet(
             app_id,
+            chain_id,
+            contract,
             &crate::identity::format_addr(wallet),
         )
         .ok()?,
-        (None, None) => crate::session_store::load_latest_session(app_id).ok()?,
+        (None, None) => {
+            crate::session_store::load_latest_session(app_id, chain_id, contract).ok()?
+        }
     };
 
     if crate::session::verify_local(&session).is_err() {
@@ -220,6 +234,10 @@ pub(crate) fn try_session_fast_path(
         if session.token_id != token_id {
             return None;
         }
+    }
+
+    if !crate::session_store::is_for_deploy(&session, chain_id, contract) {
+        return None;
     }
 
     if let Some(wallet) = require_wallet {
@@ -1358,9 +1376,14 @@ mod headless {
         let wallet = signer.address();
 
         // ── Fast path: a session this signer already owns ────────────────────
-        if let Some(session) =
-            try_session_fast_path(&ctx.app_id, &ctx.rpc_url, Some(wallet), ctx.token_id)
-        {
+        if let Some(session) = try_session_fast_path(
+            &ctx.app_id,
+            ctx.chain_id,
+            &ctx.contract,
+            &ctx.rpc_url,
+            Some(wallet),
+            ctx.token_id,
+        ) {
             return Ok((session, HeadlessOutcome::Reused));
         }
 
@@ -3182,17 +3205,39 @@ mod tests {
         crate::session_store::save_session(&older).unwrap();
         crate::session_store::save_session(&newer).unwrap();
 
-        let picked = try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), Some(7))
-            .expect("token 7 has a valid cached session of its own");
+        let picked = try_session_fast_path(
+            app_id,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+            "http://127.0.0.1:1",
+            Some(wallet),
+            Some(7),
+        )
+        .expect("token 7 has a valid cached session of its own");
         assert_eq!(picked.token_id, 7);
         assert_eq!(picked.nonce, older.nonce);
 
-        let latest = try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), None)
-            .expect("an unqualified run still takes the newest session");
+        let latest = try_session_fast_path(
+            app_id,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+            "http://127.0.0.1:1",
+            Some(wallet),
+            None,
+        )
+        .expect("an unqualified run still takes the newest session");
         assert_eq!(latest.token_id, 3);
 
         assert!(
-            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), Some(9)).is_none(),
+            try_session_fast_path(
+                app_id,
+                TEST_CHAIN_ID,
+                TEST_CONTRACT,
+                "http://127.0.0.1:1",
+                Some(wallet),
+                Some(9)
+            )
+            .is_none(),
             "a token with no cached session must be a miss",
         );
 
@@ -3225,15 +3270,27 @@ mod tests {
         crate::session_store::save_session(&agent_session).unwrap();
         crate::session_store::save_session(&other_session).unwrap();
 
-        let picked =
-            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(agent.address()), None)
-                .expect("the agent holds a valid session of its own");
+        let picked = try_session_fast_path(
+            app_id,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+            "http://127.0.0.1:1",
+            Some(agent.address()),
+            None,
+        )
+        .expect("the agent holds a valid session of its own");
         assert_eq!(picked.token_id, 3);
         assert_eq!(picked.nonce, agent_session.nonce);
 
-        let picked =
-            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(other.address()), None)
-                .expect("the other key holds one too");
+        let picked = try_session_fast_path(
+            app_id,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+            "http://127.0.0.1:1",
+            Some(other.address()),
+            None,
+        )
+        .expect("the other key holds one too");
         assert_eq!(picked.token_id, 7);
 
         // A wallet with nothing cached is still a miss, not someone else's session.
@@ -3242,8 +3299,15 @@ mod tests {
         )
         .unwrap();
         assert!(
-            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(stranger.address()), None)
-                .is_none(),
+            try_session_fast_path(
+                app_id,
+                TEST_CHAIN_ID,
+                TEST_CONTRACT,
+                "http://127.0.0.1:1",
+                Some(stranger.address()),
+                None
+            )
+            .is_none(),
             "a key with no session must not launch on another key's",
         );
 
@@ -3257,19 +3321,120 @@ mod tests {
 
     /// Builds a locally signed, unexpired session for `token_id`, persisted the
     /// way the headless door persists one.
+    /// **A cached record launches only the deploy it was signed for.** A
+    /// testnet build and the production build share an `app_id`, so a record
+    /// written by a faucet-funded activation on Base Sepolia is the newest
+    /// valid record on the machine when the Base-packed build starts. None of
+    /// these records carries a `session_id`, so no launch here is sampled:
+    /// what refuses them is the deploy guard alone, through every door the
+    /// fast path has - by token, by wallet, and unqualified.
+    #[test]
+    fn fast_path_refuses_a_session_signed_for_another_deploy() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        let app_id = "com.rub3.test.other-deploy";
+        let signer = crate::signer::LocalSigner::from_hex(
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+        let wallet = signer.address();
+        let other_contract = "0x000000000000000000000000000000000000dEaD";
+
+        let other_chain = signed_session_for(
+            app_id,
+            7,
+            &signer,
+            "2026-06-01T00:00:00+00:00",
+            TEST_CHAIN_ID + 1,
+            TEST_CONTRACT,
+        );
+        let other_deploy = signed_session_for(
+            app_id,
+            8,
+            &signer,
+            "2026-06-02T00:00:00+00:00",
+            TEST_CHAIN_ID,
+            other_contract,
+        );
+        crate::session_store::save_session(&other_chain).unwrap();
+        crate::session_store::save_session(&other_deploy).unwrap();
+
+        for (label, require_wallet, require_token) in [
+            ("by token, other chain", Some(wallet), Some(7)),
+            ("by token, other contract", Some(wallet), Some(8)),
+            ("by wallet", Some(wallet), None),
+            ("unqualified", None, None),
+        ] {
+            assert!(
+                try_session_fast_path(
+                    app_id,
+                    TEST_CHAIN_ID,
+                    TEST_CONTRACT,
+                    "http://127.0.0.1:1",
+                    require_wallet,
+                    require_token,
+                )
+                .is_none(),
+                "a record for another deploy must not launch this build ({label})",
+            );
+        }
+
+        // Select, do not filter: this deploy's own older record is served
+        // although both foreign records are newer.
+        let ours = signed_session(app_id, 3, &signer, "2026-01-01T00:00:00+00:00");
+        crate::session_store::save_session(&ours).unwrap();
+        for (label, require_wallet) in [("by wallet", Some(wallet)), ("unqualified", None)] {
+            let served = try_session_fast_path(
+                app_id,
+                TEST_CHAIN_ID,
+                TEST_CONTRACT,
+                "http://127.0.0.1:1",
+                require_wallet,
+                None,
+            )
+            .unwrap_or_else(|| panic!("this deploy's own record is served ({label})"));
+            assert_eq!(served.token_id, 3, "{label}");
+        }
+
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
     fn signed_session(
         app_id: &str,
         token_id: u64,
         signer: &crate::signer::LocalSigner,
         issued_at: &str,
     ) -> crate::session::Session {
+        signed_session_for(
+            app_id,
+            token_id,
+            signer,
+            issued_at,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+        )
+    }
+
+    /// A valid session signed against a named deploy. Both fields are in the
+    /// preimage, so a record for another deploy is signed for it rather than
+    /// relabelled.
+    fn signed_session_for(
+        app_id: &str,
+        token_id: u64,
+        signer: &crate::signer::LocalSigner,
+        issued_at: &str,
+        chain_id: u64,
+        contract: &str,
+    ) -> crate::session::Session {
         let wallet = crate::identity::format_addr(signer.address());
         let nonce = crate::session::new_nonce();
         let expires_at = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
         let message = crate::session::session_message(
             app_id,
-            TEST_CHAIN_ID,
-            TEST_CONTRACT,
+            chain_id,
+            contract,
             token_id,
             "access",
             &wallet,
@@ -3294,8 +3459,8 @@ mod tests {
             expires_at: Some(expires_at),
             signature,
             chain: "base".to_string(),
-            chain_id: TEST_CHAIN_ID,
-            contract: TEST_CONTRACT.to_string(),
+            chain_id,
+            contract: contract.to_string(),
             activation_tx: None,
             activation_block: None,
             activation_block_hash: None,
@@ -3395,7 +3560,15 @@ mod tests {
         std::fs::write(&path, serde_json::to_string(&session).unwrap()).unwrap();
 
         assert!(
-            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), Some(7)).is_none(),
+            try_session_fast_path(
+                app_id,
+                TEST_CHAIN_ID,
+                TEST_CONTRACT,
+                "http://127.0.0.1:1",
+                Some(wallet),
+                Some(7)
+            )
+            .is_none(),
             "a session issued for token 3 must not stand in for token 7",
         );
 

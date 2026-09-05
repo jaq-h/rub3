@@ -3838,7 +3838,7 @@ fn headless_release_seat_frees_a_session_that_lapsed_locally_e2e() {
 
     std::thread::sleep(Duration::from_secs(2));
     assert!(
-        session_store::load_latest_session(APP_ID).is_err(),
+        session_store::load_latest_session(APP_ID, CHAIN_ID, &short.contract).is_err(),
         "this test is only meaningful while the cached session has lapsed locally"
     );
     let (live, _) = rpc::session_seat(&rpc_url(), contract_addr, session.token_id, session_id)

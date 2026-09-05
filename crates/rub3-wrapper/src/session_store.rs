@@ -86,13 +86,34 @@ pub fn delete_session(app_id: &str, token_id: u64) -> Result<(), StoreError> {
 
 // ── Latest-session scan ───────────────────────────────────────────────────────
 
-/// Scans `~/.rub3/sessions/<app_id>/` for all valid, non-expired sessions and
-/// returns the most recently issued one.
+/// Scans `~/.rub3/sessions/<app_id>/` for all valid, non-expired sessions
+/// **signed against the deploy `(chain_id, contract)`** and returns the most
+/// recently issued one.
 ///
 /// Solves the "don't know token_id at startup" problem: the fast path doesn't
-/// need to know which token to load - it just asks for the best available session.
-pub fn load_latest_session(app_id: &str) -> Result<Session, StoreError> {
-    latest_session_where(app_id, |s| !is_expired(s))
+/// need to know which token to load - it just asks for the best available
+/// session. The deploy narrows the scan rather than filtering its result, for
+/// the reason [`load_latest_session_for_deploy`] gives: a record for another
+/// chain or another contract under the same `app_id` is not a record this
+/// build may launch from, and choosing it and then rejecting it would send the
+/// caller back on-chain while its own usable record sits one file over.
+pub fn load_latest_session(
+    app_id: &str,
+    chain_id: u64,
+    contract: &str,
+) -> Result<Session, StoreError> {
+    latest_session_where(app_id, |s| {
+        !is_expired(s) && is_for_deploy(s, chain_id, contract)
+    })
+}
+
+/// Whether `session` was signed against the deploy `(chain_id, contract)`.
+///
+/// Both fields are in the signed preimage, so once the signature has verified
+/// this is the record's own statement of the deploy it belongs to and not a
+/// label a tamperer could have rewritten.
+pub fn is_for_deploy(session: &Session, chain_id: u64, contract: &str) -> bool {
+    session.chain_id == chain_id && session.contract.eq_ignore_ascii_case(contract)
 }
 
 /// The most recently issued session **signed by `wallet` against the deploy
@@ -126,26 +147,34 @@ pub fn load_latest_session_for_deploy(
     wallet: &str,
 ) -> Result<Session, StoreError> {
     latest_session_where(app_id, |s| {
-        s.chain_id == chain_id
-            && s.contract.eq_ignore_ascii_case(contract)
-            && s.wallet.eq_ignore_ascii_case(wallet)
+        is_for_deploy(s, chain_id, contract) && s.wallet.eq_ignore_ascii_case(wallet)
     })
 }
 
-/// The most recently issued valid session **signed by `wallet`**.
+/// The most recently issued valid session **signed by `wallet` against the
+/// deploy `(chain_id, contract)`**.
 ///
 /// One machine can hold sessions for several keys under the same `app_id` (a
-/// human activated interactively, a second agent runs with its own key). The
-/// wallet has to narrow the scan rather than filter its result: rejecting the
-/// single newest session because it belongs to another key would send a caller
-/// back on-chain while its own cached session sits unused one file over.
+/// human activated interactively, a second agent runs with its own key), and
+/// for several deploys (a testnet build and the production build share an
+/// `app_id`). Each has to narrow the scan rather than filter its result:
+/// rejecting the single newest session because it belongs to another key or
+/// another deploy would send a caller back on-chain while its own cached
+/// session sits unused one file over.
 ///
 /// `wallet` is compared case-insensitively against the session's signed
 /// `wallet` field, which the scan's signature check has already tied to the
 /// signature.
-pub fn load_latest_session_for_wallet(app_id: &str, wallet: &str) -> Result<Session, StoreError> {
+pub fn load_latest_session_for_wallet(
+    app_id: &str,
+    chain_id: u64,
+    contract: &str,
+    wallet: &str,
+) -> Result<Session, StoreError> {
     latest_session_where(app_id, |s| {
-        !is_expired(s) && s.wallet.eq_ignore_ascii_case(wallet)
+        !is_expired(s)
+            && is_for_deploy(s, chain_id, contract)
+            && s.wallet.eq_ignore_ascii_case(wallet)
     })
 }
 
@@ -343,7 +372,7 @@ mod tests {
         save_session(&valid).unwrap();
         save_session(&expired).unwrap();
 
-        let latest = load_latest_session("com.rub3.test").unwrap();
+        let latest = load_latest_session("com.rub3.test", TEST_CHAIN_ID, TEST_CONTRACT).unwrap();
         assert_eq!(latest.token_id, 1, "should return the non-expired session");
 
         std::env::remove_var("RUB3_SESSION_DIR");
@@ -358,7 +387,7 @@ mod tests {
         let expired = signed_session("com.rub3.test", 3, "2000-01-01T00:00:00Z");
         save_session(&expired).unwrap();
 
-        let err = load_latest_session("com.rub3.test").unwrap_err();
+        let err = load_latest_session("com.rub3.test", TEST_CHAIN_ID, TEST_CONTRACT).unwrap_err();
         assert!(matches!(err, StoreError::NotFound));
 
         std::env::remove_var("RUB3_SESSION_DIR");
@@ -379,7 +408,7 @@ mod tests {
         save_session(&expired).unwrap();
 
         assert!(matches!(
-            load_latest_session("com.rub3.test"),
+            load_latest_session("com.rub3.test", TEST_CHAIN_ID, TEST_CONTRACT),
             Err(StoreError::NotFound)
         ));
         let found = own_latest("com.rub3.test", &expired.wallet)
@@ -509,6 +538,60 @@ mod tests {
         let found =
             own_latest("com.rub3.test", &theirs.wallet).expect("and the other agent's is its own");
         assert_eq!(found.token_id, 2);
+
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
+    /// **The launch scan narrows on the deploy too.** A testnet build and the
+    /// production build share an `app_id`, so a valid record signed for the
+    /// other chain, or for another contract on this one, can be the newest
+    /// under it. It must never be served, and it must not hide this deploy's
+    /// own valid record behind it.
+    #[test]
+    fn the_launch_scan_serves_only_this_deploys_records() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        let mut ours = signed_session("com.rub3.test", 1, "2099-01-01T00:00:00Z");
+        ours.issued_at = "2020-01-01T00:00:00Z".into();
+        let mut other_chain = signed_session_for(
+            "com.rub3.test",
+            2,
+            "2099-01-01T00:00:00Z",
+            TEST_CHAIN_ID + 1,
+            TEST_CONTRACT,
+        );
+        other_chain.issued_at = "2030-01-01T00:00:00Z".into();
+        let mut other_contract =
+            signed_session_on("com.rub3.test", 3, "2099-01-01T00:00:00Z", OTHER_CONTRACT);
+        other_contract.issued_at = "2031-01-01T00:00:00Z".into();
+        save_session(&other_chain).unwrap();
+        save_session(&other_contract).unwrap();
+
+        assert!(
+            matches!(
+                load_latest_session("com.rub3.test", TEST_CHAIN_ID, TEST_CONTRACT),
+                Err(StoreError::NotFound)
+            ),
+            "a valid record for another deploy is not a record for this one",
+        );
+
+        save_session(&ours).unwrap();
+        let found = load_latest_session("com.rub3.test", TEST_CHAIN_ID, TEST_CONTRACT)
+            .expect("this deploy's own record is served");
+        assert_eq!(
+            found.token_id, 1,
+            "newer records for other deploys do not hide it"
+        );
+        let found = load_latest_session_for_wallet(
+            "com.rub3.test",
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+            &ours.wallet,
+        )
+        .expect("and the wallet-scoped scan agrees");
+        assert_eq!(found.token_id, 1);
 
         std::env::remove_var("RUB3_SESSION_DIR");
     }
