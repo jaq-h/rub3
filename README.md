@@ -406,9 +406,19 @@ RUB3_AGENT_KEY=0x<64 hex chars>   rub3-wrapper --headless --binary /path/to/your
 
 # Activate one specific token instead of letting the flow choose:
 rub3-wrapper --headless --token-id 3 --binary /path/to/your/app
+
+# Hand this machine's seat back (§3.4) and exit without launching anything:
+rub3-wrapper --headless --release-seat
 ```
 
 `--headless` requires a build with the `headless` feature; other builds exit 18.
+
+`--release-seat` is the teardown half of concurrent seats (§3.4): an instance
+being retired returns its seat now rather than after the contract's session
+TTL. It releases only the session cached on this machine, never another
+instance's, and exits 0 whether or not there was a seat to hand back. What it
+prints, including the `released=false` and `rejected=<reason>` keys on its
+detail line, is owned by the Teardown section of `rub3-wrapper --help`.
 
 **`rub3-wrapper --help` owns the exit-code and signer-source contract.** The
 binary prints both tables below, with the reasoning that matters at the call

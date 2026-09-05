@@ -26,13 +26,13 @@ capabilities nor the headless front door. Cargo features are additive, so
 `--no-default-features` is mandatory when selecting another bundle:
 
 ```bash
-# tier-3 (adds onchain-write + cooldown): 180 lib tests
+# tier-3 (adds onchain-write + cooldown): 186 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3 --lib
 
-# tier-3 + the headless (agent) front door: 247 lib tests
+# tier-3 + the headless (agent) front door: 253 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,headless --lib
 
-# tier-3 + the webview (human) front door: 218 lib tests
+# tier-3 + the webview (human) front door: 224 lib tests
 cargo test -p rub3-wrapper --no-default-features --features tier-3,webview --lib
 ```
 
@@ -41,19 +41,14 @@ For reference, `--lib` counts per bundle: `tier-0` 65, `tier-1` 106, `tier-2` 14
 `tier-3,headless` 253, `tier-0,sdk` 77, `tier-3,sdk` 203. Every count on this
 page is the number libtest reports as *running* - passed plus `#[ignore]`d, not
 passed alone - so a plain run of `tier-3,webview` prints 217 passed and 7 ignored
-against the 224 above. The five `packed` tests are in every bundle, which is why
-every bundle is five higher than the one `implementation.md` §3.5 recorded when
-it was written; §3.4's six seat-store tests are six higher again
-in every bundle that has a session model, which is every one of them except
-`tier-0` and `tier-0,sdk`; on top of that, `tier-3,webview` carries the registry screen
-test §3.2 added, and every bundle with `onchain-write` carries §5.1a's 26 watch
-tests, which is +33 at `tier-3`, `tier-4`, `tier-3,headless` and `tier-3,sdk` and
-+53 at `tier-3,webview`, whose remaining 19 are the auto-detect front door, the
-handler test beside it, §5.4's two cooldown-countdown payload tests, and §3.4's
-multi-seat auto-detect test. The ignored ones are one network test in every
+against the 224 above. The ignored ones are one network test in every
 bundle, plus the six anvil-gated webview session-flow tests under
-`tier-3,webview`.
-`tier-1` and `tier-2` diverge because `attest` needs `onchain-read`.
+`tier-3,webview`. The bundles diverge by feature gating alone, and
+`cargo test ... --lib -- --list` is the authority on which tests a bundle
+compiles. `tier-0` and `tier-0,sdk` sit below the rest because the `session`
+and `session_store` modules need a session model. `tier-1` and `tier-2`
+diverge because `attest` needs `onchain-read`, and every bundle with
+`onchain-write` carries §5.1a's watch tests.
 `tier-2,webview` and `tier-3,webview` diverge because the window's purchase
 screen, the code attestation guarding it, and the tier-3 session flow all need
 `onchain-write` or `cooldown`. The `sdk` bundles diverge from each other by the
@@ -85,7 +80,7 @@ scripts/test-e2e.sh
 - **`store::tests`** - proof save/load, directory creation, overwrite, missing file handling
 - **`packed::tests`** - what `rub3 pack` baked in (§2.5), compiled in every bundle. The test build asserts itself *not* to be a packed build, which is what gives the other three a fixed subject: the factory is `None`, since it is the one constant with no placeholder and an unpacked build may not invent one; no application is embedded; the placeholder `CONTRACT` is still the zero address the wrapper reads as "no contract configured", which is why a stock build never touches the chain; the numeric constants parse at compile time; `provenance()` names the app id, contract, chain and rpc it will act on and says "development build" where a packed binary names its factory; and `provenance_never_hands_out_the_endpoint_key` drives the rendering with an endpoint carrying a provider key in its path, in a query parameter and as userinfo - `--version` is reachable by every licence holder, so the endpoint goes through the same `rpc::redact_urls` the error surface uses and is reduced to scheme, host and port, with an authority that will not parse dropped whole rather than passed through
 - **`rpc::tests`** - provider construction, contract call error paths, `encode_activate_calldata` selector + layout, `get_tx_receipt` / `get_block_number` / `get_code` error paths, ENS stub; the endpoint redaction (§2.8), which is a property of the wrapper's whole RPC error surface rather than of any one screen: a key placed in a path segment, in a query parameter and as userinfo must each be absent from the error's `Display` after construction through `RpcError::transport` and `RpcError::contract` while the host, the port and the failure text survive; a bracketed IPv6 authority keeps its host and loses its key, including when trailing punctuation follows it; an address whose authority will not parse at all is dropped whole rather than half-printed, which is the fail-closed property that a bare `[redacted url]` followed by a verbatim path would violate; plus one drive of `tokens_of_owner` against a dead port because alloy classifies an unreachable node during an `eth_call` as a contract error rather than a transport one; and for the EIP-3009 rail (§2.2) the `ReceiveWithAuthorization` typehash against its literal preimage, the signing digest against a vector computed independently with `cast`, every signed field proving it changes that digest, and the `purchaseWithAuthorization` calldata selector
-- **`session::tests`** (requires `session` feature) - message determinism, tier-diffing, expiry edge cases, sign/verify round-trip, wrong-wallet failure; with `cooldown` adds: `verify_onchain` missing-field + bad-URL paths, `should_reverify` distribution sanity
+- **`session::tests`** (requires `session` feature) - message determinism, tier-diffing, expiry edge cases, sign/verify round-trip, wrong-wallet failure; the deploy fields §3.4 signed into the preimage: the message differs by `contract` and by `chain_id` while ignoring the contract's casing, and a record whose `contract` or `chain_id` was rewritten after signing fails `verify_local`; with `cooldown` adds: `session_expiry` taking the earlier of the packed TTL and the seat's on-chain expiry and refusing an unusable one, `verify_onchain` missing-field + bad-URL paths, `should_reverify` distribution sanity
 - **`session_store::tests`** (requires `session` feature) - save/load round-trip, missing-session, `load_latest_session` picking the freshest valid session for the packed deploy and never a valid one signed for another chain or another contract, which must not hide this deploy's own (`load_latest_session_for_wallet` narrows the same scan to one signer, covered from `activation::tests`), and the five properties of the expiry-agnostic scan the seat teardown path reads through (§3.4): `load_latest_session_for_deploy` finds a locally lapsed session that `load_latest_session` refuses, because a lapsed record still names the seat this machine took; it refuses a record whose signature does not verify, because one this machine did not write is not evidence of a seat it took; and the contract, the chain id and the wallet each narrow the scan rather than filtering its result, so a newer record for another deploy under the same `app_id`, a record signed for the same address on another chain, or a newer record under another agent's key cannot be chosen and then rejected while a seat this machine really holds stays taken
 - **`identity::tests`** - `IdentityModel` parsing and wire format, ERC-6551 TBA derivation determinism and sensitivity to each input, `resolve_user_id` for both models
 - **`signer::tests`** (requires `headless` feature) - hex key parsing (bare/prefixed/padded, and every rejection: wrong length, non-hex, zero and out-of-curve-order scalars), `Debug` redaction and error messages asserted not to echo the input, `personal_sign` / `sign_prehash` recovery, RFC-6979 determinism, keystore decrypt, password-file precedence, and the strict env-key-over-keystore resolution order with no fall-through on a malformed key
