@@ -786,6 +786,7 @@ mod tests {
                 expires_at: expires_at.map(str::to_string),
                 signature: format!("0x{}", "b".repeat(130)),
                 chain: "base".to_string(),
+                chain_id: 8453,
                 contract: "0x0000000000000000000000000000000000000002".to_string(),
                 activation_tx: Some(format!("0x{}", "c".repeat(64))),
                 activation_block: Some(9),

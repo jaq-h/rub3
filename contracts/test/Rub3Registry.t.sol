@@ -80,6 +80,7 @@ contract Rub3RegistryTest is Test {
     uint256 internal constant PRICE = 1 ether;
     uint256 internal constant USDC_PRICE = 5_000_000; // 5 USDC, 6 decimals
     uint256 internal constant COOLDOWN_BLOCKS = 15;
+    uint256 internal constant SESSION_TTL = 24 hours;
     uint16 internal constant FEE_BPS = 250;
 
     address internal treasury = address(0x7EA5);
@@ -110,6 +111,17 @@ contract Rub3RegistryTest is Test {
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
+    /// Session terms with the single-seat default: one concurrent session per
+    /// token, which is the tier-3 licence seats generalise (§3.4). The
+    /// multi-seat fixtures live in `Rub3Seats.t.sol`, which deploys its own.
+    function _session() internal pure returns (Rub3License.SessionTerms memory) {
+        return Rub3License.SessionTerms({
+            cooldownBlocks: COOLDOWN_BLOCKS,
+            seatsPerToken: 1,
+            sessionTtlSeconds: SESSION_TTL
+        });
+    }
+
     function _hashes(bytes32 h) internal pure returns (bytes32[] memory out) {
         out = new bytes32[](1);
         out[0] = h;
@@ -139,7 +151,7 @@ contract Rub3RegistryTest is Test {
             wrapperHashes: _hashes(WRAPPER_HASH),
             sale: sale,
             supplyCap: 0,
-            cooldownBlocks: COOLDOWN_BLOCKS,
+            session: _session(),
             predecessor: address(0),
             owner: address(0) // defaults to the caller
         });
@@ -171,7 +183,7 @@ contract Rub3RegistryTest is Test {
             _sale(address(0), 0),
             Rub3License.FeeTerms({feeBps: 0, treasury: address(0)}),
             0,
-            COOLDOWN_BLOCKS,
+            _session(),
             address(0),
             owner_
         );
@@ -798,7 +810,8 @@ contract Rub3RegistryTest is Test {
         // Nothing else moved.
         assertEq(license.ownerOf(tokenId), alice, "the token is still owned");
         assertTrue(license.honorsContract(address(license), tokenId), "the token is still honoured");
-        assertEq(license.activeSessionId(tokenId), sessionId, "the session is still live");
+        (bool live,) = license.sessionSeat(tokenId, sessionId);
+        assertTrue(live, "the session is still live");
 
         // A fresh activation still works, which is the read a wrapper makes on
         // every launch.
@@ -857,7 +870,8 @@ contract Rub3RegistryTest is Test {
         registry.setTokenRecognised(address(shiba), true);
 
         assertEq(license.ownerOf(tokenId), ownerBefore);
-        assertEq(license.activeSessionId(tokenId), sessionId);
+        (bool live,) = license.sessionSeat(tokenId, sessionId);
+        assertTrue(live);
         assertEq(license.price(), priceBefore);
         assertEq(license.priceToken(), tokenBefore);
         assertEq(license.priceAmount(), amountBefore);

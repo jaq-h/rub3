@@ -45,6 +45,8 @@ const SCRIPT_VARS: &[&str] = &[
     "PRICE_AMOUNT",
     "SUPPLY_CAP",
     "COOLDOWN_BLOCKS",
+    "SEATS",
+    "SESSION_TTL",
     "OWNER",
     "PREDECESSOR",
     "FACTORY",
@@ -106,9 +108,32 @@ pub struct DeployArgs {
     #[arg(long, value_name = "N")]
     pub supply_cap: Option<u64>,
 
-    /// Blocks between activations of one token. The contract's floor is 15.
+    /// Blocks a seat must wait between activations. The contract's floor is 15.
+    ///
+    /// Per seat, not per token: a token grants --seats concurrent sessions and
+    /// lands at most that many activations per cooldown window, so seats
+    /// multiply concurrency and never the churn rate.
     #[arg(long, value_name = "N")]
     pub cooldown_blocks: Option<u64>,
+
+    /// Concurrent sessions one licence token grants (§3.4). Defaults to 1, the
+    /// single-session tier-3 licence; the contract's ceiling is 64.
+    ///
+    /// Frozen at deploy and per contract, not per token: nothing can lower a
+    /// held token's concurrency afterwards. Sell a second seat count by
+    /// deploying a second contract.
+    #[arg(long, value_name = "K")]
+    pub seats: Option<u64>,
+
+    /// Seconds a seat stays taken when nobody releases it. Defaults to 86400
+    /// (24h); the contract's range is 300 to 7776000 (90 days).
+    ///
+    /// This is what frees a seat when a fleet instance dies without releasing
+    /// it. A wrapper takes the shorter of this and its own packed session TTL,
+    /// so `rub3 pack --session-ttl` can only shorten a session, never outlive
+    /// the seat that admits it.
+    #[arg(long, value_name = "SECONDS")]
+    pub session_ttl: Option<u64>,
 
     /// Contract owner. Defaults to the deploying key.
     #[arg(long, value_name = "ADDRESS")]
@@ -341,6 +366,27 @@ impl DeployPlan {
         if let Some(blocks) = args.cooldown_blocks {
             env.insert("COOLDOWN_BLOCKS".to_string(), blocks.to_string());
         }
+        // Both bounds are enforced by the contract's constructor, which is the
+        // authority; refusing the obviously-wrong value here only saves a
+        // deployer a broadcast that would revert.
+        if let Some(seats) = args.seats {
+            if seats == 0 || seats > 64 {
+                return Err(DeployError::Config(format!(
+                    "--seats {seats} is outside the range the contract accepts: 1 to 64. \
+                     A fleet wider than 64 buys another token."
+                )));
+            }
+            env.insert("SEATS".to_string(), seats.to_string());
+        }
+        if let Some(ttl) = args.session_ttl {
+            if !(300..=7_776_000).contains(&ttl) {
+                return Err(DeployError::Config(format!(
+                    "--session-ttl {ttl} is outside the range the contract accepts: \
+                     300 to 7776000 seconds (5 minutes to 90 days)."
+                )));
+            }
+            env.insert("SESSION_TTL".to_string(), ttl.to_string());
+        }
         if let Some(owner) = &args.owner {
             validate_address(owner)
                 .map_err(|detail| DeployError::Config(format!("--owner {detail}")))?;
@@ -485,14 +531,19 @@ impl DeployPlan {
     }
 }
 
-/// Runs a resolved plan: `forge script`, from `contracts/`.
-pub fn execute(plan: &DeployPlan, repo: &Repo) -> Result<(), DeployError> {
-    let contracts: PathBuf = repo.path("contracts");
+/// The `forge script` invocation a plan resolves to, environment and all.
+///
+/// Built apart from running it so the environment the child would actually get
+/// is observable without a deploy: every variable in [`SCRIPT_VARS`] is either
+/// set to what the plan decided or removed outright, and "removed" is the half
+/// that is otherwise invisible until an inherited value has already deployed
+/// something nobody typed.
+fn forge_command(plan: &DeployPlan, contracts: &std::path::Path) -> Command {
     let mut command = Command::new("forge");
     command
         .args(&plan.forge_args)
         .args(&plan.passthrough)
-        .current_dir(&contracts);
+        .current_dir(contracts);
     // Set what the plan decided, and clear the rest. An inherited value is a
     // deploy input nobody typed.
     for var in SCRIPT_VARS {
@@ -501,6 +552,13 @@ pub fn execute(plan: &DeployPlan, repo: &Repo) -> Result<(), DeployError> {
             None => command.env_remove(var),
         };
     }
+    command
+}
+
+/// Runs a resolved plan: `forge script`, from `contracts/`.
+pub fn execute(plan: &DeployPlan, repo: &Repo) -> Result<(), DeployError> {
+    let contracts: PathBuf = repo.path("contracts");
+    let mut command = forge_command(plan, &contracts);
 
     let status = command.status().map_err(|e| {
         DeployError::Forge(format!(
@@ -610,5 +668,80 @@ mod tests {
         assert!(validate_hash(&format!("0x{}", "00".repeat(32))).is_err());
         assert!(validate_hash("0xabc").is_err());
         assert!(validate_hash(&"ab".repeat(32)).is_err());
+    }
+
+    /// **A deploy input nobody typed must not reach the script.** Every name in
+    /// [`SCRIPT_VARS`] is either what this command decided or absent from the
+    /// child's environment outright; a `SEATS` or a `PRICE` left over from an
+    /// earlier `source .env` is a licence sold on terms the operator did not
+    /// choose, and it would be silent.
+    ///
+    /// Asserted against the `forge` invocation the plan actually produces:
+    /// every name is in its override map, either carrying the plan's value or
+    /// marked for removal. That map is the whole of what the child's
+    /// environment is built from, so it is the contract, and nothing here has
+    /// to touch this process's own environment to assert it.
+    #[test]
+    fn the_plan_clears_every_script_variable_it_did_not_set_itself() {
+        use clap::Parser;
+
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            deploy: DeployArgs,
+        }
+
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = Manifest::read(&repo_root).expect("the committed manifest");
+        // `--direct` because nothing is deployed to any public network yet, so
+        // no chain in the committed manifest names a factory to go through.
+        let cli = Cli::parse_from([
+            "deploy",
+            "--name",
+            "My App License",
+            "--symbol",
+            "MAL",
+            "--price-eth",
+            "0.05",
+            "--chain",
+            "base",
+            "--direct",
+        ]);
+        let plan = DeployPlan::resolve(&cli.deploy, &manifest).expect("a direct deploy resolves");
+        assert!(
+            plan.env.contains_key("PRICE"),
+            "this test needs one variable the plan sets",
+        );
+        assert!(
+            !plan.env.contains_key("SEATS") && !plan.env.contains_key("FACTORY"),
+            "this test needs variables the plan leaves alone",
+        );
+
+        let command = forge_command(&plan, &repo_root.join("contracts"));
+        let child_env: BTreeMap<String, Option<String>> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+
+        for var in SCRIPT_VARS {
+            match plan.env.get(*var) {
+                Some(value) => assert_eq!(
+                    child_env.get(*var),
+                    Some(&Some(value.clone())),
+                    "{var} must reach the script as the value this command decided",
+                ),
+                None => assert_eq!(
+                    child_env.get(*var),
+                    Some(&None),
+                    "{var} is not this deploy's to set, so it must be removed from the \
+                     child's environment rather than inherited",
+                ),
+            }
+        }
     }
 }

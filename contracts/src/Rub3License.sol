@@ -148,6 +148,30 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         address treasury;
     }
 
+    /// @notice How many concurrent sessions a token grants, how fast they may
+    ///         be churned, and how long one lives unattended (§3.4).
+    ///
+    ///         All three become `immutable`, so what a token grants is settled
+    ///         before the first buyer looks and can never move afterwards. That
+    ///         is what keeps seats out of the revocation surface §2.4 forbids:
+    ///         there is no per-token seat state anywhere in this contract and no
+    ///         setter for any of these three, so no one - owner, factory or
+    ///         protocol - can lower the concurrency of a token already held.
+    ///
+    ///         Grouped for the reason {SaleTerms} gives: loose, the three would
+    ///         put the constructor's ABI decoder past solc's stack limit.
+    struct SessionTerms {
+        /// Blocks that must elapse before a *seat* may be activated again.
+        /// At least {MIN_COOLDOWN_BLOCKS}.
+        uint256 cooldownBlocks;
+        /// Concurrent sessions one token admits. `1` is the tier-3 licence this
+        /// generalises; up to {MAX_SEATS}.
+        uint256 seatsPerToken;
+        /// Seconds a seat stays taken without being released. Between
+        /// {MIN_SESSION_TTL_SECONDS} and {MAX_SESSION_TTL_SECONDS}.
+        uint256 sessionTtlSeconds;
+    }
+
     /// @notice The EIP-3009 authorization a buyer signs, minus the three fields
     ///         this contract derives rather than accepts.
     ///
@@ -308,26 +332,141 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     ///         One claim per predecessor token.
     mapping(uint256 => bool) public predecessorTokenClaimed;
 
-    // ── Cooldown / session state (tiers 3-4) ──────────────────────────────────
+    // ── Seats: concurrent sessions (tiers 3-4, §3.4) ──────────────────────────
 
     /// @notice Floor on `cooldownBlocks`. ~30s on Base - one TOTP window.
     ///         Anything smaller reduces the contract to tier 2 (no rate limit).
     uint256 public constant MIN_COOLDOWN_BLOCKS = 15;
 
-    /// @notice Blocks that must elapse between activations for a single token.
+    /// @notice Ceiling on `seatsPerToken`.
+    ///
+    ///         Every activation scans the token's seats, so this is what keeps
+    ///         `activate()`'s gas bounded and predictable rather than a function
+    ///         of what a deployer chose. The scan touches one packed slot per
+    ///         seat, so 64 seats cost roughly 134k gas of cold reads - large,
+    ///         affordable, and reached only by a deployer who asked for it.
+    ///         A fleet wider than this buys another token, which is §3.4's own
+    ///         scaling story.
+    uint256 public constant MAX_SEATS = 64;
+
+    /// @notice Floor on `sessionTtlSeconds`. Five minutes.
+    ///
+    ///         A TTL below the cooldown does not make seats churn faster - the
+    ///         cooldown stamp still binds - it only strands seats between the
+    ///         moment they lapse and the moment they may be retaken. The floor
+    ///         stops a deploy whose sessions expire before a wrapper has
+    ///         finished signing one.
+    uint256 public constant MIN_SESSION_TTL_SECONDS = 5 minutes;
+
+    /// @notice Ceiling on `sessionTtlSeconds`. Ninety days.
+    ///
+    ///         The TTL exists so a fleet instance that dies without releasing
+    ///         its seat does not hold it forever (§3.4). A TTL measured in years
+    ///         would return that failure to exactly where it started, so the
+    ///         bound on how long a crashed instance can strand a seat is written
+    ///         into the contract rather than left to a deploy script.
+    uint256 public constant MAX_SESSION_TTL_SECONDS = 90 days;
+
+    /// @notice Blocks that must elapse before a *seat* may be activated again.
     ///         Immutable so the owner cannot silently defeat rate limiting.
+    ///
+    ///         Per seat, not per token, and that is what makes seats work at
+    ///         all: a token-level cooldown would serialise a fleet's start-up,
+    ///         so at the ~1hr default a ten-instance fleet would take ten hours
+    ///         to come up. Per seat, a token lands at most `seatsPerToken`
+    ///         activations in any window of this many blocks - exactly
+    ///         `seatsPerToken` times the single-seat rate and not one more,
+    ///         because a seat's stamp survives both {release} and a TTL lapse.
     uint256 public immutable cooldownBlocks;
 
-    /// @notice Block number of the last `activate()` call per token. `0` means
-    ///         never activated - the first call is always allowed.
-    mapping(uint256 => uint256) public lastActivationBlock;
+    /// @notice Concurrent sessions one token admits (§3.4). Always at least 1.
+    ///
+    ///         Immutable, and per contract rather than per token. An owner able
+    ///         to *lower* a held token's seat count would be a revocation
+    ///         surface, which §2.4 rules out; there is no per-token seat state
+    ///         here to lower and no setter to lower it with, so the prohibition
+    ///         is the absence of the storage rather than a check. A developer
+    ///         selling several seat counts deploys a contract per count.
+    uint256 public immutable seatsPerToken;
 
-    /// @notice Current active session id per token. Incremented on every
-    ///         `activate()`. Cached sessions whose `session_id` no longer
-    ///         matches are considered revoked.
-    mapping(uint256 => uint256) public activeSessionId;
+    /// @notice Seconds a seat stays taken when nobody releases it.
+    ///
+    ///         The lapse is what stops a licence silently degrading to zero
+    ///         usable seats when fleet instances die, which is the normal case
+    ///         in a fleet rather than the exceptional one. Lazy: nothing sweeps,
+    ///         and a lapsed seat is simply free the next time anything looks.
+    ///
+    ///         Authoritative over the wrapper's own session TTL - a wrapper
+    ///         takes the *shorter* of the two, so packaging can shorten a
+    ///         session but never outlive the seat that admits it.
+    uint256 public immutable sessionTtlSeconds;
 
-    /// @dev Monotonic counter feeding `activeSessionId` on each activation.
+    /// @notice One concurrency slot on a token.
+    ///
+    ///         `activatedAt` and `expiresAt` share a storage slot on purpose:
+    ///         the seat scan reads only those two, so it costs one cold SLOAD
+    ///         per seat rather than two.
+    struct Seat {
+        /// Block of the most recent activation on this seat. `0` means the seat
+        /// has never been taken.
+        ///
+        /// **Never cleared.** This is the cooldown stamp, and {release}, a
+        /// TTL lapse and a transfer of the token all free the seat's
+        /// *occupancy* while leaving it exactly where it was. Clearing it here
+        /// would make release-then-activate a way to churn faster than
+        /// `cooldownBlocks` intends, which is the one thing seats must not buy.
+        uint64 activatedAt;
+        /// Unix timestamp this seat frees itself at. `0`, or any value at or
+        /// before `block.timestamp`, means the seat is free.
+        uint64 expiresAt;
+        /// Session id currently holding the seat. Meaningful only while
+        /// `expiresAt` is in the future.
+        uint256 sessionId;
+    }
+
+    /// @notice What {activate} would do for a token right now, in one call.
+    ///
+    ///         Derived from the same scan {activate} itself runs, so a caller
+    ///         that reads this and a caller that sends the transaction can never
+    ///         disagree about which seat is next or why there is none.
+    struct ActivationStatus {
+        /// True when {activate} would succeed at this block.
+        bool ready;
+        /// True when {activate} would revert {FleetExhausted}: every seat holds
+        /// a live session that this caller is not entitled to retake, and no
+        /// number of blocks changes that.
+        ///
+        /// Carried as its own field rather than inferred from `seatsInUse ==
+        /// seats`, because on a single-seat licence the one occupied seat *is*
+        /// retakeable - see {activate} - so the counts alone do not answer it.
+        bool fleetExhausted;
+        /// The seat {activate} would take. Meaningful only when `ready`.
+        uint256 seatIndex;
+        /// Seats holding a session that has neither lapsed nor been released.
+        uint256 seatsInUse;
+        /// `seatsPerToken`, echoed so one call answers the whole question.
+        uint256 seats;
+        /// Blocks until the earliest available seat leaves its cooldown. `0`
+        /// when one already has, and `0` when `fleetExhausted`.
+        uint256 blocksRemaining;
+        /// Seconds until the earliest *occupied* seat lapses. `0` when none is
+        /// occupied.
+        ///
+        /// The wait when `fleetExhausted`, and a lower bound on it rather than
+        /// the whole of it: a lapsed seat keeps its `activatedAt` stamp - see
+        /// {sessionTtlSeconds} - so the seat that frees at that moment may
+        /// still owe blocks of its own cooldown and revert {CooldownActive}.
+        uint256 secondsRemaining;
+    }
+
+    /// @dev Per-token seat table: `tokenId => seatIndex => Seat`. Private with
+    ///      explicit getters, because the useful reads are the derived ones
+    ///      ({activationStatus}, {seatsInUse}) rather than a raw slot.
+    mapping(uint256 => mapping(uint256 => Seat)) private _seats;
+
+    /// @dev Monotonic counter feeding each seat's `sessionId`. Never reused, so
+    ///      a session id names one activation for the life of the contract even
+    ///      after the seat that held it has been taken again.
     uint256 private _sessionCounter;
 
     // ── Events ────────────────────────────────────────────────────────────────
@@ -364,7 +503,27 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         uint256 indexed tokenId,
         address holder
     );
-    event Activated(uint256 indexed tokenId, address indexed owner, uint256 sessionId);
+    /// @notice A seat was taken. `seatIndex` and `expiresAt` are what a wrapper
+    ///         reads back from its own receipt: under concurrency a second read
+    ///         of contract state could see somebody else's activation, while the
+    ///         log in your own receipt is unambiguously yours.
+    event Activated(
+        uint256 indexed tokenId,
+        address indexed owner,
+        uint256 sessionId,
+        uint256 seatIndex,
+        uint256 expiresAt
+    );
+
+    /// @notice A seat was handed back before its TTL lapsed: by {release}, or
+    ///         by a transfer, which ends every session the previous holder had
+    ///         open. `owner` is the holder whose session it was.
+    event Released(
+        uint256 indexed tokenId,
+        address indexed owner,
+        uint256 sessionId,
+        uint256 seatIndex
+    );
 
     // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -384,6 +543,10 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
     error WithdrawFailed();
     error NotTokenOwner(address caller, address owner);
     error CooldownActive(uint256 blocksRemaining);
+    error SeatsOutOfRange(uint256 value, uint256 minimum, uint256 maximum);
+    error SessionTtlOutOfRange(uint256 value, uint256 minimum, uint256 maximum);
+    error FleetExhausted(uint256 tokenId, uint256 seatsInUse, uint256 seats);
+    error SeatNotHeld(uint256 tokenId, uint256 sessionId);
     error ZeroWrapperHash();
     error WrapperHashAlreadyKnown(bytes32 hash);
     error WrapperHashNotValid(bytes32 hash);
@@ -402,13 +565,28 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         SaleTerms memory sale_,
         FeeTerms memory fee_,
         uint256 supplyCap_,
-        uint256 cooldownBlocks_,
+        SessionTerms memory session_,
         address predecessor_,
         address owner_
     ) ERC721(name_, symbol_) Ownable(owner_) {
         if (identity_.model > 1) revert InvalidIdentityModel(identity_.model);
-        if (cooldownBlocks_ < MIN_COOLDOWN_BLOCKS) {
-            revert CooldownTooSmall(cooldownBlocks_, MIN_COOLDOWN_BLOCKS);
+        if (session_.cooldownBlocks < MIN_COOLDOWN_BLOCKS) {
+            revert CooldownTooSmall(session_.cooldownBlocks, MIN_COOLDOWN_BLOCKS);
+        }
+        // A token grants at least one seat and at most {MAX_SEATS}. Zero would
+        // deploy a licence that can never open a session at all.
+        if (session_.seatsPerToken == 0 || session_.seatsPerToken > MAX_SEATS) {
+            revert SeatsOutOfRange(session_.seatsPerToken, 1, MAX_SEATS);
+        }
+        if (
+            session_.sessionTtlSeconds < MIN_SESSION_TTL_SECONDS
+                || session_.sessionTtlSeconds > MAX_SESSION_TTL_SECONDS
+        ) {
+            revert SessionTtlOutOfRange(
+                session_.sessionTtlSeconds,
+                MIN_SESSION_TTL_SECONDS,
+                MAX_SESSION_TTL_SECONDS
+            );
         }
         // Account model must pick a TBA implementation; access model must not.
         if (identity_.model == 1 && identity_.tbaImplementation == address(0)) {
@@ -461,7 +639,9 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         feeBps = fee_.feeBps;
         treasury = fee_.treasury;
         supplyCap = supplyCap_;
-        cooldownBlocks = cooldownBlocks_;
+        cooldownBlocks = session_.cooldownBlocks;
+        seatsPerToken = session_.seatsPerToken;
+        sessionTtlSeconds = session_.sessionTtlSeconds;
         predecessor = predecessor_;
 
         // The launch release seeds the set; later builds append to it.
@@ -733,48 +913,273 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
         return wasClaimed[tokenId];
     }
 
-    // ── Activation (tier 3) ───────────────────────────────────────────────────
+    // ── Activation: seats (tier 3, §3.4) ──────────────────────────────────────
 
-    /// @notice View helper - returns whether `tokenId` can be activated now,
-    ///         and how many blocks remain if not.
+    /// @notice What {activate} would do for `tokenId` at this block, in one
+    ///         call: whether it would succeed, which seat it would take, how
+    ///         many seats are in use, and what to wait for if it would not.
+    ///
+    /// The whole answer, because the two ways an activation can be refused need
+    /// different responses and an orchestrator must not have to guess which it
+    /// is looking at. `!ready && !fleetExhausted` is a cooldown, and
+    /// `blocksRemaining` says how long. `fleetExhausted` is a full fleet, and
+    /// `secondsRemaining` says when the next seat lapses. Branch on that field
+    /// rather than on `seatsInUse == seats`: on a single-seat licence the one
+    /// occupied seat is its holder's to retake, so the counts read "full" about
+    /// a seat that is not.
+    function activationStatus(uint256 tokenId) external view returns (ActivationStatus memory) {
+        Selection memory selected = _selectSeat(tokenId);
+        return ActivationStatus({
+            ready: selected.ready,
+            fleetExhausted: !selected.ready && selected.blocksRemaining == 0,
+            seatIndex: selected.seatIndex,
+            seatsInUse: selected.inUse,
+            seats: seatsPerToken,
+            blocksRemaining: selected.blocksRemaining,
+            secondsRemaining: selected.secondsRemaining
+        });
+    }
+
+    /// @notice How many of `tokenId`'s seats currently hold a live session.
+    ///
+    /// Computed rather than stored: a lapsed seat frees itself, and nothing
+    /// writes to storage to make that true. Counting on read is what lets the
+    /// TTL be lazy - see {sessionTtlSeconds}.
+    function seatsInUse(uint256 tokenId) external view returns (uint256 inUse) {
+        return _selectSeat(tokenId).inUse;
+    }
+
+    /// @notice One seat's raw state. `index` must be below {seatsPerToken}.
+    function seatAt(uint256 tokenId, uint256 index) external view returns (Seat memory) {
+        if (index >= seatsPerToken) revert SeatsOutOfRange(index, 0, seatsPerToken - 1);
+        return _seats[tokenId][index];
+    }
+
+    /// @notice Whether `sessionId` still holds a seat on `tokenId`, and which.
+    ///
+    /// The read a holder makes about a session it already has, rather than about
+    /// the token as a whole: `live` goes false when the session's seat is
+    /// released or its TTL lapses.
+    function sessionSeat(uint256 tokenId, uint256 sessionId)
+        external
+        view
+        returns (bool live, uint256 index)
+    {
+        uint256 seats = seatsPerToken;
+        for (uint256 i = 0; i < seats; ++i) {
+            Seat storage seat = _seats[tokenId][i];
+            if (seat.sessionId == sessionId && seat.expiresAt > block.timestamp) {
+                return (true, i);
+            }
+        }
+        return (false, 0);
+    }
+
+    /// @notice Block of the most recent activation on any of `tokenId`'s seats.
+    ///         `0` means the token has never been activated.
+    ///
+    /// A watch polls this to notice that an `activate()` landed without holding
+    /// a log subscription open. It is not the cooldown: each seat carries its
+    /// own stamp, and {activationStatus} is what says whether one is ready.
+    function lastActivationBlock(uint256 tokenId) external view returns (uint256 blockNumber) {
+        uint256 seats = seatsPerToken;
+        for (uint256 i = 0; i < seats; ++i) {
+            uint256 activatedAt = _seats[tokenId][i].activatedAt;
+            if (activatedAt > blockNumber) blockNumber = activatedAt;
+        }
+    }
+
+    /// @notice View helper - whether the *cooldown* is what stands in the way,
+    ///         and how many blocks remain if it is.
+    ///
+    /// Deliberately narrow: it answers about the cooldown alone. A full fleet is
+    /// not a cooldown and reports `(false, 0)` here, which is why anything that
+    /// has to tell the two apart reads {activationStatus} instead. On a
+    /// single-seat licence there is no fleet to exhaust, so this is the whole
+    /// answer and means exactly what it did before seats existed.
     function cooldownReady(uint256 tokenId)
         external
         view
         returns (bool ready, uint256 blocksRemaining)
     {
-        uint256 last = lastActivationBlock[tokenId];
-        if (last == 0) return (true, 0);
-        uint256 elapsed = block.number - last;
-        if (elapsed >= cooldownBlocks) return (true, 0);
-        return (false, cooldownBlocks - elapsed);
+        Selection memory selected = _selectSeat(tokenId);
+        return (selected.ready, selected.blocksRemaining);
     }
 
-    /// @notice Record a fresh activation for `tokenId` and bump its session id.
+    /// @notice Take a seat on `tokenId` and open a session on it.
     ///
-    /// Must be called by the token's current owner. Reverts if the previous
-    /// activation was fewer than `cooldownBlocks` ago. The first activation
-    /// (`lastActivationBlock == 0`) bypasses the cooldown check.
+    /// Must be called by the token's current owner. Admits up to
+    /// {seatsPerToken} live sessions at once; the seat taken is the first that
+    /// is available *and* off its own cooldown. Reverts {FleetExhausted} when
+    /// every seat holds a live session none of which may be retaken, and
+    /// {CooldownActive} when a seat is available but has not served out
+    /// `cooldownBlocks`.
     ///
-    /// Reads exactly two things: who owns the token, and when it last
-    /// activated. Not the wrapper hash set, not `successor`, not `price`, and
+    /// **Seats multiply concurrency, never the churn rate.** Each seat carries
+    /// its own stamp and a seat's stamp is never cleared, so a token lands at
+    /// most {seatsPerToken} activations in any window of `cooldownBlocks`
+    /// blocks - `seatsPerToken` times the single-seat rate and not one more,
+    /// whatever anybody releases, lets lapse, or retakes.
+    ///
+    /// **A single-seat licence has no fleet to exhaust, and retaking its one
+    /// seat is what tier 3 has always done**: one session at a time, and
+    /// opening a new one ends the old. That is the behaviour seats generalise
+    /// rather than replace, and it is why `seatsPerToken == 1` never reverts
+    /// {FleetExhausted}. It takes nothing away from anybody: the only party who
+    /// can hold that seat is the holder calling this, so refusing them instead
+    /// would lock a sole holder out of their own licence for a whole
+    /// `sessionTtlSeconds` whenever their session record went missing - a
+    /// licence that stops working for the person who owns it. It costs no
+    /// churn, because the retake still waits out the seat's own stamp.
+    ///
+    /// Above one seat the rule stops, and deliberately: there, a seat you
+    /// cannot account for may be another instance's, and reporting that rather
+    /// than evicting it is the whole point of {FleetExhausted}.
+    ///
+    /// Reads exactly two things: who owns the token, and the state of its own
+    /// seats. Not the wrapper hash set, not `successor`, not `price`, and
     /// nothing the contract owner can reach. There is no pause.
     function activate(uint256 tokenId) external returns (uint256 sessionId) {
         address tokenOwner = ownerOf(tokenId);
         if (tokenOwner != msg.sender) revert NotTokenOwner(msg.sender, tokenOwner);
 
-        uint256 last = lastActivationBlock[tokenId];
-        if (last != 0) {
-            uint256 elapsed = block.number - last;
-            if (elapsed < cooldownBlocks) revert CooldownActive(cooldownBlocks - elapsed);
+        Selection memory selected = _selectSeat(tokenId);
+        if (!selected.ready) {
+            // A wait measured in blocks means a seat is available and only the
+            // cooldown is in the way. None means there is no seat to wait for.
+            if (selected.blocksRemaining != 0) {
+                revert CooldownActive(selected.blocksRemaining);
+            }
+            revert FleetExhausted(tokenId, selected.inUse, seatsPerToken);
         }
 
-        lastActivationBlock[tokenId] = block.number;
         unchecked {
             sessionId = ++_sessionCounter;
         }
-        activeSessionId[tokenId] = sessionId;
+        uint256 expiresAt = block.timestamp + sessionTtlSeconds;
 
-        emit Activated(tokenId, msg.sender, sessionId);
+        Seat storage seat = _seats[tokenId][selected.seatIndex];
+        // Both casts are safe for as long as this contract can be called at
+        // all: `sessionTtlSeconds` is capped at {MAX_SESSION_TTL_SECONDS}, so
+        // `expiresAt` is a Unix timestamp bounded by now plus ninety days, and
+        // uint64 holds both it and a block number until long after the sun.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        seat.activatedAt = uint64(block.number);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        seat.expiresAt = uint64(expiresAt);
+        seat.sessionId = sessionId;
+
+        emit Activated(tokenId, msg.sender, sessionId, selected.seatIndex, expiresAt);
+    }
+
+    /// @notice Hand back the seat `sessionId` holds on `tokenId`, before its
+    ///         TTL lapses.
+    ///
+    /// The teardown verb: an orchestrator retiring a fleet instance gets the
+    /// seat back immediately instead of waiting out {sessionTtlSeconds}.
+    ///
+    /// **Token holder only, and that is load-bearing.** The contract owner
+    /// cannot reach this, so there is no path by which anyone but the holder can
+    /// end a session - a holder freeing their own seat is not revocation, and an
+    /// admin doing it would be. See `test/Rub3Invariants.t.sol`.
+    ///
+    /// **It frees occupancy, never the cooldown.** The seat's `activatedAt`
+    /// stamp is left exactly where it was, so releasing and re-activating costs
+    /// the same `cooldownBlocks` as never releasing at all. That is what stops
+    /// {release} becoming a way to churn faster than the cooldown intends.
+    ///
+    /// Reverts {SeatNotHeld} when no live seat holds that session - including
+    /// when it already lapsed, which needs no release.
+    function release(uint256 tokenId, uint256 sessionId) external {
+        address tokenOwner = ownerOf(tokenId);
+        if (tokenOwner != msg.sender) revert NotTokenOwner(msg.sender, tokenOwner);
+
+        uint256 seats = seatsPerToken;
+        for (uint256 i = 0; i < seats; ++i) {
+            Seat storage seat = _seats[tokenId][i];
+            if (seat.sessionId == sessionId && seat.expiresAt > block.timestamp) {
+                seat.sessionId = 0;
+                seat.expiresAt = 0;
+                emit Released(tokenId, msg.sender, sessionId, i);
+                return;
+            }
+        }
+        revert SeatNotHeld(tokenId, sessionId);
+    }
+
+    /// @dev What one scan of a token's seats found.
+    struct Selection {
+        /// A seat is available and off its cooldown.
+        bool ready;
+        /// The lowest such seat; `0` when there is none.
+        uint256 seatIndex;
+        /// Seats holding a session that has not lapsed or been released.
+        uint256 inUse;
+        /// Blocks until the earliest *available* seat leaves its cooldown. `0`
+        /// when one already has, and `0` when no seat is available at all -
+        /// which is what tells {activate} the two refusals apart.
+        uint256 blocksRemaining;
+        /// Seconds until the earliest *occupied* seat lapses; `0` when none is
+        /// occupied.
+        uint256 secondsRemaining;
+    }
+
+    /// @dev The one seat scan. {activate} and every view that reports on seats
+    ///      go through it, so what a caller is told and what the transaction
+    ///      does cannot drift apart.
+    ///
+    ///      Bounded by {MAX_SEATS} and reads one packed slot per seat: the
+    ///      occupancy check and the cooldown stamp share it.
+    function _selectSeat(uint256 tokenId) private view returns (Selection memory selected) {
+        uint256 seats = seatsPerToken;
+        uint256 cooldown = cooldownBlocks;
+        selected.blocksRemaining = type(uint256).max;
+        selected.secondsRemaining = type(uint256).max;
+
+        // A single-seat licence's one seat is always its holder's to retake -
+        // see {activate}. Above one seat an occupied seat may be another
+        // instance's, so occupancy is what makes it unavailable.
+        bool retakeable = seats == 1;
+
+        for (uint256 i = 0; i < seats; ++i) {
+            Seat storage seat = _seats[tokenId][i];
+            uint256 expiresAt = seat.expiresAt;
+
+            if (expiresAt > block.timestamp) {
+                unchecked {
+                    ++selected.inUse;
+                }
+                uint256 lapsesIn = expiresAt - block.timestamp;
+                if (lapsesIn < selected.secondsRemaining) selected.secondsRemaining = lapsesIn;
+                if (!retakeable) continue;
+            }
+
+            // Available: never taken, released, lapsed, or this holder's own
+            // single seat. Only the stamp decides whether it may be taken yet.
+            uint256 last = seat.activatedAt;
+            if (last == 0) {
+                if (!selected.ready) {
+                    selected.ready = true;
+                    selected.seatIndex = i;
+                }
+                continue;
+            }
+            uint256 elapsed = block.number - last;
+            if (elapsed >= cooldown) {
+                if (!selected.ready) {
+                    selected.ready = true;
+                    selected.seatIndex = i;
+                }
+            } else {
+                uint256 wait = cooldown - elapsed;
+                if (wait < selected.blocksRemaining) selected.blocksRemaining = wait;
+            }
+        }
+
+        if (selected.ready || selected.blocksRemaining == type(uint256).max) {
+            selected.blocksRemaining = 0;
+        }
+        if (selected.secondsRemaining == type(uint256).max) selected.secondsRemaining = 0;
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
@@ -1017,12 +1422,36 @@ abstract contract Rub3License is ERC721, ERC721Enumerable, Ownable, ReentrancyGu
 
     // ── Required overrides (ERC721 + ERC721Enumerable) ────────────────────────
 
+    /// @dev A transfer hands the token's seats to its new holder with nothing on
+    ///      them. Every session the previous holder had open is ended here, so
+    ///      a resold fleet licence is its buyer's to use at once rather than
+    ///      after the seller's sessions lapse; and every seat's `activatedAt`
+    ///      stamp is left exactly where it was, so a transfer buys no churn
+    ///      beyond what `cooldownBlocks` allows. Not a revocation surface: the
+    ///      seller holds no token once this runs, and the licence following the
+    ///      token is what `ownerOf` being validity means. A mint (`from` is the
+    ///      zero address) frees nothing.
     function _update(address to, uint256 tokenId, address auth)
         internal
         override(ERC721, ERC721Enumerable)
-        returns (address)
+        returns (address from)
     {
-        return super._update(to, tokenId, auth);
+        from = super._update(to, tokenId, auth);
+        if (from != address(0)) _endSessionsOnTransfer(tokenId, from);
+    }
+
+    /// @dev Frees the occupancy of every live seat on `tokenId`, and nothing
+    ///      else: the same write {release} makes, for every seat at once.
+    function _endSessionsOnTransfer(uint256 tokenId, address previousHolder) private {
+        uint256 seats = seatsPerToken;
+        for (uint256 i = 0; i < seats; ++i) {
+            Seat storage seat = _seats[tokenId][i];
+            if (seat.expiresAt <= block.timestamp) continue;
+            uint256 sessionId = seat.sessionId;
+            seat.sessionId = 0;
+            seat.expiresAt = 0;
+            emit Released(tokenId, previousHolder, sessionId, i);
+        }
     }
 
     function _increaseBalance(address account, uint128 value)

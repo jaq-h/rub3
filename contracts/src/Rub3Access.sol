@@ -28,7 +28,7 @@ contract Rub3Access is Rub3License {
         SaleTerms memory sale_,
         FeeTerms memory fee_,
         uint256 supplyCap_,
-        uint256 cooldownBlocks_,
+        SessionTerms memory session_,
         address predecessor_,
         address owner_
     )
@@ -40,7 +40,7 @@ contract Rub3Access is Rub3License {
             sale_,
             fee_,
             supplyCap_,
-            cooldownBlocks_,
+            session_,
             predecessor_,
             owner_
         )

@@ -41,6 +41,15 @@ struct Cli {
     #[arg(long, requires = "headless")]
     token_id: Option<u64>,
 
+    /// Hand this machine's seat back and exit without launching anything.
+    ///
+    /// The teardown half of concurrent seats (§3.4): a licence grants a fixed
+    /// number of live sessions, and an instance being retired should return its
+    /// seat now rather than after the contract's session TTL. Releases only the
+    /// session cached on this machine, never anybody else's. Headless only.
+    #[arg(long, requires = "headless", conflicts_with = "binary")]
+    release_seat: bool,
+
     /// Arguments to pass through to the wrapped binary
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -56,6 +65,12 @@ fn provenance() -> &'static str {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Teardown, not a launch: it resolves no binary, opens no window and
+    // extracts nothing, because nothing is going to run.
+    if cli.release_seat {
+        std::process::exit(run_release_seat(cli.token_id));
+    }
 
     // Resolved before activation so a launch that cannot happen opens no
     // activation window and signs nothing.
@@ -195,6 +210,89 @@ fn run_headless(token_id: Option<u64>) -> Result<rub3_wrapper::Launch, i32> {
             Err(e.exit_code())
         }
     }
+}
+
+/// Runs `--release-seat`. Returns the process exit code.
+#[cfg(feature = "headless")]
+fn run_release_seat(token_id: Option<u64>) -> i32 {
+    use rub3_wrapper::activation::{HeadlessContext, HeadlessError, ReleaseOutcome};
+    use rub3_wrapper::signer::resolve_signer;
+
+    let signer = match resolve_signer() {
+        Ok(signer) => signer,
+        Err(e) => {
+            let e = HeadlessError::Signer(e);
+            report(&e);
+            return e.exit_code();
+        }
+    };
+
+    let ctx = HeadlessContext {
+        app_id: packed::APP_ID.to_string(),
+        contract: packed::CONTRACT.to_string(),
+        chain_id: packed::CHAIN_ID,
+        rpc_url: packed::RPC_URL.to_string(),
+        session_ttl_secs: packed::SESSION_TTL_SECS,
+        token_id,
+    };
+
+    match rub3_wrapper::release_headless(signer.as_ref(), &ctx) {
+        Ok(ReleaseOutcome::Released {
+            token_id,
+            session_id,
+            tx_hash,
+        }) => {
+            eprintln!("rub3: seat released token_id={token_id} session_id={session_id}");
+            eprintln!("rub3-detail: token_id={token_id} session_id={session_id} tx_hash={tx_hash}");
+            activation::EXIT_OK
+        }
+        // Nothing to hand back is the outcome an orchestrator asked for, so it
+        // is a success. The `released=false` key is how it tells the two apart
+        // without parsing the sentence above it.
+        //
+        // A record that was found and refused gets said out loud, because the
+        // seat it names may really be held: unreported, an operator whose
+        // session file a crash truncated reads the same `released=false` as one
+        // whose teardown had nothing to do, and waits out the contract's whole
+        // `sessionTtlSeconds` without knowing there is a seat to recover. The
+        // exit code is unchanged - this is still the outcome that was asked
+        // for - so nothing branching on the code is affected.
+        Ok(ReleaseOutcome::NoSeatHeld { token_id, rejected }) => {
+            if let Some(why) = &rejected {
+                eprintln!("rub3: warning: a session record was found and not released: {why}");
+            }
+            let rejected = rejected
+                .as_ref()
+                .map(|why| format!(" rejected={}", why.key()))
+                .unwrap_or_default();
+            match token_id {
+                Some(token_id) => {
+                    eprintln!("rub3: no seat held for token {token_id}; nothing to release");
+                    eprintln!("rub3-detail: token_id={token_id} released=false{rejected}");
+                }
+                None => {
+                    eprintln!(
+                        "rub3: this machine holds no seat on this contract; nothing to release"
+                    );
+                    eprintln!("rub3-detail: released=false{rejected}");
+                }
+            }
+            activation::EXIT_OK
+        }
+        Err(e) => {
+            report(&e);
+            e.exit_code()
+        }
+    }
+}
+
+#[cfg(not(feature = "headless"))]
+fn run_release_seat(_token_id: Option<u64>) -> i32 {
+    eprintln!(
+        "error: --release-seat requires a build with the `headless` feature \
+         (rebuild with --features headless)"
+    );
+    activation::EXIT_HEADLESS_UNSUPPORTED
 }
 
 /// Prints a failure as one human line plus, when the failure has structured

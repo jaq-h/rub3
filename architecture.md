@@ -143,7 +143,7 @@ If the developer wants the TBA to actually hold assets or execute transactions o
 
 The developer chooses a security tier when packaging their app. Each tier is a coherent bundle of verification behaviors - higher tiers add on-chain enforcement and device binding to prevent license sharing.
 
-**Agent-consumer note.** The ladder above tier 2 is calibrated to *human* piracy economics (signing oracles, license sharing). Agent customers change the calculus: agents don't pirate - paying cents in USDC is cheaper than engineering theft, and their operators impose spend policy and compliance. Meanwhile agent fleets legitimately clone VMs and scale horizontally, which device binding treats as an attack. In practice: tiers 0–2 cover most agent-consumed software; tier 3's session counter generalizes to **concurrent seats** (`maxConcurrentSessions[tokenId] = K` - an on-chain semaphore licensing K fleet instances per token; implementation.md §3.4); and tier 4 plus binary encryption are **deferred** (implementation.md §Deferred).
+**Agent-consumer note.** The ladder above tier 2 is calibrated to *human* piracy economics (signing oracles, license sharing). Agent customers change the calculus: agents don't pirate - paying cents in USDC is cheaper than engineering theft, and their operators impose spend policy and compliance. Meanwhile agent fleets legitimately clone VMs and scale horizontally, which device binding treats as an attack. In practice: tiers 0–2 cover most agent-consumed software; tier 3's single session generalizes to **concurrent seats** (`seatsPerToken` seats per token, licensing K fleet instances on one licence; implementation.md §3.4); and tier 4 plus binary encryption are **deferred** (implementation.md §Deferred).
 
 ```toml
 [license]
@@ -177,8 +177,9 @@ Signature-only verification. The wallet signs once at activation, the proof is s
 
 Adds a session with TTL. The wallet signs a session message at activation. The wrapper checks signature and expiry locally on each launch. On expiry, the user must re-authenticate with their wallet (re-sign). No on-chain calls at launch.
 
-- **Hash inputs**: `SHA-256(app_id || token_id || wallet || nonce || expires_at)`
+- **Hash inputs**: `SHA-256(app_id || chain_id || contract || token_id || identity || user_id || wallet || nonce || expires_at)`
 - **Verification**: Signature recovery + expiry check
+- **What the deploy fields buy**: `chain_id` + `contract` name the deploy the record belongs to. Every guard that asks "is this record one this build may act on" compares them, and the session directory is user-writable, so unsigned they would be the one part of a genuine record a tamperer could rewrite.
 - **Renewal**: Wallet re-signs a new session (off-chain, no gas)
 - **Sharing risk**: Copied session file works until `expires_at`. Setting a shorter TTL reduces the window.
 
@@ -193,27 +194,14 @@ Adds an `ownerOf()` RPC read on every launch. The wrapper confirms the wallet in
 
 ### Tier 3: `cooldown`
 
-Adds on-chain activation with a cooldown and session revocation counter. At activation, the wallet sends an `activate()` transaction that records the current block and increments a `sessionId` on-chain. Only one session per token is valid at a time - creating a new one invalidates the old one.
+Adds on-chain activation with a cooldown and a per-token seat table. At activation, the wallet sends an `activate()` transaction that takes a seat and stamps it with the current block, and the contract assigns a fresh `sessionId`. A token grants `seatsPerToken` seats, so a licence admits that many live sessions at once; the single-seat default is the classic tier-3 licence, where opening a session ends the previous one.
 
-- **Hash inputs**: `SHA-256(app_id || token_id || wallet || nonce || expires_at || activation_block_hash || session_id)`
-- **On-chain state**:
-  ```solidity
-  mapping(uint256 => uint256) public lastActivationBlock;
-  mapping(uint256 => uint256) public activeSessionId;
-  uint256 public immutable cooldownBlocks;
-  uint256 public constant MIN_COOLDOWN_BLOCKS = 15; // ~30s on Base; one TOTP window
-
-  function activate(uint256 tokenId) external returns (uint256 sessionId) {
-      require(ownerOf(tokenId) == msg.sender, "not owner");
-      uint256 last = lastActivationBlock[tokenId];
-      if (last != 0) require(block.number - last >= cooldownBlocks, "cooldown");
-      lastActivationBlock[tokenId] = block.number;
-      activeSessionId[tokenId] = ++_sessionCounter;
-      return activeSessionId[tokenId];
-  }
-  ```
-- **Verification**: Signature + expiry + `ownerOf()` + `activeSessionId()` view call. If session_id doesn't match on-chain value, the session has been superseded.
-- **Sharing risk**: Holder can generate 1 session per cooldown window. Creating a session for a pirate kills the holder's own session. The holder must choose: keep access or give it away. Cannot scale to multiple pirates.
+- **Hash inputs**: `SHA-256(app_id || chain_id || contract || token_id || identity || user_id || wallet || nonce || expires_at || activation_block_hash || session_id)`
+- **On-chain state**: see [Rub3Access (one-time purchase)](#rub3access-one-time-purchase) below for the shape as built. The parameters a buyer reads before paying are `cooldownBlocks`, `seatsPerToken` and `sessionTtlSeconds`, all `immutable`.
+- **Verification**: signature and expiry locally on every launch, plus the record's signed `chain_id` and `contract` matching the packed deploy, so a record written against a testnet deploy or another contract under the same `app_id` never launches this build. No `ownerOf` read is made for a cached session. On a sampled launch (about one in five) the wrapper checks the activation transaction's own receipt and asks `sessionSeat(tokenId, sessionId)` whether the session still holds its seat; it binds to the receipt rather than re-reading contract state because under seats a fleet coming up puts several activations in one block.
+- **Sharing risk**: A token lands at most `seatsPerToken` activations per cooldown window - `seatsPerToken` times the single-seat rate and not one more, whatever anybody releases or lets lapse. At one seat, creating a session for a pirate kills the holder's own session, so the holder must choose between keeping access and giving it away. Above one seat, concurrency is what the holder paid for, and the licence refuses the K+1th *activation* rather than evicting anybody.
+- **Transfer**: the seats follow the token. A transfer ends every session the previous holder had open, freeing each live seat's occupancy and leaving its cooldown stamp where it was, so a resold fleet licence is its buyer's to fill as soon as the seats' own cooldowns allow and a sale buys no churn. A mint frees nothing. The seller's cached session fails its next sampled launch, since its seat is gone.
+- **Where the seat bound is enforced**: unconditionally at activation, since `activate()` is the contract admitting the session at all. At launch it is re-read only on the launches `should_reverify` samples, about one in five: `verify_onchain` asks `sessionSeat(tokenId, sessionId)` whether the seat is still that session's, and a released or lapsed seat fails the launch. So a copied session file whose seat has since gone to somebody else keeps running until its next sampled launch, and a copy taken while the original's seat is live shares that seat and is not detected at all - two instances on one session id are one seat to the contract. Binding a session to the machine that took the seat is tier 4's job, and tier 4 is deferred.
 
 ### Tier 4: `hardened` *(deferred)*
 
@@ -228,10 +216,10 @@ Would bind a session to the machine that created it with an on-chain registered 
 | **Launch cost** | 0 | 0 | 0 (view call) | 0 (view call) | 0 (view call) |
 | **Network at launch** | No | No | Yes | Yes | Yes |
 | **Offline support** | Full | Within TTL | Grace window | Grace window | None |
-| **Copy session file** | Works | Works until TTL | Fails on transfer | Fails (session_id) | Fails (no device key) |
-| **Signing oracle** | Works | Works until TTL | Works (real owner) | 1 per cooldown, kills own session | 1 per cooldown + bound to 1 device |
-| **VM clone attack** | Works | Works | Works | Works (1 active) | Blocked by enclave; possible with vTPM |
-| **Hash components** | `app_id`, `token_id` | + `wallet`, `nonce`, `expires_at` | Same as 1 | + `block_hash`, `session_id` | + `device_pubkey` |
+| **Copy session file** | Works | Works until TTL | Fails on transfer | Works while the seat is live; fails on a sampled launch once the seat is gone | Fails (no device key) |
+| **Signing oracle** | Works | Works until TTL | Works (real owner) | K per cooldown, and every seat handed out is one the holder loses | K per cooldown + bound to K devices |
+| **VM clone attack** | Works | Works | Works | K activations per cooldown window are bought; clones sharing one session id share its seat | Blocked by enclave; possible with vTPM |
+| **Hash components** | `app_id`, `token_id` | + `chain_id`, `contract`, `identity`, `user_id`, `wallet`, `nonce`, `expires_at` | Same as 1 | + `block_hash`, `session_id` | + `device_pubkey` |
 
 ---
 
@@ -357,7 +345,7 @@ For interactive builds, how the "wait" happens is an orthogonal concern. **Two i
 
 Manual is the floor and stays available whatever else lands: no dependencies, and the one path that still works when the user's machine is offline as they open the wrapper but they want to send the tx from a hardware wallet elsewhere and paste the hash later.
 
-The design commitment behind the richer modes is that they are **additive tabs on the same screens, not replacements**. Whichever tab produces a tx hash hands off to the same receipt poller, which validates `status == true`, asserts `receipt.to == contract`, and recovers the minted tokenId (purchase) or the `activeSessionId` (activate). The rest of the session pipeline does not care which tab the hash came from, so adding a mode cannot change what a confirmed activation means. Availability is decided at build and deploy time: Auto-detect requires `onchain-write` (always present in tiers 3-4); WalletConnect requires the `wallet-connect` Cargo feature and a non-placeholder `wc_project_id` in the packed wrapper, since the Reown project id is developer-supplied per deployment rather than a shared rub3 credential. WalletConnect remains a Phase 5 item (implementation.md §5.1b).
+The design commitment behind the richer modes is that they are **additive tabs on the same screens, not replacements**. Whichever tab produces a tx hash hands off to the same receipt poller, which validates `status == true`, asserts `receipt.to == contract`, and recovers the minted tokenId (purchase) or, for an activation, the seat and session id from the `Activated` log in that transaction's own receipt. The rest of the session pipeline does not care which tab the hash came from, so adding a mode cannot change what a confirmed activation means. Availability is decided at build and deploy time: Auto-detect requires `onchain-write` (always present in tiers 3-4); WalletConnect requires the `wallet-connect` Cargo feature and a non-placeholder `wc_project_id` in the packed wrapper, since the Reown project id is developer-supplied per deployment rather than a shared rub3 credential. WalletConnect remains a Phase 5 item (implementation.md §5.1b).
 
 ---
 
@@ -382,60 +370,16 @@ On-chain check: `ownerOf(tokenId) == walletAddress`
 
 #### Activation and session management (tiers 3-4)
 
-`Rub3Access` includes the activation/session management interface for tiers 3-4:
-
-```solidity
-// ── State ──
-mapping(uint256 => uint256) public lastActivationBlock;
-mapping(uint256 => uint256) public activeSessionId;
-mapping(uint256 => bytes32) public registeredDevice;  // tier 4 only
-uint256 public immutable cooldownBlocks;
-uint256 public constant MIN_COOLDOWN_BLOCKS = 15; // ~30s on Base; one TOTP window
-uint256 private _sessionCounter;
-
-// ── Events ──
-event Activated(uint256 indexed tokenId, address indexed owner, uint256 sessionId);
-
-// ── Helpers ──
-function cooldownReady(uint256 tokenId)
-    external view returns (bool ready, uint256 blocksRemaining)
-{
-    uint256 last = lastActivationBlock[tokenId];
-    if (last == 0) return (true, 0);
-    uint256 elapsed = block.number - last;
-    if (elapsed >= cooldownBlocks) return (true, 0);
-    return (false, cooldownBlocks - elapsed);
-}
-
-// ── Tier 3: cooldown activation ──
-function activate(uint256 tokenId) external returns (uint256 sessionId) {
-    require(ownerOf(tokenId) == msg.sender, "not owner");
-    uint256 last = lastActivationBlock[tokenId];
-    if (last != 0) require(block.number - last >= cooldownBlocks, "cooldown");
-    lastActivationBlock[tokenId] = block.number;
-    activeSessionId[tokenId] = ++_sessionCounter;
-    emit Activated(tokenId, msg.sender, activeSessionId[tokenId]);
-    return activeSessionId[tokenId];
-}
-
-// ── Tier 4: hardened activation with device key registration ──
-function activateDevice(uint256 tokenId, bytes32 devicePubKey) external returns (uint256 sessionId) {
-    require(ownerOf(tokenId) == msg.sender, "not owner");
-    uint256 last = lastActivationBlock[tokenId];
-    if (last != 0) require(block.number - last >= cooldownBlocks, "cooldown");
-    lastActivationBlock[tokenId] = block.number;
-    activeSessionId[tokenId] = ++_sessionCounter;
-    registeredDevice[tokenId] = devicePubKey;
-    emit Activated(tokenId, msg.sender, activeSessionId[tokenId]);
-    return activeSessionId[tokenId];
-}
-```
+`Rub3License` holds the activation interface for tiers 3-4, and `Rub3Access` inherits it. The shape as built - the `Seat` struct, `activate`, `release`, `activationStatus` and the rest - is in `contracts/src/Rub3License.sol`; the design is implementation.md §3.4.
 
 Key behaviors:
-- **Cooldown**: `activate()`/`activateDevice()` reverts if fewer than `cooldownBlocks` have elapsed since the last activation for that token. Limits how often new sessions can be created.
-- **Session revocation**: Each activation increments `activeSessionId`. The wrapper reads this value on launch - if the cached session's `session_id` doesn't match, the session has been superseded and is invalid.
-- **Device binding (tier 4)**: `registeredDevice` stores the public key of the device that activated. The wrapper signs each launch's block hash with its device private key and verifies against this on-chain value.
-- **Single active session**: Creating a new session (for a pirate) immediately invalidates the holder's own session. The holder must choose between keeping access or giving it away.
+- **Seats**: `seatsPerToken` is `immutable` and per contract, so one token admits that many live sessions and nothing can lower a held token's concurrency. `activate()` takes the first seat that is available and off its cooldown, and reverts `FleetExhausted(tokenId, seatsInUse, seats)` when there is none. `activationStatus(tokenId)` answers the whole question in one call, which is what lets a caller tell a full fleet from a cooldown without parsing a revert.
+- **Cooldown, per seat**: `activate()` reverts if fewer than `cooldownBlocks` have elapsed since that *seat's* last activation. Per seat rather than per token because a token-level cooldown would serialise a fleet's start-up; the rate is unchanged per seat, so a token lands at most `seatsPerToken` activations per window.
+- **Freeing a seat**: `release(tokenId, sessionId)` hands one back at once, and `sessionTtlSeconds` frees it anyway if nobody does - a fleet instance that dies without releasing must not strand a seat forever. Expiry is lazy: nothing sweeps, and a lapsed seat is simply free the next time anything looks. **Neither frees the seat's cooldown stamp**, which is what stops release-then-activate churning faster than `cooldownBlocks` intends.
+- **Only a holder ends a session**: `release` requires `ownerOf(tokenId) == msg.sender`. There is no admin path to a live session, and the two signatures that would be one are on the forbidden-selector list.
+- **A transfer ends the previous holder's sessions**: `_update` frees every live seat's occupancy on a transfer, never on a mint, and leaves every `activatedAt` stamp alone, so the buyer inherits free seats that still owe whatever cooldown they were serving. Internal behaviour only: nothing owner-callable or admin-callable frees a seat.
+- **One seat is the tier-3 licence**: at `seatsPerToken == 1` the single seat is always its holder's to retake, so opening a session ends the previous one and the cooldown is the only thing that refuses. A sole holder is never locked out of their own licence by a lost session record.
+- **Device binding (tier 4)**: `registeredDevice` would store the public key of the device that activated. Deferred; see "Deferred designs".
 
 #### Rub3Factory *(implementation.md §2.3)*
 
@@ -534,15 +478,17 @@ Covers contract bugs, paid major versions, and chain migration. Three hard guara
 
 The distinction matters because an agent can verify the first list before buying and can only trust the second.
 
-**Bytecode** - check these against the deployed runtime code. The 25 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, the set the copy-pasteable loop in `contracts/contracts.md` scans for, and the set `attest::FORBIDDEN_SIGNATURES` mirrors in the wrapper. Those selector rows are a **diagnostic**: a blacklist of names proves nothing by its silence, and the last row - the fingerprint comparison - is what actually decides whether the deployed code is this repository's. (The rows also name `wrapperHashList()`, `feeBps()` and `treasury()`, which are functions that *do* exist and are read as part of the check.)
+**Bytecode** - check these against the deployed runtime code. The 30 forbidden selectors named across the rows below are exactly the set `contracts/test/Rub3Invariants.t.sol` asserts absent, the set the copy-pasteable loop in `contracts/contracts.md` scans for, and the set `attest::FORBIDDEN_SIGNATURES` mirrors in the wrapper. Those selector rows are a **diagnostic**: a blacklist of names proves nothing by its silence, and the last row - the fingerprint comparison - is what actually decides whether the deployed code is this repository's. (The rows also name `wrapperHashList()`, `feeBps()` and `treasury()`, which are functions that *do* exist and are read as part of the check.)
 
 | Property | How an agent checks it |
 |---|---|
 | No burn, admin transfer, seizure, or pause | The selectors are absent from the runtime bytecode, and a raw call carrying one reverts (there is no fallback). Scan for `burn(uint256)`, `burn(address,uint256)`, `burnFrom(address,uint256)`, `adminTransfer(address,address,uint256)`, `forceTransfer(address,address,uint256)`, `seize(uint256)`, `clawback(uint256)`, `pause()`, `unpause()`, `paused()`, `setPaused(bool)`, `revoke(uint256)`, `revokeToken(uint256)`, `invalidate(uint256)`, `forceMigrate(uint256,address)` |
 | No proxy, no upgrade hook | `upgradeTo(address)`, `upgradeToAndCall(address,bytes)`, `initialize()` absent; contract code hashes stable across blocks |
 | Hash set is append-only | `setWrapperHash(bytes32)`, `removeWrapperHash(bytes32)`, `unrevokeWrapperHash(bytes32)` absent; `wrapperHashList()` only ever grows |
-| Deploy-time parameters frozen | `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` are `immutable` - no `setPredecessor(address)` selector. On `Rub3Factory`, `previousFactory` is `immutable` in the same way, with no `setPreviousFactory(address)`: it decides which predecessors a canonical deploy may name, so repointing it would grant a laundered contract standing after the fact |
+| Deploy-time parameters frozen | `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `seatsPerToken`, `sessionTtlSeconds`, `predecessor` are `immutable` - no `setPredecessor(address)` selector. On `Rub3Factory`, `previousFactory` is `immutable` in the same way, with no `setPreviousFactory(address)`: it decides which predecessors a canonical deploy may name, so repointing it would grant a laundered contract standing after the fact |
 | The protocol fee is frozen per contract | `feeBps` and `treasury` are `immutable` on the licence contract and on the `Rub3Factory` that stamped them; `setFeeBps(uint16)` and `setTreasury(address)` are absent from the runtime bytecode. Read `feeBps()` / `treasury()` before buying and they are what that contract will charge for as long as it exists |
+| Seat count and session TTL are frozen per contract | `seatsPerToken` and `sessionTtlSeconds` are `immutable`, and there is no per-token seat state at all, so nothing can lower the concurrency of a token already held. `setSeatsPerToken(uint256)`, `setMaxConcurrentSessions(uint256,uint256)` and `setSessionTtl(uint256)` are absent from the runtime bytecode. Read `seatsPerToken()` / `sessionTtlSeconds()` before buying and they are what that token grants for as long as it exists |
+| A session can only be ended by its holder | `release(uint256,uint256)` requires `ownerOf(tokenId) == msg.sender`, so no admin path reaches a live session. `revokeSeat(uint256,uint256)` and `clearSeats(uint256)` are absent from the runtime bytecode |
 | Migration cannot be forced | `claimFromPredecessor` is the only mint path outside `purchase` / `purchaseWithAuthorization`, and it checks `ownerOf(...) == msg.sender` on the predecessor |
 | Registry delisting never invalidates a token | `Rub3Registry` (§3.2) reaches a licence contract only through `STATICCALL`, and the EVM refuses any state change under one. Walk the registry's runtime opcodes, skipping each `PUSH1..PUSH32` immediate, and no `CALL`, `CALLCODE`, `DELEGATECALL`, `CREATE`, `CREATE2` or `SELFDESTRUCT` appears at all - so there is no opcode left in it that could write to a licence contract, hold ETH, deploy anything, or destroy itself. `test_audit_registryHoldsNoStateChangingExternalCall` in `contracts/test/Rub3Registry.t.sol` runs exactly that walk, with a positive control on a licence contract, which does contain a `CALL`. What stays convention is how a *consumer* reads a delisting, and the wrapper's reading is that discovery has no bearing on a held token |
 | The deployed code is this repository's template, not a modified copy | Zero the immutable byte ranges published in `contracts/canonical-bytecode.json`, `sha256` the result, and compare against that contract's `deployed_bytecode_sha256`. This is the check every row above depends on: they describe the template, and only a fingerprint match says the deployed contract *is* the template. It is name-independent, so a modified copy exposing seizure under an unguessed name fails it while passing the selector scan. `crates/rub3-wrapper/src/attest.rs` pins the same fingerprints and refuses to purchase without a match. `Rub3Factory.isDeployed(addr)` narrows the same question from the other side - a factory deploy is provably an unmodified template on that factory's terms - but the factory's own code has to be fingerprinted first, and its runtime code does not contain the licence implementation, so verifying one means also comparing `accessDeployer()` against the manifest, which pins all five. A published fingerprint only covers the releases the comparator already has, so a contract built from a **later** release fails this row indistinguishably from a modified copy. `Rub3CodeRegistry` is the append-only on-chain record that tells the two apart (implementation.md §2.9); it is consulted only on a miss, its own code is fingerprinted by this same row before its answer is believed, and none is deployed yet |
@@ -554,7 +500,7 @@ The distinction matters because an agent can verify the first list before buying
 | Code-registry deprecation never invalidates a token | `Rub3CodeRegistry` (§2.9) has no status that could - `Deprecated` is "not recommended for new purchases", and the record stays whole. Bytecode proves the absence of removal and rewrite, which is asserted in `test/Rub3CodeRegistry.t.sol`; what stays convention is how a *consumer* reads the status. The wrapper's reading is to warn and buy, and nothing on its launch path consults the registry at all |
 | The code registry's owner key is not misused | Append-only bounds a compromise of it to *additions*, each a permanent public `Published` event, and leaves it unable to remove, rewrite, or invalidate. That is a bound and a detection surface, not a prevention: alarming on those events is monitoring, and no watcher is built |
 | An honest answer from the RPC endpoint | The fingerprint row above reduces to `eth_getCode`, and its code-registry fallback to `eth_call`, being answered truthfully by whatever endpoint the wrapper was packed with. An endpoint that lies returns canonical code for a hostile contract, and lies about the registry's own code in the same breath, so the second authority neither dilutes this nor compounds it - one dishonest view of chain state defeats both reads at once, and nothing on the machine can tell. **This is the largest residual risk in the whole scheme and it is unclosed.** The honest form of the claim is "an honest view of chain state implies canonical code"; a quorum across independent endpoints, or a light-client-verified read, is what would close it, and neither is built |
-| The immutables behind a canonical fingerprint | The comparison zeroes them by construction, so a match says nothing about `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `predecessor` or the fee terms. Byte-identical canonical code pointed at an attacker-controlled ERC-6551 implementation still matches. Read the getters and check them against a buyer policy - separate work, and not built into the wrapper |
+| The immutables behind a canonical fingerprint | The comparison zeroes them by construction, so a match says nothing about `identityModel`, `tbaImplementation`, `supplyCap`, `cooldownBlocks`, `seatsPerToken`, `sessionTtlSeconds`, `predecessor` or the fee terms. Byte-identical canonical code pointed at an attacker-controlled ERC-6551 implementation still matches. Read the getters and check them against a buyer policy - separate work, and not built into the wrapper |
 | A revoked binary already running keeps running | Deliberate. The hash set informs new downloads and activations; a switch that could stop a running binary would be a revocation surface |
 | The developer keeps publishing builds and hashes | Unenforceable by anyone. It is also the failure mode the invariants are designed to survive: an abandoned contract keeps validating forever, so vendor death depreciates a license rather than confiscating it |
 
@@ -647,7 +593,7 @@ rub3-wrapper
 │   ├── Verify session signature (local, fast)
 │   ├── Check session expiry (tiers 1-3)
 │   ├── Verify ownerOf() on-chain (tiers 2-4)
-│   ├── Verify activeSessionId() on-chain (tiers 3-4)
+│   ├── Verify the activation receipt on-chain (tiers 3-4)
 │   ├── Device key challenge - sign block hash, verify vs on-chain pubkey (tier 4)
 │   ├── On failure: trigger wallet connection flow
 │   └── Write renewed session to disk
@@ -956,6 +902,7 @@ Stored at `~/.rub3/licenses/<app_id>.json`.
   "expires_at":             "2026-04-17T09:00:00Z",
   "signature":              "0x...",
   "chain":                  "base",
+  "chain_id":               8453,
   "contract":               "0x1234...abcd",
   "activation_tx":          "0x...",
   "activation_block":       12345678,
@@ -966,7 +913,7 @@ Stored at `~/.rub3/licenses/<app_id>.json`.
 
 Tiers 1-2 omit `activation_tx`, `activation_block`, `activation_block_hash`, `session_id`. Access model omits `tba` and sets `user_id` to the wallet address.
 
-Signature covers: `SHA-256(app_id || token_id || wallet || nonce || expires_at [|| activation_block_hash || session_id])`.
+Signature covers: `SHA-256(app_id || chain_id || contract || token_id || identity || user_id || wallet || nonce || expires_at [|| activation_block_hash || session_id])`.
 
 ### Tier 4 (hardened, device-bound)
 
@@ -1011,7 +958,7 @@ In account model, the TBA address (`user_id`) is stable across transfers. An att
 Invalidation timing depends on tier:
 - Tiers 1: old session valid until TTL expires (time-limited lame duck)
 - Tier 2: invalid on next launch (`ownerOf` check fails)
-- Tier 3: invalid immediately if new holder activates (session_id changes)
+- Tier 3: the transfer itself ends every session the old holder had open, so the cached session fails at its next sampled launch (about one in five) and cannot be re-activated by a wallet that no longer holds the token
 - Tier 4: invalid immediately (device key + session_id)
 
 This is intentional and matches the semantics: **transfer sells the account to the new holder, who takes full control at the next activation.** Higher tiers make the handover faster.
@@ -1040,7 +987,7 @@ Runtime:       heartbeat IPC (catches a direct launch or a dead wrapper; proves 
 
 - Contract deployment: one per app, ~$1–5 on Base (via `Rub3Factory` - deploys are never charged by rub3; the factory deploy itself is a one-off that rub3 pays, not the developer)
 - Protocol fee: a 2–3% split executed inside `purchase()` on factory deploys, on both payment rails - no additional infrastructure; settlement is continuous and on-chain, with each side sweeping its own balance
-- RPC read calls: varies by tier. Tier 0: zero. Tiers 1-2: one per renewal. Tiers 3-4: one per launch (`activeSessionId` + `ownerOf`). Public RPC or Alchemy free tier sufficient.
+- RPC read calls: varies by tier. Tier 0: zero. Tiers 1-2: one per renewal. Tiers 3-4: one per launch (`ownerOf`), plus `activationStatus` and one `Activated` log decode on an activation. Public RPC or Alchemy free tier sufficient.
 - RPC write calls: tiers 3-4 only. One `activate()`/`activateDevice()` tx per session creation. ~$0.001 on Base.
 - Session files: ~500 bytes each, one per token per device. Negligible storage.
 - Device keys (tier 4): one per token per device. Stored in OS keychain or Secure Enclave - no additional disk storage.

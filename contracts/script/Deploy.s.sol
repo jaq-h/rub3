@@ -34,8 +34,17 @@ import {Rub3License} from "../src/Rub3License.sol";
 ///                     is unset. 0 with a token set is a free stablecoin tier.
 ///   SUPPLY_CAP      - max mintable tokens; 0 = uncapped (default: 0)
 ///   OWNER           - contract owner address; defaults to the broadcaster
-///   COOLDOWN_BLOCKS - blocks between activations per token (default: 1800, ~1hr on Base;
-///                     floor is 15 ≈ 30s, enforced in the contract)
+///   COOLDOWN_BLOCKS - blocks a *seat* must wait between activations (default: 1800,
+///                     ~1hr on Base; floor is 15 ≈ 30s, enforced in the contract)
+///   SEATS           - concurrent sessions one token grants (default: 1, which is the
+///                     single-session tier-3 licence; ceiling is 64, enforced in the
+///                     contract). A token lands at most SEATS activations per cooldown
+///                     window, so seats multiply concurrency and never the churn rate
+///   SESSION_TTL     - seconds a seat stays taken when nobody releases it (default:
+///                     86400 = 24h; range 300 to 7776000, enforced in the contract).
+///                     This is what frees a seat when a fleet instance dies without
+///                     calling `release`. A wrapper takes the shorter of this and its
+///                     own packed session TTL, so packaging can only shorten a session
 ///   PREDECESSOR     - address of a license contract whose holders may migrate onto
 ///                     this one via `claimFromPredecessor` (default: 0x0 = no
 ///                     migrations accepted). Frozen at deploy. The predecessor's
@@ -79,7 +88,7 @@ contract Deploy is Script {
         address predecessor;
         address owner;
         uint256 supplyCap;
-        uint256 cooldownBlocks;
+        Rub3License.SessionTerms session;
         address factory;
         Rub3License.SaleTerms sale;
         bytes32[] wrapperHashes;
@@ -104,7 +113,11 @@ contract Deploy is Script {
 
         // ── Optional params ───────────────────────────────────────────────────
         p.supplyCap = vm.envOr("SUPPLY_CAP", uint256(0));
-        p.cooldownBlocks = vm.envOr("COOLDOWN_BLOCKS", uint256(1800));
+        p.session = Rub3License.SessionTerms({
+            cooldownBlocks: vm.envOr("COOLDOWN_BLOCKS", uint256(1800)),
+            seatsPerToken: vm.envOr("SEATS", uint256(1)),
+            sessionTtlSeconds: vm.envOr("SESSION_TTL", uint256(24 hours))
+        });
         p.owner = vm.envOr("OWNER", msg.sender);
         // TBA implementation - required for account model, forbidden for access model.
         p.identity.tbaImplementation = vm.envOr("TBA_IMPLEMENTATION", address(0));
@@ -140,7 +153,7 @@ contract Deploy is Script {
                 p.sale,
                 noFee,
                 p.supplyCap,
-                p.cooldownBlocks,
+                p.session,
                 p.predecessor,
                 p.owner
             )
@@ -158,7 +171,7 @@ contract Deploy is Script {
             wrapperHashes: p.wrapperHashes,
             sale: p.sale,
             supplyCap: p.supplyCap,
-            cooldownBlocks: p.cooldownBlocks,
+            session: p.session,
             predecessor: p.predecessor,
             owner: p.owner
         });
@@ -198,7 +211,9 @@ contract Deploy is Script {
             console.log("  priceAmount:   %d  (token's smallest unit)", p.sale.priceAmount);
         }
         console.log("  supplyCap:     %d  (%s)", p.supplyCap, p.supplyCap == 0 ? "uncapped" : "capped");
-        console.log("  cooldown:      %d blocks (~%d sec on Base)", p.cooldownBlocks, p.cooldownBlocks * 2);
+        console.log("  cooldown:      %d blocks (~%d sec on Base), per seat", p.session.cooldownBlocks, p.session.cooldownBlocks * 2);
+        console.log("  seats:         %d concurrent session%s per token", p.session.seatsPerToken, p.session.seatsPerToken == 1 ? "" : "s");
+        console.log("  sessionTtl:    %d sec  (a seat frees itself after this)", p.session.sessionTtlSeconds);
         console.log("  wrapperHashes: %d seeded%s",
             p.wrapperHashes.length,
             p.wrapperHashes.length == 0 ? "  (add later with addWrapperHash)" : ""

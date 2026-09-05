@@ -80,7 +80,7 @@ pub fn ensure(
 ) -> Result<Launch, ActivationError> {
     // ── Fast path 1: existing session (tier 3) ───────────────────────────────
     #[cfg(feature = "cooldown")]
-    if let Some(session) = try_session_fast_path(app_id, rpc_url, None, None) {
+    if let Some(session) = try_session_fast_path(app_id, chain_id, contract, rpc_url, None, None) {
         return Ok(Launch::from_session(session));
     }
 
@@ -143,7 +143,7 @@ pub(crate) fn persist_activation(
         #[cfg(feature = "cooldown")]
         ActivationResult::SessionSuccess { session } => {
             crate::session_store::save_session(&session)
-                .map(|()| Launch::from_session(session))
+                .map(|()| Launch::from_session(*session))
                 .map_err(|e| ActivationError::Error(e.to_string()))
         }
         ActivationResult::Cancelled => Err(ActivationError::Cancelled),
@@ -192,9 +192,19 @@ fn interactive_slow_path(
 /// reuse exactly as it constrains purchasing. Selecting rather than filtering
 /// matters once a signer holds several licenses: the requested token's session
 /// is reused even when another token was activated more recently.
+///
+/// `chain_id` and `contract` are the packed deploy, and a session signed for
+/// any other is a miss whichever way it was loaded: a testnet build and the
+/// production build share an `app_id`, session ids start at 1 on every deploy,
+/// and a §2.4 successor migration writes a fresh record for the successor, so
+/// no supported flow produces a record for another deploy that this build
+/// should launch from. Both fields are in the signed preimage, so the check is
+/// against the record's own statement rather than a rewritable label.
 #[cfg(feature = "cooldown")]
 pub(crate) fn try_session_fast_path(
     app_id: &str,
+    chain_id: u64,
+    contract: &str,
     rpc_url: &str,
     require_wallet: Option<Address>,
     require_token: Option<u64>,
@@ -203,10 +213,14 @@ pub(crate) fn try_session_fast_path(
         (Some(token_id), _) => crate::session_store::load_session(app_id, token_id).ok()?,
         (None, Some(wallet)) => crate::session_store::load_latest_session_for_wallet(
             app_id,
+            chain_id,
+            contract,
             &crate::identity::format_addr(wallet),
         )
         .ok()?,
-        (None, None) => crate::session_store::load_latest_session(app_id).ok()?,
+        (None, None) => {
+            crate::session_store::load_latest_session(app_id, chain_id, contract).ok()?
+        }
     };
 
     if crate::session::verify_local(&session).is_err() {
@@ -220,6 +234,10 @@ pub(crate) fn try_session_fast_path(
         if session.token_id != token_id {
             return None;
         }
+    }
+
+    if !crate::session_store::is_for_deploy(&session, chain_id, contract) {
+        return None;
     }
 
     if let Some(wallet) = require_wallet {
@@ -345,6 +363,18 @@ pub const EXIT_PRICE_ABOVE_POLICY: i32 = 22;
 /// that it is malicious.
 pub const EXIT_NOT_CANONICAL_CONTRACT: i32 = 23;
 
+/// Every seat this token grants is holding a live session (§3.4).
+///
+/// Its own code rather than a shade of [`EXIT_COOLDOWN_ACTIVE`], because the
+/// two are resolved differently and only one of them clears on its own: a
+/// cooldown is waited out in blocks, while a full fleet needs the orchestrator
+/// to scale down, release a seat it is done with, or buy another token. The
+/// detail line carries `token_id`, `seats_in_use`, `seats` and
+/// `seconds_remaining`, which is when the earliest seat's occupancy lapses. A
+/// lower bound on the wait rather than the whole of it: a lapsed seat keeps its
+/// own cooldown stamp, so the seat that frees then may still owe blocks.
+pub const EXIT_FLEET_EXHAUSTED: i32 = 24;
+
 /// The exit-code table rendered for `--help`, so the contract is discoverable
 /// from the binary itself and not only from the docs.
 pub const EXIT_CODE_HELP: &str = "\
@@ -359,7 +389,10 @@ child is the child's status and not an activation failure.
   10  no usable signer (set RUB3_AGENT_KEY or RUB3_AGENT_KEYSTORE)
   11  insufficient funds for purchase + gas
   12  no token held and supply is sold out
-  13  cooldown active - stderr carries `blocks_remaining=N`
+  13  cooldown active - stderr carries `blocks_remaining=N`. This is a
+      *seat's* rate limit, not the token's: a token grants `seats`
+      concurrent sessions and lands at most that many activations per
+      cooldown window
   14  activate() reverted, or did not confirm in time - retryable: a
       re-run re-reads ownership, so a purchase this run may already have
       completed is activated rather than paid for twice
@@ -409,6 +442,35 @@ child is the child's status and not an activation failure.
           their own, so every field added later goes in front of it
       Neither is an accusation: the scan is a diagnostic, and a miss
       says the code is unrecognised here, not that it is malicious
+  24  fleet exhausted - every seat this token grants is holding a live
+      session. stderr carries `token_id=N seats_in_use=I seats=K
+      seconds_remaining=S`. Nothing was sent and nothing was spent.
+      Distinct from 13 because the two are resolved differently: a
+      cooldown clears on its own in blocks, while a full fleet needs
+      this orchestrator to scale down, release a seat it is done with,
+      or buy another token. `seconds_remaining` is when the earliest
+      seat's *occupancy* lapses, which is a lower bound on the wait and
+      not the whole of it: a lapsed seat keeps its own cooldown stamp,
+      which is what stops seats from buying a faster churn, so the seat
+      that frees then may still owe blocks and answer 13 next. A run
+      that waits it out and retries is told what is left
+
+Teardown:
+  --release-seat  hands this machine's seat back and exits without
+                  launching anything (§3.4). Only the session cached on
+                  this machine, never another instance's. Prints
+                  `rub3-detail: token_id=N session_id=M tx_hash=0x...`, or
+                  `token_id=N released=false` when there was nothing to
+                  hand back, which is also a success. The `token_id=`
+                  key is absent from that second line in the one case
+                  with no token to name: no `--token-id` was given and
+                  this machine holds no session for this contract.
+                  A record that was found and refused adds
+                  `rejected=<reason>` to that line and one warning above
+                  it, because the seat it names may really be held: the
+                  reasons are `unreadable`, `unverifiable`,
+                  `another_key`, `another_deploy`, `another_token` and
+                  `none_usable`. The exit code is unchanged
 
 Signer sources, highest precedence first:
   RUB3_AGENT_KEY                        raw hex private key (dev / CI only)
@@ -449,8 +511,9 @@ Spend policy:
 
 #[cfg(feature = "headless")]
 pub use self::headless::{
-    ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome, PaymentRail, SpendPolicy,
-    SpendVerdict, DEFAULT_MAX_ETH_WEI, ENV_MAX_ETH_WEI, ENV_MAX_TOKEN_AMOUNT,
+    ensure_headless, release_headless, HeadlessContext, HeadlessError, HeadlessOutcome,
+    PaymentRail, RecordRefusal, ReleaseOutcome, SpendPolicy, SpendVerdict, DEFAULT_MAX_ETH_WEI,
+    ENV_MAX_ETH_WEI, ENV_MAX_TOKEN_AMOUNT,
 };
 
 #[cfg(feature = "headless")]
@@ -757,6 +820,129 @@ mod headless {
         PurchasedAndActivated { token_id: u64, paid: PaymentRail },
     }
 
+    /// What a `--release-seat` run actually did.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ReleaseOutcome {
+        /// A seat was handed back on-chain.
+        Released {
+            token_id: u64,
+            session_id: u64,
+            tx_hash: String,
+        },
+        /// There was nothing to hand back - the seat had already been released,
+        /// the session never took one, or this machine has no record naming a
+        /// seat on this contract at all. A success and not a failure: it is the
+        /// state the caller asked for.
+        ///
+        /// `token_id` is `None` in the one case where there is no token to
+        /// name: nothing was asked for by id and the store holds nothing.
+        ///
+        /// `rejected` separates the two ways of holding no seat. `None` is an
+        /// empty store: this machine has nothing, and nothing is what the
+        /// caller asked to hand back. `Some` means a record was found and
+        /// refused, and that is the one worth saying out loud - the seat it
+        /// names may really be held, and refusing its record is exactly what
+        /// leaves it held for the rest of the contract's `sessionTtlSeconds`
+        /// with nothing on this machine able to give it back.
+        NoSeatHeld {
+            token_id: Option<u64>,
+            rejected: Option<RecordRefusal>,
+        },
+    }
+
+    /// Why a session record on disk is not one this machine may release from.
+    ///
+    /// **A refusal here is a correct refusal.** Every variant is a record that
+    /// is not evidence of a seat *this* machine took, and acting on one would
+    /// be a wrapper ending somebody else's session - the revocation shape §2.4
+    /// rules out. What the variant adds is a name for it: an operator whose
+    /// teardown reports `released=false` because a session file was truncated
+    /// by a crash has a seat stranded until the contract frees it, and
+    /// unreported that is indistinguishable from a teardown that had nothing to
+    /// do.
+    ///
+    /// Carried on [`ReleaseOutcome::NoSeatHeld`] rather than raised as an
+    /// error, and reported on stderr rather than through the exit code: the
+    /// outcome is still the one the caller asked for, and an orchestrator
+    /// branching on the code sees no change.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum RecordRefusal {
+        /// A record exists for this token and could not be read or parsed - a
+        /// truncated write, or a file something else corrupted.
+        Unreadable(String),
+        /// The signature does not recover to the record's own `wallet`, so the
+        /// record was not written whole by any single key.
+        Unverifiable,
+        /// Signed, but by a key this run does not hold.
+        AnotherKey { wallet: String },
+        /// Signed by this key, for a different deploy - another contract, or
+        /// the same address on another chain. Session ids start at 1 on every
+        /// deploy, so its ids name a stranger's session here.
+        AnotherDeploy { chain_id: u64, contract: String },
+        /// Signed by this key, for a different token than the one asked for.
+        AnotherToken { token_id: u64 },
+        /// The store holds records for this app and the scan chose none of
+        /// them. Reached only when no `--token-id` narrowed the search, so
+        /// there is no single record to name.
+        NoneUsable { records: usize },
+    }
+
+    impl RecordRefusal {
+        /// A stable one-word key for the `rub3-detail:` line, so an
+        /// orchestrator branches on the reason without reading the sentence.
+        pub fn key(&self) -> &'static str {
+            match self {
+                RecordRefusal::Unreadable(_) => "unreadable",
+                RecordRefusal::Unverifiable => "unverifiable",
+                RecordRefusal::AnotherKey { .. } => "another_key",
+                RecordRefusal::AnotherDeploy { .. } => "another_deploy",
+                RecordRefusal::AnotherToken { .. } => "another_token",
+                RecordRefusal::NoneUsable { .. } => "none_usable",
+            }
+        }
+    }
+
+    impl std::fmt::Display for RecordRefusal {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                RecordRefusal::Unreadable(e) => {
+                    write!(f, "its session record could not be read: {e}")
+                }
+                RecordRefusal::Unverifiable => write!(
+                    f,
+                    "its session record's signature does not recover to the wallet it names"
+                ),
+                RecordRefusal::AnotherKey { wallet } => {
+                    write!(f, "its session record belongs to another key ({wallet})")
+                }
+                RecordRefusal::AnotherDeploy { chain_id, contract } => write!(
+                    f,
+                    "its session record was written for another deploy \
+                     ({contract} on chain {chain_id})"
+                ),
+                RecordRefusal::AnotherToken { token_id } => {
+                    write!(f, "its session record was written for token {token_id}")
+                }
+                RecordRefusal::NoneUsable { records } => write!(
+                    f,
+                    "{records} session record(s) are stored for this app and none is one \
+                     this machine wrote for this deploy"
+                ),
+            }
+        }
+    }
+
+    /// What [`own_seat_record`] found.
+    enum SeatRecord {
+        /// A record this machine wrote, for this deploy, for the token asked
+        /// for.
+        Own(Box<crate::session::Session>),
+        /// Nothing on disk to consider.
+        Absent,
+        /// Something was there and it is not this machine's to act on.
+        Refused(RecordRefusal),
+    }
+
     /// Everything that can stop a headless activation, in a shape an
     /// orchestrator can branch on. Each variant maps to a distinct process exit
     /// code - see [`HeadlessError::exit_code`].
@@ -773,10 +959,34 @@ mod headless {
         },
         /// The signer holds no token and the contract has minted its cap.
         SoldOut { supply_cap: u64, minted: u64 },
-        /// `activate()` is rate-limited for this token for another N blocks.
+        /// `activate()` is rate-limited for this seat for another N blocks.
         CooldownActive {
             token_id: u64,
             blocks_remaining: u64,
+        },
+        /// Every seat this token grants is holding a live session (§3.4), so
+        /// there is none left to open another on.
+        ///
+        /// Its own outcome and its own exit code because it is the one an
+        /// orchestrator can actually act on: scale down, buy another token, or
+        /// release a seat it knows it is done with. Telling it apart from
+        /// [`HeadlessError::CooldownActive`] matters more than either message,
+        /// because the two are waited out in different units and only one of
+        /// them clears on its own.
+        ///
+        /// **`seconds_remaining` is when the earliest seat's *occupancy*
+        /// lapses, and that is a lower bound on the wait rather than the whole
+        /// of it.** A lapsed seat keeps its `activatedAt` stamp - that is the
+        /// churn defence, not an oversight - so the seat that frees at that
+        /// moment may still owe blocks of its own cooldown and refuse with
+        /// [`HeadlessError::CooldownActive`] instead. An orchestrator that
+        /// sleeps this out and retries is told in blocks what is left; one
+        /// that releases a seat elsewhere does not wait at all.
+        FleetExhausted {
+            token_id: u64,
+            seats_in_use: u64,
+            seats: u64,
+            seconds_remaining: u64,
         },
         /// An `activate()` transaction reverted, or did not confirm inside
         /// the poll budget. Retryable, but not because nothing was spent: the
@@ -887,6 +1097,17 @@ mod headless {
                     f,
                     "cooldown active on token {token_id}: retry in {blocks_remaining} blocks"
                 ),
+                HeadlessError::FleetExhausted {
+                    token_id,
+                    seats_in_use,
+                    seats,
+                    seconds_remaining,
+                } => write!(
+                    f,
+                    "fleet exhausted on token {token_id}: {seats_in_use} of {seats} seats in \
+                     use, and the next one frees in {seconds_remaining}s. Release a seat you \
+                     are done with, or buy another token"
+                ),
                 HeadlessError::ActivationFailed(e) => write!(f, "activation failed: {e}"),
                 HeadlessError::VerificationFailed(e) => {
                     write!(f, "session verification failed: {e}")
@@ -987,6 +1208,7 @@ mod headless {
                 HeadlessError::InsufficientFunds { .. } => EXIT_INSUFFICIENT_FUNDS,
                 HeadlessError::SoldOut { .. } => EXIT_SOLD_OUT,
                 HeadlessError::CooldownActive { .. } => EXIT_COOLDOWN_ACTIVE,
+                HeadlessError::FleetExhausted { .. } => EXIT_FLEET_EXHAUSTED,
                 HeadlessError::ActivationFailed(_) => EXIT_ACTIVATION_FAILED,
                 HeadlessError::VerificationFailed(_) => EXIT_VERIFICATION_FAILED,
                 HeadlessError::Rpc(_) => EXIT_RPC,
@@ -1018,6 +1240,19 @@ mod headless {
                     blocks_remaining,
                 } => Some(format!(
                     "token_id={token_id} blocks_remaining={blocks_remaining}"
+                )),
+                // Every number the decision turns on. An orchestrator branches
+                // on the exit code and then reads these to choose between
+                // waiting, releasing a seat, and buying another token - none of
+                // which it can pick from prose.
+                HeadlessError::FleetExhausted {
+                    token_id,
+                    seats_in_use,
+                    seats,
+                    seconds_remaining,
+                } => Some(format!(
+                    "token_id={token_id} seats_in_use={seats_in_use} seats={seats} \
+                     seconds_remaining={seconds_remaining}"
                 )),
                 // Only when the amounts are real: an orchestrator that read
                 // `required_wei=0` would top the wallet up by nothing.
@@ -1119,9 +1354,11 @@ mod headless {
     ///            │holds ≥1
     ///     pick the token
     ///            │
-    ///     cooldownReady? ─no─▶ CooldownActive { blocks_remaining }
-    ///            │yes
-    ///        activate() ─▶ wait for receipt ─▶ activeSessionId + identity model
+    ///  activationStatus? ─┬─cooling──▶ CooldownActive { blocks_remaining }
+    ///            │         └─full─────▶ reclaim our own stale seat, else
+    ///            │                      FleetExhausted { seats_in_use, seats }
+    ///            │ready
+    ///        activate() ─▶ wait for receipt ─▶ Activated log + identity model
     ///            │
     ///   sign the session message locally ─▶ verify_local ─▶ persist
     /// ```
@@ -1139,33 +1376,19 @@ mod headless {
         let wallet = signer.address();
 
         // ── Fast path: a session this signer already owns ────────────────────
-        if let Some(session) =
-            try_session_fast_path(&ctx.app_id, &ctx.rpc_url, Some(wallet), ctx.token_id)
-        {
+        if let Some(session) = try_session_fast_path(
+            &ctx.app_id,
+            ctx.chain_id,
+            &ctx.contract,
+            &ctx.rpc_url,
+            Some(wallet),
+            ctx.token_id,
+        ) {
             return Ok((session, HeadlessOutcome::Reused));
         }
 
-        // An unparseable address and the zero address mean the same thing: this
-        // build carries no usable contract. Both are build-time constants, so
-        // neither is worth a retry.
-        let contract: Address = ctx
-            .contract
-            .parse()
-            .map_err(|_| HeadlessError::NoContract)?;
-        if contract.is_zero() {
-            return Err(HeadlessError::NoContract);
-        }
-
-        // Signing for the wrong network is silent and expensive; catch it before
-        // the first transaction rather than after.
-        let node_chain_id =
-            rpc::chain_id(&ctx.rpc_url).map_err(|e| HeadlessError::Rpc(e.to_string()))?;
-        if node_chain_id != ctx.chain_id {
-            return Err(HeadlessError::ChainIdMismatch {
-                expected: ctx.chain_id,
-                actual: node_chain_id,
-            });
-        }
+        let contract = parse_contract(&ctx.contract)?;
+        preflight_chain_id(ctx)?;
 
         // ── Token selection, purchasing if the signer holds none ─────────────
         let owned = rpc::tokens_of_owner(&ctx.rpc_url, contract, wallet)
@@ -1194,13 +1417,33 @@ mod headless {
             }
         };
 
-        // ── Cooldown gate ────────────────────────────────────────────────────
-        let (ready, blocks_remaining) = rpc::cooldown_ready(&ctx.rpc_url, contract, token_id)
+        // ── Seat gate ────────────────────────────────────────────────────────
+        //
+        // One read answers both refusals, and they need different responses: a
+        // cooldown is waited out in blocks, while a full fleet is waited out in
+        // seconds - or resolved by an operator releasing something.
+        let mut status = rpc::activation_status(&ctx.rpc_url, contract, token_id)
             .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
-        if !ready {
+
+        // Some exhaustion is this machine's own doing and it can undo it - see
+        // `reclaim_seat`. What is left is a fleet the operator has to act on.
+        if status.fleet_exhausted && reclaim_seat(signer, ctx, contract, token_id)? {
+            status = rpc::activation_status(&ctx.rpc_url, contract, token_id)
+                .map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+        }
+
+        if !status.ready {
+            if status.fleet_exhausted {
+                return Err(HeadlessError::FleetExhausted {
+                    token_id,
+                    seats_in_use: status.seats_in_use,
+                    seats: status.seats,
+                    seconds_remaining: status.seconds_remaining,
+                });
+            }
             return Err(HeadlessError::CooldownActive {
                 token_id,
-                blocks_remaining,
+                blocks_remaining: status.blocks_remaining,
             });
         }
 
@@ -1238,6 +1481,9 @@ mod headless {
         }
 
         // ── Draft, sign, verify, persist ─────────────────────────────────────
+        let activation = rpc::activation_from_receipt(&receipt, contract, token_id)
+            .map_err(|e| HeadlessError::ActivationFailed(e.to_string()))?;
+
         let draft = crate::session::draft_from_activation(
             &ctx.rpc_url,
             contract,
@@ -1246,6 +1492,7 @@ mod headless {
             token_id,
             wallet,
             &receipt.block_hash,
+            activation,
             ctx.session_ttl_secs,
         )
         .map_err(HeadlessError::Rpc)?;
@@ -1265,6 +1512,7 @@ mod headless {
             expires_at: Some(draft.expires_at),
             signature,
             chain: "base".to_string(),
+            chain_id: ctx.chain_id,
             contract: ctx.contract.clone(),
             activation_tx: Some(tx_hash),
             activation_block: Some(receipt.block_number),
@@ -1372,6 +1620,328 @@ mod headless {
             "the copy that is disclosed must never outlive the copy that is used",
         );
     };
+
+    /// This build's licence contract as an address.
+    ///
+    /// An unparseable address and the zero address mean the same thing: this
+    /// build carries no usable contract. Both are build-time constants, so
+    /// neither is worth a retry.
+    fn parse_contract(contract: &str) -> Result<Address, HeadlessError> {
+        let contract: Address = contract.parse().map_err(|_| HeadlessError::NoContract)?;
+        if contract.is_zero() {
+            return Err(HeadlessError::NoContract);
+        }
+        Ok(contract)
+    }
+
+    /// Refuses to sign anything for a network this build was not made for.
+    ///
+    /// Signing for the wrong chain is silent and expensive; every path that
+    /// broadcasts runs this before its first transaction rather than after.
+    fn preflight_chain_id(ctx: &HeadlessContext) -> Result<(), HeadlessError> {
+        let node_chain_id =
+            rpc::chain_id(&ctx.rpc_url).map_err(|e| HeadlessError::Rpc(e.to_string()))?;
+        if node_chain_id != ctx.chain_id {
+            return Err(HeadlessError::ChainIdMismatch {
+                expected: ctx.chain_id,
+                actual: node_chain_id,
+            });
+        }
+        Ok(())
+    }
+
+    /// Hands back the seat this machine's cached session holds, and launches
+    /// nothing.
+    ///
+    /// The teardown half of seats (§3.4). An orchestrator retiring an instance
+    /// calls this so the seat is available at once instead of after
+    /// `sessionTtlSeconds`, which is what makes the advice in
+    /// [`HeadlessError::FleetExhausted`] something a caller can act on rather
+    /// than only wait out.
+    ///
+    /// Releases only the session in this machine's own store, and only one
+    /// written against the contract this build is packed for, so it is never a
+    /// way for one instance to end another's - that would be the revocation
+    /// shape §2.4 rules out. The cached session is deleted whether or not the
+    /// chain had a seat to give back, because either way this machine is done
+    /// with it and a session left behind would be launched from on the next
+    /// run.
+    ///
+    /// **The cached session is resolved without regard to its local expiry.**
+    /// A session that has lapsed locally still holds its seat until the
+    /// contract's own `sessionTtlSeconds` runs out, which is the ordinary state
+    /// of a retiring instance on any build whose packed TTL is the shorter
+    /// one, which is the case this exists for. Nothing left to hand back is
+    /// [`ReleaseOutcome::NoSeatHeld`] and a success, never an error: a
+    /// teardown that has already happened is the state the caller asked for.
+    /// Which record counts as this machine's own is [`own_seat_record`]'s
+    /// question, and every answer here rests on it.
+    pub fn release_headless(
+        signer: &dyn Signer,
+        ctx: &HeadlessContext,
+    ) -> Result<ReleaseOutcome, HeadlessError> {
+        let contract = parse_contract(&ctx.contract)?;
+        preflight_chain_id(ctx)?;
+
+        let session = match own_seat_record(ctx, signer.address(), ctx.token_id) {
+            SeatRecord::Own(session) => *session,
+            SeatRecord::Absent => {
+                return Ok(ReleaseOutcome::NoSeatHeld {
+                    token_id: ctx.token_id,
+                    rejected: None,
+                })
+            }
+            SeatRecord::Refused(why) => {
+                return Ok(ReleaseOutcome::NoSeatHeld {
+                    token_id: ctx.token_id,
+                    rejected: Some(why),
+                })
+            }
+        };
+        let token_id = session.token_id;
+        let session_id = match session.session_id {
+            // A tier-0..2 session never took a seat, so there is nothing on
+            // chain to hand back and saying so is the whole answer.
+            None => {
+                forget_session(&ctx.app_id, token_id)?;
+                return Ok(ReleaseOutcome::NoSeatHeld {
+                    token_id: Some(token_id),
+                    rejected: None,
+                });
+            }
+            Some(id) => id,
+        };
+
+        match rpc::session_seat(&ctx.rpc_url, contract, token_id, session_id) {
+            Ok((true, _)) => {}
+            Ok((false, _)) => {
+                forget_session(&ctx.app_id, token_id)?;
+                return Ok(ReleaseOutcome::NoSeatHeld {
+                    token_id: Some(token_id),
+                    rejected: None,
+                });
+            }
+            Err(e) => return Err(HeadlessError::Rpc(e.to_string())),
+        }
+
+        let calldata = decode_calldata(&rpc::encode_release_calldata(token_id, session_id))?;
+        let tx_hash = tx::send(
+            &ctx.rpc_url,
+            signer,
+            &TxPlan {
+                to: contract,
+                value: U256::ZERO,
+                input: calldata,
+            },
+        )?;
+        let receipt = rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash)
+            .map_err(|e| HeadlessError::Rpc(format!("release() tx {tx_hash}: {e}")))?;
+        if !receipt.status {
+            return Err(HeadlessError::Rpc(format!(
+                "release() reverted on-chain (tx {tx_hash})"
+            )));
+        }
+
+        forget_session(&ctx.app_id, token_id)?;
+        Ok(ReleaseOutcome::Released {
+            token_id,
+            session_id,
+            tx_hash,
+        })
+    }
+
+    /// Drops the local session record for `token_id`.
+    fn forget_session(app_id: &str, token_id: u64) -> Result<(), HeadlessError> {
+        crate::session_store::delete_session(app_id, token_id)
+            .map_err(|e| HeadlessError::Persist(e.to_string()))
+    }
+
+    /// Hands back the seat this machine's own finished session is still
+    /// holding, when it holds one. Returns whether a seat was released.
+    ///
+    /// **Only ever this machine's own session, and that limit is the whole
+    /// function.** A wrapper must never free a seat another live instance is
+    /// using: that is one machine ending another's session, which is the
+    /// revocation shape §2.4 rules out even between two machines holding the
+    /// same key. The session directory is user-writable, so the store cannot be
+    /// taken at its word about which session that is - [`own_seat_record`] is
+    /// what authenticates the record, and it runs before any of this.
+    ///
+    /// This is the common case on any build whose packed session TTL is shorter
+    /// than the contract's `sessionTtlSeconds`: the cached session lapses
+    /// locally while its seat is still live on-chain, and without this an
+    /// instance would report as full a fleet it was itself filling.
+    ///
+    /// A licence granting one seat needs none of this - the contract lets its
+    /// sole holder retake their own seat, so a single-seat build never reports
+    /// exhaustion and never reaches here. This is for fleets.
+    ///
+    /// The retake still costs the seat's own cooldown, because `release` never
+    /// clears the stamp - so this recovers a seat and never buys a faster churn
+    /// than `cooldownBlocks` allows.
+    ///
+    /// Best-effort by design: everything here recovers a seat that would
+    /// otherwise be waited out, so a failure to send or confirm returns "no
+    /// seat released" and lets the caller report the exhaustion it found.
+    fn reclaim_seat(
+        signer: &dyn Signer,
+        ctx: &HeadlessContext,
+        contract: Address,
+        token_id: u64,
+    ) -> Result<bool, HeadlessError> {
+        let session_id = match own_stale_session_id(ctx, signer.address(), contract, token_id)? {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+
+        let calldata = decode_calldata(&rpc::encode_release_calldata(token_id, session_id))?;
+        let tx_hash = match tx::send(
+            &ctx.rpc_url,
+            signer,
+            &TxPlan {
+                to: contract,
+                value: U256::ZERO,
+                input: calldata,
+            },
+        ) {
+            Ok(hash) => hash,
+            Err(_) => return Ok(false),
+        };
+
+        match rpc::wait_for_receipt(&ctx.rpc_url, &tx_hash) {
+            Ok(receipt) => Ok(receipt.status),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// The one place a teardown path decides that a session record on disk names
+    /// a seat *this* machine took, and the only way either of them reaches the
+    /// store.
+    ///
+    /// **Everything downstream broadcasts `release(tokenId, sessionId)` with
+    /// the ids this record carries, so an unauthenticated record here is a
+    /// wrapper ending somebody else's session** - the revocation shape §2.4
+    /// rules out even between two machines holding the same key. The session
+    /// directory is user-writable, and `session_store::load_session` is a bare
+    /// read and parse, so a hand-written file naming this contract and another
+    /// fleet instance's session id would otherwise be honoured.
+    ///
+    /// Four things have to hold, and they are the pairing
+    /// [`super::try_session_fast_path`] already makes on the launch side:
+    ///
+    /// - the signature verifies, so the record is one *some* key wrote whole;
+    /// - `wallet` is this signer's own address, which is what ties it to *this*
+    ///   key - a signature alone proves only self-consistency, and a tamperer
+    ///   can re-sign with any key they hold;
+    /// - `chain_id` and `contract` name the deploy this build acts on, since
+    ///   session ids start at 1 on every deploy, a §2.4 successor migration
+    ///   keeps the `app_id`, and the factory's `CREATE` deploys can put the
+    ///   same address on two chains;
+    /// - the record's own signed `token_id` is the one that was asked for, since
+    ///   the filename it was read from is not signed and proves nothing.
+    ///
+    /// [`crate::session::verify_signature`] rather than
+    /// [`crate::session::verify_local`], deliberately: the launch paths want
+    /// the expiry check too, and these paths exist precisely to act on a record
+    /// whose local expiry has passed while its on-chain seat has not.
+    fn own_seat_record(
+        ctx: &HeadlessContext,
+        wallet: Address,
+        token_id: Option<u64>,
+    ) -> SeatRecord {
+        use crate::session_store::StoreError;
+
+        let session = match token_id {
+            Some(token_id) => match crate::session_store::load_session(&ctx.app_id, token_id) {
+                Ok(session) => session,
+                Err(StoreError::NotFound) => return SeatRecord::Absent,
+                Err(e) => return SeatRecord::Refused(RecordRefusal::Unreadable(e.to_string())),
+            },
+            None => {
+                match crate::session_store::load_latest_session_for_deploy(
+                    &ctx.app_id,
+                    ctx.chain_id,
+                    &ctx.contract,
+                    &crate::identity::format_addr(wallet),
+                ) {
+                    Ok(session) => session,
+                    // The scan answers "nothing chosen" the same way whether
+                    // the directory was empty or held only records it filtered
+                    // out, so the count is what separates them.
+                    Err(_) => {
+                        return match crate::session_store::stored_record_count(&ctx.app_id) {
+                            0 => SeatRecord::Absent,
+                            records => SeatRecord::Refused(RecordRefusal::NoneUsable { records }),
+                        }
+                    }
+                }
+            }
+        };
+
+        if crate::session::verify_signature(&session).is_err() {
+            return SeatRecord::Refused(RecordRefusal::Unverifiable);
+        }
+        if !session
+            .wallet
+            .eq_ignore_ascii_case(&crate::identity::format_addr(wallet))
+        {
+            return SeatRecord::Refused(RecordRefusal::AnotherKey {
+                wallet: session.wallet,
+            });
+        }
+        if session.chain_id != ctx.chain_id || !session.contract.eq_ignore_ascii_case(&ctx.contract)
+        {
+            return SeatRecord::Refused(RecordRefusal::AnotherDeploy {
+                chain_id: session.chain_id,
+                contract: session.contract,
+            });
+        }
+        if let Some(token_id) = token_id {
+            if session.token_id != token_id {
+                return SeatRecord::Refused(RecordRefusal::AnotherToken {
+                    token_id: session.token_id,
+                });
+            }
+        }
+
+        SeatRecord::Own(Box::new(session))
+    }
+
+    /// The id of a session this machine cached, has finished with, and which
+    /// the chain says still holds a seat.
+    fn own_stale_session_id(
+        ctx: &HeadlessContext,
+        wallet: Address,
+        contract: Address,
+        token_id: u64,
+    ) -> Result<Option<u64>, HeadlessError> {
+        // Only a session this wrapper wrote, with this key, for this contract.
+        //
+        // A refusal is silent here, unlike on the teardown path: this runs
+        // inside an ordinary launch that has already found the fleet full and
+        // is about to report [`HeadlessError::FleetExhausted`], so the launch
+        // says what happened either way. `--release-seat` has no such second
+        // line, which is why that path names the refusal.
+        let session = match own_seat_record(ctx, wallet, Some(token_id)) {
+            SeatRecord::Own(session) => *session,
+            SeatRecord::Absent | SeatRecord::Refused(_) => return Ok(None),
+        };
+        let session_id = match session.session_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        // A session still usable is not stale, and taking its seat away would
+        // be this wrapper cancelling a launch it could have served.
+        if !crate::session::is_expired(&session) {
+            return Ok(None);
+        }
+
+        match rpc::session_seat(&ctx.rpc_url, contract, token_id, session_id) {
+            Ok((true, _)) => Ok(Some(session_id)),
+            Ok((false, _)) => Ok(None),
+            Err(e) => Err(HeadlessError::Rpc(e.to_string())),
+        }
+    }
 
     /// Buys a token for `wallet` and returns `(token_id, rail)`.
     ///
@@ -2344,7 +2914,7 @@ mod tests {
             refusal: attest::Refusal::Unrecognised(attest::Unrecognised {
                 code_len: 4096,
                 // `burn(address,uint256)` carries a comma of its own, which is
-                // the whole point: 6 of the 25 forbidden signatures do, so a
+                // the whole point: 8 of the 30 forbidden signatures do, so a
                 // comma-separated list is not recoverable by the orchestrator
                 // the detail line exists for.
                 exposed: vec!["seize(uint256)", "burn(address,uint256)", "pause()"],
@@ -2431,6 +3001,7 @@ mod tests {
             EXIT_PURCHASE_UNCONFIRMED,
             EXIT_PRICE_ABOVE_POLICY,
             EXIT_NOT_CANONICAL_CONTRACT,
+            EXIT_FLEET_EXHAUSTED,
         ] {
             assert!(
                 EXIT_CODE_HELP.contains(&format!("  {code}  ")),
@@ -2452,6 +3023,56 @@ mod tests {
         assert!(detail.contains("token_id=3"), "{detail}");
         // The prose message must carry it too, for a human reading the logs.
         assert!(err.to_string().contains("42"));
+    }
+
+    /// **A full fleet is its own outcome, not a shade of the cooldown.** An
+    /// orchestrator branches on the exit code: one of these clears on its own
+    /// and the other needs it to act, so a shared code would leave it choosing
+    /// between waiting forever and scaling down for no reason.
+    #[test]
+    fn fleet_exhaustion_has_its_own_exit_code() {
+        let exhausted = HeadlessError::FleetExhausted {
+            token_id: 3,
+            seats_in_use: 4,
+            seats: 4,
+            seconds_remaining: 900,
+        };
+        let cooling = HeadlessError::CooldownActive {
+            token_id: 3,
+            blocks_remaining: 42,
+        };
+        assert_eq!(exhausted.exit_code(), EXIT_FLEET_EXHAUSTED);
+        assert_ne!(exhausted.exit_code(), cooling.exit_code());
+    }
+
+    /// Every number the decision turns on, in `key=value`, so an orchestrator
+    /// never has to read the sentence beside it.
+    #[test]
+    fn fleet_exhaustion_detail_names_the_seat_count() {
+        let err = HeadlessError::FleetExhausted {
+            token_id: 3,
+            seats_in_use: 4,
+            seats: 4,
+            seconds_remaining: 900,
+        };
+        let detail = err
+            .machine_detail()
+            .expect("fleet exhaustion must carry a detail line");
+        for key in [
+            "token_id=3",
+            "seats_in_use=4",
+            "seats=4",
+            "seconds_remaining=900",
+        ] {
+            assert!(detail.contains(key), "{key} missing from {detail}");
+        }
+        assert!(
+            !detail.contains('\n'),
+            "the detail is one line an orchestrator splits on spaces: {detail}"
+        );
+        // And a human reading the logs is told the same thing in words.
+        let message = err.to_string();
+        assert!(message.contains("4 of 4 seats"), "{message}");
     }
 
     #[test]
@@ -2584,17 +3205,39 @@ mod tests {
         crate::session_store::save_session(&older).unwrap();
         crate::session_store::save_session(&newer).unwrap();
 
-        let picked = try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), Some(7))
-            .expect("token 7 has a valid cached session of its own");
+        let picked = try_session_fast_path(
+            app_id,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+            "http://127.0.0.1:1",
+            Some(wallet),
+            Some(7),
+        )
+        .expect("token 7 has a valid cached session of its own");
         assert_eq!(picked.token_id, 7);
         assert_eq!(picked.nonce, older.nonce);
 
-        let latest = try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), None)
-            .expect("an unqualified run still takes the newest session");
+        let latest = try_session_fast_path(
+            app_id,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+            "http://127.0.0.1:1",
+            Some(wallet),
+            None,
+        )
+        .expect("an unqualified run still takes the newest session");
         assert_eq!(latest.token_id, 3);
 
         assert!(
-            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), Some(9)).is_none(),
+            try_session_fast_path(
+                app_id,
+                TEST_CHAIN_ID,
+                TEST_CONTRACT,
+                "http://127.0.0.1:1",
+                Some(wallet),
+                Some(9)
+            )
+            .is_none(),
             "a token with no cached session must be a miss",
         );
 
@@ -2627,15 +3270,27 @@ mod tests {
         crate::session_store::save_session(&agent_session).unwrap();
         crate::session_store::save_session(&other_session).unwrap();
 
-        let picked =
-            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(agent.address()), None)
-                .expect("the agent holds a valid session of its own");
+        let picked = try_session_fast_path(
+            app_id,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+            "http://127.0.0.1:1",
+            Some(agent.address()),
+            None,
+        )
+        .expect("the agent holds a valid session of its own");
         assert_eq!(picked.token_id, 3);
         assert_eq!(picked.nonce, agent_session.nonce);
 
-        let picked =
-            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(other.address()), None)
-                .expect("the other key holds one too");
+        let picked = try_session_fast_path(
+            app_id,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+            "http://127.0.0.1:1",
+            Some(other.address()),
+            None,
+        )
+        .expect("the other key holds one too");
         assert_eq!(picked.token_id, 7);
 
         // A wallet with nothing cached is still a miss, not someone else's session.
@@ -2644,27 +3299,142 @@ mod tests {
         )
         .unwrap();
         assert!(
-            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(stranger.address()), None)
-                .is_none(),
+            try_session_fast_path(
+                app_id,
+                TEST_CHAIN_ID,
+                TEST_CONTRACT,
+                "http://127.0.0.1:1",
+                Some(stranger.address()),
+                None
+            )
+            .is_none(),
             "a key with no session must not launch on another key's",
         );
 
         std::env::remove_var("RUB3_SESSION_DIR");
     }
 
+    /// The deploy every session built here is signed against. Both fields are
+    /// in the preimage, so a record for another deploy has to be signed for it.
+    const TEST_CONTRACT: &str = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+    const TEST_CHAIN_ID: u64 = 8453;
+
     /// Builds a locally signed, unexpired session for `token_id`, persisted the
     /// way the headless door persists one.
+    /// **A cached record launches only the deploy it was signed for.** A
+    /// testnet build and the production build share an `app_id`, so a record
+    /// written by a faucet-funded activation on Base Sepolia is the newest
+    /// valid record on the machine when the Base-packed build starts. None of
+    /// these records carries a `session_id`, so no launch here is sampled:
+    /// what refuses them is the deploy guard alone, through every door the
+    /// fast path has - by token, by wallet, and unqualified.
+    #[test]
+    fn fast_path_refuses_a_session_signed_for_another_deploy() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("RUB3_SESSION_DIR", dir.path());
+
+        let app_id = "com.rub3.test.other-deploy";
+        let signer = crate::signer::LocalSigner::from_hex(
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+        let wallet = signer.address();
+        let other_contract = "0x000000000000000000000000000000000000dEaD";
+
+        let other_chain = signed_session_for(
+            app_id,
+            7,
+            &signer,
+            "2026-06-01T00:00:00+00:00",
+            TEST_CHAIN_ID + 1,
+            TEST_CONTRACT,
+        );
+        let other_deploy = signed_session_for(
+            app_id,
+            8,
+            &signer,
+            "2026-06-02T00:00:00+00:00",
+            TEST_CHAIN_ID,
+            other_contract,
+        );
+        crate::session_store::save_session(&other_chain).unwrap();
+        crate::session_store::save_session(&other_deploy).unwrap();
+
+        for (label, require_wallet, require_token) in [
+            ("by token, other chain", Some(wallet), Some(7)),
+            ("by token, other contract", Some(wallet), Some(8)),
+            ("by wallet", Some(wallet), None),
+            ("unqualified", None, None),
+        ] {
+            assert!(
+                try_session_fast_path(
+                    app_id,
+                    TEST_CHAIN_ID,
+                    TEST_CONTRACT,
+                    "http://127.0.0.1:1",
+                    require_wallet,
+                    require_token,
+                )
+                .is_none(),
+                "a record for another deploy must not launch this build ({label})",
+            );
+        }
+
+        // Select, do not filter: this deploy's own older record is served
+        // although both foreign records are newer.
+        let ours = signed_session(app_id, 3, &signer, "2026-01-01T00:00:00+00:00");
+        crate::session_store::save_session(&ours).unwrap();
+        for (label, require_wallet) in [("by wallet", Some(wallet)), ("unqualified", None)] {
+            let served = try_session_fast_path(
+                app_id,
+                TEST_CHAIN_ID,
+                TEST_CONTRACT,
+                "http://127.0.0.1:1",
+                require_wallet,
+                None,
+            )
+            .unwrap_or_else(|| panic!("this deploy's own record is served ({label})"));
+            assert_eq!(served.token_id, 3, "{label}");
+        }
+
+        std::env::remove_var("RUB3_SESSION_DIR");
+    }
+
     fn signed_session(
         app_id: &str,
         token_id: u64,
         signer: &crate::signer::LocalSigner,
         issued_at: &str,
     ) -> crate::session::Session {
+        signed_session_for(
+            app_id,
+            token_id,
+            signer,
+            issued_at,
+            TEST_CHAIN_ID,
+            TEST_CONTRACT,
+        )
+    }
+
+    /// A valid session signed against a named deploy. Both fields are in the
+    /// preimage, so a record for another deploy is signed for it rather than
+    /// relabelled.
+    fn signed_session_for(
+        app_id: &str,
+        token_id: u64,
+        signer: &crate::signer::LocalSigner,
+        issued_at: &str,
+        chain_id: u64,
+        contract: &str,
+    ) -> crate::session::Session {
         let wallet = crate::identity::format_addr(signer.address());
         let nonce = crate::session::new_nonce();
         let expires_at = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
         let message = crate::session::session_message(
             app_id,
+            chain_id,
+            contract,
             token_id,
             "access",
             &wallet,
@@ -2689,7 +3459,8 @@ mod tests {
             expires_at: Some(expires_at),
             signature,
             chain: "base".to_string(),
-            contract: "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(),
+            chain_id,
+            contract: contract.to_string(),
             activation_tx: None,
             activation_block: None,
             activation_block_hash: None,
@@ -2789,7 +3560,15 @@ mod tests {
         std::fs::write(&path, serde_json::to_string(&session).unwrap()).unwrap();
 
         assert!(
-            try_session_fast_path(app_id, "http://127.0.0.1:1", Some(wallet), Some(7)).is_none(),
+            try_session_fast_path(
+                app_id,
+                TEST_CHAIN_ID,
+                TEST_CONTRACT,
+                "http://127.0.0.1:1",
+                Some(wallet),
+                Some(7)
+            )
+            .is_none(),
             "a session issued for token 3 must not stand in for token 7",
         );
 

@@ -16,12 +16,22 @@ contract Rub3AccessTest is Test {
     uint256 internal constant PRICE = 0.05 ether;
     uint256 internal constant SUPPLY_CAP = 3;
     uint256 internal constant COOLDOWN_BLOCKS = 15; // == MIN_COOLDOWN_BLOCKS
+    uint256 internal constant SESSION_TTL = 24 hours;
     uint8 internal constant IDENTITY = 0; // access
     address internal constant TBA_IMPL = address(0); // unused for access model
     address internal constant NO_PREDECESSOR = address(0); // accepts no migrations
 
-    /// The constructor seeds the append-only hash set from an array; most
-    /// fixtures want exactly one launch hash.
+    /// Session terms with the single-seat default: one concurrent session per
+    /// token, which is the tier-3 licence seats generalise (§3.4). The
+    /// multi-seat fixtures live in `Rub3Seats.t.sol`, which deploys its own.
+    function _session() internal pure returns (Rub3License.SessionTerms memory) {
+        return Rub3License.SessionTerms({
+            cooldownBlocks: COOLDOWN_BLOCKS,
+            seatsPerToken: 1,
+            sessionTtlSeconds: SESSION_TTL
+        });
+    }
+
     function _identity(uint8 model, address tbaImplementation)
         internal
         pure
@@ -37,6 +47,8 @@ contract Rub3AccessTest is Test {
         return Rub3License.FeeTerms({feeBps: 0, treasury: address(0)});
     }
 
+    /// The constructor seeds the append-only hash set from an array; most
+    /// fixtures want exactly one launch hash.
     function _hashes(bytes32 h) internal pure returns (bytes32[] memory out) {
         out = new bytes32[](1);
         out[0] = h;
@@ -57,7 +69,7 @@ contract Rub3AccessTest is Test {
             _sale(PRICE),
             _noFee(),
             SUPPLY_CAP,
-            COOLDOWN_BLOCKS,
+            _session(),
             NO_PREDECESSOR,
             owner
         );
@@ -88,7 +100,7 @@ contract Rub3AccessTest is Test {
             _sale(PRICE),
             _noFee(),
             SUPPLY_CAP,
-            COOLDOWN_BLOCKS,
+            _session(),
             NO_PREDECESSOR,
             owner
         );
@@ -104,7 +116,11 @@ contract Rub3AccessTest is Test {
             _sale(PRICE),
             _noFee(),
             SUPPLY_CAP,
-            14,
+            Rub3License.SessionTerms({
+                cooldownBlocks: 14,
+                seatsPerToken: 1,
+                sessionTtlSeconds: SESSION_TTL
+            }),
             NO_PREDECESSOR,
             owner
         );
@@ -120,7 +136,7 @@ contract Rub3AccessTest is Test {
             _sale(PRICE),
             _noFee(),
             SUPPLY_CAP,
-            COOLDOWN_BLOCKS,
+            _session(),
             NO_PREDECESSOR,
             owner
         );
@@ -136,7 +152,7 @@ contract Rub3AccessTest is Test {
             _sale(PRICE),
             _noFee(),
             SUPPLY_CAP,
-            COOLDOWN_BLOCKS,
+            _session(),
             NO_PREDECESSOR,
             owner
         );
@@ -152,7 +168,7 @@ contract Rub3AccessTest is Test {
             _sale(PRICE),
             _noFee(),
             SUPPLY_CAP,
-            COOLDOWN_BLOCKS,
+            _session(),
             NO_PREDECESSOR,
             owner
         );
@@ -163,6 +179,14 @@ contract Rub3AccessTest is Test {
     function test_metadata_cooldownBlocks() public view {
         assertEq(nft.cooldownBlocks(), COOLDOWN_BLOCKS);
         assertEq(nft.MIN_COOLDOWN_BLOCKS(), 15);
+    }
+
+    function test_metadata_sessionTerms() public view {
+        assertEq(nft.seatsPerToken(), 1);
+        assertEq(nft.sessionTtlSeconds(), SESSION_TTL);
+        assertEq(nft.MAX_SEATS(), 64);
+        assertEq(nft.MIN_SESSION_TTL_SECONDS(), 5 minutes);
+        assertEq(nft.MAX_SESSION_TTL_SECONDS(), 90 days);
     }
 
     // ── Purchase ──────────────────────────────────────────────────────────────
@@ -313,14 +337,18 @@ contract Rub3AccessTest is Test {
         uint256 id = _mint(alice);
 
         vm.expectEmit(true, true, false, true);
-        emit Rub3License.Activated(id, alice, 1);
+        emit Rub3License.Activated(id, alice, 1, 0, block.timestamp + SESSION_TTL);
 
         vm.prank(alice);
         uint256 sessionId = nft.activate(id);
 
         assertEq(sessionId, 1);
-        assertEq(nft.activeSessionId(id), 1);
         assertEq(nft.lastActivationBlock(id), block.number);
+
+        (bool live, uint256 index) = nft.sessionSeat(id, sessionId);
+        assertTrue(live);
+        assertEq(index, 0);
+        assertEq(nft.seatsInUse(id), 1);
     }
 
     function test_activate_incrementsSessionId_acrossTokens() public {
@@ -336,6 +364,9 @@ contract Rub3AccessTest is Test {
         assertEq(s2, 2);
     }
 
+    /// **A single-seat licence is the tier-3 licence seats generalise**: its one
+    /// seat is always the holder's to retake, so a second activation inside the
+    /// window is refused by the cooldown and by nothing else.
     function test_activate_duringCooldown_reverts() public {
         uint256 id = _mint(alice);
 
@@ -352,6 +383,8 @@ contract Rub3AccessTest is Test {
         nft.activate(id);
     }
 
+    /// And once the window has run, the new session replaces the old one on the
+    /// same seat - which is exactly what `activate()` did before seats existed.
     function test_activate_afterCooldown_succeeds() public {
         uint256 id = _mint(alice);
 
@@ -364,7 +397,31 @@ contract Rub3AccessTest is Test {
         uint256 s2 = nft.activate(id);
 
         assertGt(s2, s1);
-        assertEq(nft.activeSessionId(id), s2);
+        (bool live,) = nft.sessionSeat(id, s1);
+        assertFalse(live, "the retaken seat no longer holds the old session");
+        (live,) = nft.sessionSeat(id, s2);
+        assertTrue(live, "it holds the new one");
+        assertEq(nft.seatsInUse(id), 1, "one seat, still one session");
+    }
+
+    /// Releasing early gets the seat back at once, and it still costs the
+    /// seat's own cooldown to take it again.
+    function test_activate_afterReleaseInsideCooldown_reverts() public {
+        uint256 id = _mint(alice);
+
+        vm.prank(alice);
+        uint256 s1 = nft.activate(id);
+
+        vm.roll(block.number + 1);
+        vm.prank(alice);
+        nft.release(id, s1);
+        assertEq(nft.seatsInUse(id), 0);
+
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(Rub3License.CooldownActive.selector, COOLDOWN_BLOCKS - 1)
+        );
+        nft.activate(id);
     }
 
     function test_activate_notOwner_reverts() public {
@@ -421,9 +478,10 @@ contract Rub3AccessTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Rub3License.NotTokenOwner.selector, alice, bob));
         nft.activate(id);
 
-        // Bob is, and gets a fresh session id.
+        // Bob is, and gets a fresh session id on a seat of his own.
         vm.prank(bob);
         uint256 s = nft.activate(id);
-        assertEq(nft.activeSessionId(id), s);
+        (bool live,) = nft.sessionSeat(id, s);
+        assertTrue(live);
     }
 }

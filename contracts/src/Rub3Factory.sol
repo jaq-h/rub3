@@ -17,7 +17,7 @@ struct Rub3LicenseParams {
     bytes32[] wrapperHashes;
     Rub3License.SaleTerms sale;
     uint256 supplyCap;
-    uint256 cooldownBlocks;
+    Rub3License.SessionTerms session;
     address predecessor;
     /// Contract owner. `address(0)` means the caller, which is the common case.
     address owner;
@@ -54,7 +54,7 @@ contract Rub3AccessDeployer {
                 params.sale,
                 fee,
                 params.supplyCap,
-                params.cooldownBlocks,
+                params.session,
                 params.predecessor,
                 params.owner
             )

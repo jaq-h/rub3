@@ -84,6 +84,10 @@ pub fn verifying_key_to_address(key: &VerifyingKey) -> String {
 /// the wrapper verifies, so the seeded session passes `verify_local` rather than
 /// merely deserializing. `session_dir` is what the wrapper is given as
 /// `RUB3_SESSION_DIR`.
+///
+/// The record names this build's own packed chain and contract, because the
+/// preimage commits to both: a record seeded against another deploy is one the
+/// wrapper is right to refuse.
 #[cfg(feature = "session")]
 pub fn create_session_json(
     session_dir: &Path,
@@ -100,6 +104,8 @@ pub fn create_session_json(
     let nonce = new_nonce();
     let message = session_message(
         app_id,
+        rub3_wrapper::packed::CHAIN_ID,
+        rub3_wrapper::packed::CONTRACT,
         token_id,
         identity,
         user_id,
@@ -131,7 +137,8 @@ pub fn create_session_json(
         expires_at: Some(expires_at.to_string()),
         signature: format!("0x{}", hex::encode(sig_bytes)),
         chain: "base".to_string(),
-        contract: "0x0000000000000000000000000000000000000000".to_string(),
+        chain_id: rub3_wrapper::packed::CHAIN_ID,
+        contract: rub3_wrapper::packed::CONTRACT.to_string(),
         activation_tx: None,
         activation_block: None,
         activation_block_hash: None,

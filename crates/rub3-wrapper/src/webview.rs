@@ -34,9 +34,12 @@ pub enum ActivationResult {
         proof: LicenseProof,
     },
     /// Tier-3 session issued after a confirmed `activate()` tx.
+    ///
+    /// Boxed because a `Session` is several times the size of every other
+    /// variant here, and this enum is passed by value down the result channel.
     #[cfg(feature = "cooldown")]
     SessionSuccess {
-        session: Session,
+        session: Box<Session>,
     },
     Cancelled,
     Error(String),
@@ -632,26 +635,39 @@ impl IpcState {
             }
         };
 
-        let (ready, blocks_remaining) =
-            match crate::rpc::cooldown_ready(&self.rpc_url, contract_addr, token_id) {
-                Ok(r) => r,
-                Err(e) => {
-                    self.eval_err(&format!("cooldown check failed: {e}"));
-                    return;
-                }
-            };
+        // One read answers the whole question (§3.4): whether `activate()` would
+        // be taken, and if not, which of the two refusals is in the way. They
+        // are waited out in different units and only one of them is a cooldown,
+        // so the screen must not conflate them.
+        let status = match crate::rpc::activation_status(&self.rpc_url, contract_addr, token_id) {
+            Ok(status) => status,
+            Err(e) => {
+                self.eval_err(&format!("activation check failed: {e}"));
+                return;
+            }
+        };
+        let fleet_exhausted = status.fleet_exhausted;
 
         let calldata = crate::rpc::encode_activate_calldata(token_id);
 
-        // The cooldown in seconds as well as in blocks: the screen speaks in
-        // both, and the number is estimated here rather than in the page so the
-        // copy, the drain bar and the watch's own hold share one estimate.
-        let cooldown_remaining = if ready {
+        // How long before the contract will take the transaction, whichever
+        // refusal is in the way. Estimated here rather than in the page so the
+        // copy, the drain bar and the watch's own hold share one number.
+        //
+        // A full fleet is already in seconds, because a seat lapses on a
+        // timestamp; a cooldown is in blocks and is converted. Both are
+        // estimates in the same sense - the chain decides - which is what the
+        // page's note says about each.
+        let cooldown_remaining = if status.ready {
             std::time::Duration::ZERO
+        } else if fleet_exhausted {
+            std::time::Duration::from_secs(status.seconds_remaining)
         } else {
-            cooldown_wait(blocks_remaining)
+            cooldown_wait(status.blocks_remaining)
         };
         let cooldown_secs = cooldown_remaining.as_secs();
+        let ready = status.ready;
+        let blocks_remaining = status.blocks_remaining;
 
         // The same estimate the words a failed watch falls back to are chosen
         // by: inside a cooldown, "send it now" asks for a transaction the
@@ -668,6 +684,9 @@ impl IpcState {
             "ready":                 ready,
             "blocksRemaining":       blocks_remaining,
             "cooldownSecsRemaining": cooldown_secs,
+            "fleetExhausted":        fleet_exhausted,
+            "seatsInUse":            status.seats_in_use,
+            "seats":                 status.seats,
             "calldata":              calldata,
         });
         // Present only where a watch can actually run, because its presence is
@@ -680,8 +699,23 @@ impl IpcState {
         // then spends it. The page draws its bar the same way, from this budget
         // and the cooldown above, so the bar running out and the watch giving up
         // stay one moment.
+        //
+        // **Above one seat there is no watch that can run, so the key is
+        // absent and Manual is the only tab.** Auto-detect resolves an
+        // `activate()` from the chain alone: the block `lastActivationBlock`
+        // names, filtered to this contract and this token. At one seat that
+        // block holds one activation of this token and it is the one the
+        // person on this screen just sent. Above one seat a fleet instance
+        // activating the same token in the same block produces a second log
+        // the filter cannot tell from theirs - and every instance shares the
+        // holder's address, so no topic separates them. Signing a session over
+        // another instance's `sessionId` and `seatIndex` is two live sessions
+        // on one seat, which is exactly the over-admission seats exist to
+        // prevent, and it would happen in silence. A pasted transaction hash
+        // is unambiguously the user's, so above one seat that is what the
+        // screen asks for.
         #[cfg(feature = "onchain-write")]
-        {
+        if status.seats == 1 {
             payload["autoWatchSecs"] = crate::rpc::WATCH_BUDGET.as_secs().into();
         }
         self.eval(format!("window.rub3.onShowCooldown({})", payload));
@@ -879,7 +913,7 @@ impl IpcState {
                     Some(id) => {
                         let read = crate::rpc::retry_read(
                             || {
-                                crate::rpc::cooldown_ready_within(
+                                crate::rpc::activation_status_within(
                                     &state.rpc_url,
                                     contract_addr,
                                     id,
@@ -889,8 +923,12 @@ impl IpcState {
                             &deadline,
                         );
                         match read {
-                            Ok((_, blocks_remaining)) => {
-                                let remaining = cooldown_wait(blocks_remaining);
+                            Ok(status) => {
+                                // Both refusals hold the watch, and for the same
+                                // reason: the contract refuses the transaction
+                                // either way, so a watch armed now would be
+                                // looking for one the chain cannot have.
+                                let remaining = status.wait_before_activate(cooldown_wait);
                                 // Fresher than the screen's own reading of the
                                 // same view, and the words a give-up falls back
                                 // to should follow the hold they describe.
@@ -1082,7 +1120,7 @@ impl IpcState {
 
     /// Spawn a background thread that polls for the activate() tx receipt.
     ///
-    /// On confirmation: reads `activeSessionId` from the contract, generates a
+    /// On confirmation: decodes the `Activated` log from the receipt, generates a
     /// nonce, computes the session `expires_at`, builds the session message,
     /// and tells JS to display the signing screen. On timeout/failure: emits
     /// an error to JS.
@@ -1136,9 +1174,21 @@ impl IpcState {
                 }
             };
 
-            // Reads activeSessionId + the identity model, derives the TBA for
-            // account-model deploys, and builds the preimage. Shared with the
-            // headless door so both sign identical bytes for identical facts.
+            // Which seat this activation took, decoded from its own receipt.
+            // A view read here could just as honestly answer with somebody
+            // else's activation from the same block (§3.4).
+            let activation =
+                match crate::rpc::activation_from_receipt(&receipt, contract_addr, token_id) {
+                    Ok(record) => record,
+                    Err(e) => {
+                        state.eval_err(&format!("activate() receipt could not be read: {e}"));
+                        return;
+                    }
+                };
+
+            // Resolves the identity model, derives the TBA for account-model
+            // deploys, and builds the preimage. Shared with the headless door
+            // so both sign identical bytes for identical facts.
             let draft = match crate::session::draft_from_activation(
                 &state.rpc_url,
                 contract_addr,
@@ -1147,6 +1197,7 @@ impl IpcState {
                 token_id,
                 wallet_addr,
                 &receipt.block_hash,
+                activation,
                 state.session_ttl_secs,
             ) {
                 Ok(d) => d,
@@ -1191,6 +1242,7 @@ impl IpcState {
             expires_at: Some(a.expires_at),
             signature: a.signature,
             chain: "base".to_string(),
+            chain_id: self.chain_id,
             contract: self.contract.clone(),
             activation_tx: Some(a.activation_tx),
             activation_block: Some(a.activation_block),
@@ -1204,9 +1256,9 @@ impl IpcState {
             return;
         }
 
-        let _ = self
-            .result_tx
-            .send(ActivationResult::SessionSuccess { session });
+        let _ = self.result_tx.send(ActivationResult::SessionSuccess {
+            session: Box::new(session),
+        });
         let _ = self.cmd_tx.send(Cmd::Close);
     }
 
@@ -1708,15 +1760,35 @@ mod tests {
 
     // ── The cooldown countdown (§5.4) ────────────────────────────────────────
 
-    /// A node whose `cooldownReady` answers exactly this.
+    /// A node whose `activationStatus` answers exactly this: a single-seat
+    /// token, free, with `blocks` of cooldown left.
     ///
-    /// Two words, the `bool ready` and the `uint256 blocksRemaining` the view
-    /// returns.
+    /// Six words - every member of the struct is static, so the return is the
+    /// members back to back with no offset in front of them.
     #[cfg(feature = "cooldown")]
     fn cooldown_node(ready: bool, blocks: u64) -> StubNode {
+        activation_status_node(ready, false, 0, 1, blocks, 0)
+    }
+
+    /// The general form: a node answering `activationStatus` with whatever seat
+    /// state a test needs.
+    #[cfg(feature = "cooldown")]
+    fn activation_status_node(
+        ready: bool,
+        fleet_exhausted: bool,
+        seats_in_use: u64,
+        seats: u64,
+        blocks_remaining: u64,
+        seconds_remaining: u64,
+    ) -> StubNode {
         let ready = u8::from(ready);
+        let exhausted = u8::from(fleet_exhausted);
         StubNode::routed(move |method, _params| match method {
-            "eth_call" => serde_json::json!(format!("0x{ready:064x}{blocks:064x}")),
+            "eth_call" => serde_json::json!(format!(
+                "0x{ready:064x}{exhausted:064x}{:064x}{seats_in_use:064x}{seats:064x}\
+                 {blocks_remaining:064x}{seconds_remaining:064x}",
+                0
+            )),
             _ => serde_json::json!(null),
         })
     }
@@ -1733,6 +1805,60 @@ mod tests {
             .and_then(|s| s.strip_suffix(')'))
             .unwrap_or_else(|| panic!("expected the cooldown screen, got: {script}"));
         serde_json::from_str(arg).expect("the payload handed to the window is valid JSON")
+    }
+
+    /// **A full fleet is not a cooldown, and the screen must not present it as
+    /// one.** `cooldownReady` answers `(false, 0)` here, so a screen built from
+    /// that view alone would show a countdown frozen at zero next to copy
+    /// telling a person to send a transaction the contract refuses. The seat
+    /// numbers and the lapse are what let the page say what is actually
+    /// happening.
+    #[test]
+    #[cfg(feature = "cooldown")]
+    fn a_full_fleet_is_handed_the_seat_counts_and_the_lapse() {
+        const LAPSE_SECS: u64 = 900;
+        let node = activation_status_node(false, true, 4, 4, 0, LAPSE_SECS);
+        let (state, rx) = state_for(&node.url);
+
+        state.show_cooldown(BUYER, 7);
+
+        let payload = cooldown_payload(&rx);
+        assert_eq!(payload["ready"], false, "payload: {payload}");
+        assert_eq!(payload["fleetExhausted"], true, "payload: {payload}");
+        assert_eq!(payload["seatsInUse"], 4);
+        assert_eq!(payload["seats"], 4);
+        assert_eq!(
+            payload["cooldownSecsRemaining"],
+            serde_json::json!(LAPSE_SECS),
+            "a lapse is already in seconds and must not be run through a block \
+             estimate: {payload}",
+        );
+        assert_eq!(
+            payload["blocksRemaining"], 0,
+            "no number of blocks frees a full fleet: {payload}",
+        );
+    }
+
+    /// The other side of the same distinction: a cooldown on a token with a
+    /// free seat is never reported as a full fleet, so the page keeps the copy
+    /// and the countdown it has always had.
+    #[test]
+    #[cfg(feature = "cooldown")]
+    fn a_cooldown_with_a_free_seat_is_not_reported_as_a_full_fleet() {
+        const BLOCKS: u64 = 30;
+        let node = activation_status_node(false, false, 1, 4, BLOCKS, 600);
+        let (state, rx) = state_for(&node.url);
+
+        state.show_cooldown(BUYER, 7);
+
+        let payload = cooldown_payload(&rx);
+        assert_eq!(payload["fleetExhausted"], false, "payload: {payload}");
+        assert_eq!(payload["seatsInUse"], 1);
+        assert_eq!(
+            payload["cooldownSecsRemaining"],
+            serde_json::json!(BLOCKS * ESTIMATED_BLOCK_SECS),
+            "a cooldown is in blocks and is estimated: {payload}",
+        );
     }
 
     /// The number the countdown on the cooldown screen runs on, and the only

@@ -1,8 +1,9 @@
 //! End-to-end test for `session::verify_onchain` against a live EVM node.
 //!
 //! Spawns `anvil`, deploys `Rub3Access`, executes a purchase + activate,
-//! extracts the real tx hash + block hash, and exercises both the happy path
-//! and the three tampered-field failure modes of `verify_onchain`.
+//! extracts the real tx hash + block hash, and exercises the happy path, the
+//! three tampered-field failure modes of `verify_onchain`, and the seat bound
+//! it re-reads (§3.4).
 //!
 //! Requires the Foundry toolchain (`anvil`, `forge`, `cast`) on PATH.
 //! Ignored by default - run with:
@@ -102,9 +103,9 @@ fn start_anvil() -> AnvilGuard {
 fn forge_create_rub3_access() -> String {
     // 10 constructor args:
     //   name, symbol, identity, wrapperHashes, sale, fee, supplyCap,
-    //   cooldownBlocks, predecessor, owner
+    //   session, predecessor, owner
     //
-    // Three of them are tuples that `forge create` takes parenthesised.
+    // Four of them are tuples that `forge create` takes parenthesised.
     // `identity` is `(identityModel, tbaImplementation)`. `sale` is the
     // `SaleTerms` of contracts §2.2 - (price in wei, priceToken, priceAmount) -
     // where a zero priceToken advertises no stablecoin rail. `fee` is the
@@ -140,7 +141,11 @@ fn forge_create_rub3_access() -> String {
             // FeeTerms: (feeBps, treasury). Direct deploy, so no fee.
             "(0,0x0000000000000000000000000000000000000000)",
             "0",
-            "15",
+            // SessionTerms: (cooldownBlocks, seatsPerToken, sessionTtlSeconds)
+            // of §3.4. One seat is the tier-3 licence seats generalise, and the
+            // seat suite in `contracts/test/Rub3Seats.t.sol` is where K > 1 is
+            // proven; this fixture is about the wrapper meeting the contract.
+            "(15,1,86400)",
             zero_addr,
             DEPLOYER_ADDR,
         ])
@@ -286,6 +291,7 @@ fn session_verify_onchain_e2e() {
         expires_at: Some("2099-01-01T00:00:00Z".into()),
         signature: "0x00".into(),
         chain: "31337".into(),
+        chain_id: 31_337,
         contract: contract.clone(),
         activation_tx: Some(activate_tx.clone()),
         activation_block: None,
@@ -322,5 +328,38 @@ fn session_verify_onchain_e2e() {
     match session::verify_onchain(&missing_tx, &rpc_url()) {
         Err(VerifyError::ReceiptNotFound) => {}
         other => panic!("expected ReceiptNotFound, got {other:?}"),
+    }
+
+    // ── The seat bound (§3.4) ────────────────────────────────────────────────
+    //
+    // The receipt says an activation happened; it does not say the seat it took
+    // is still this session's. A session id that never held one is refused
+    // first, because the receipt checks above cannot see the difference.
+    let mut foreign_session = session.clone();
+    foreign_session.session_id = Some(99);
+    match session::verify_onchain(&foreign_session, &rpc_url()) {
+        Err(VerifyError::SeatNotHeld {
+            token_id,
+            session_id,
+        }) => {
+            assert_eq!(token_id, 0);
+            assert_eq!(session_id, 99);
+        }
+        other => panic!("expected SeatNotHeld, got {other:?}"),
+    }
+
+    // And the same record that passed above stops passing the moment its seat
+    // is handed back - which is the whole of what a sampled launch adds: the
+    // activation transaction it is bound to is unchanged and still valid.
+    cast_send(&contract, "release(uint256,uint256)", &["0", "1"]);
+    match session::verify_onchain(&session, &rpc_url()) {
+        Err(VerifyError::SeatNotHeld {
+            token_id,
+            session_id,
+        }) => {
+            assert_eq!(token_id, 0);
+            assert_eq!(session_id, 1);
+        }
+        other => panic!("expected SeatNotHeld after release, got {other:?}"),
     }
 }

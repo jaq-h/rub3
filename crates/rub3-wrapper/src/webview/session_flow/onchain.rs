@@ -47,6 +47,11 @@ const APP_ID: &str = "com.rub3.session-flow-test";
 const CHAIN_ID: u64 = 31337; // anvil's default
 const SESSION_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 
+/// Seconds a seat stays taken on the fixture contract (§3.4). Long enough that
+/// no flow here lapses mid-test, so the seat state these tests see is only ever
+/// what they put there.
+const SEAT_TTL_SECS: u64 = 24 * 60 * 60;
+
 /// The contract's enforced floor, `MIN_COOLDOWN_BLOCKS`. Every fixture here
 /// deploys at it: the shortest legal window is the fastest to mine past, and it
 /// is the value a real deploy is most likely to be checked against.
@@ -179,15 +184,23 @@ fn start_anvil() -> AnvilGuard {
 /// Deploys `Rub3Access` minting for free on the ETH rail, with no supply cap.
 ///
 /// Constructor args (10): name, symbol, identity, wrapperHashes, sale, fee,
-/// supplyCap, cooldownBlocks, predecessor, owner - the shape `headless_e2e.rs`
+/// supplyCap, session, predecessor, owner - the shape `headless_e2e.rs`
 /// documents at length. `identity` is `(model, tbaImpl)`; `sale` is
 /// `(price, priceToken, priceAmount)`, where a zero `priceToken` advertises no
 /// stablecoin rail; `fee` is `(feeBps, treasury)`, zero for a direct deploy.
 /// `wrapperHashes` is seeded with one stand-in release hash because the zero
-/// hash is the `Unknown` sentinel and is rejected on-chain.
+/// hash is the `Unknown` sentinel and is rejected on-chain. `session` is the
+/// `SessionTerms` of §3.4 - `(cooldownBlocks, seatsPerToken,
+/// sessionTtlSeconds)` - with the single seat these flows are about; the seat
+/// count itself is proven in `contracts/test/Rub3Seats.t.sol`.
 fn deploy_access() -> String {
+    deploy_access_with_seats(1)
+}
+
+/// The same fixture granting `seats` concurrent sessions per token.
+fn deploy_access_with_seats(seats: u64) -> String {
     let sale = format!("({PRICE_WEI},{ZERO_ADDR},0)");
-    let cooldown = COOLDOWN_BLOCKS.to_string();
+    let session = format!("({COOLDOWN_BLOCKS},{seats},{SEAT_TTL_SECS})");
     let output = Command::new("forge")
         .current_dir(contracts_dir())
         .args([
@@ -206,7 +219,7 @@ fn deploy_access() -> String {
             &sale,
             "(0,0x0000000000000000000000000000000000000000)",
             "0",
-            &cooldown,
+            &session,
             ZERO_ADDR,
             DEPLOYER_ADDR,
         ])
@@ -419,7 +432,12 @@ struct Holder {
 
 impl Holder {
     fn set_up() -> Self {
-        let contract = deploy_access();
+        Self::set_up_with_seats(1)
+    }
+
+    /// The same holder on a contract granting `seats` concurrent sessions.
+    fn set_up_with_seats(seats: u64) -> Self {
+        let contract = deploy_access_with_seats(seats);
         let wallet = Wallet::new();
         // Gas only - the fixture mints for free.
         fund(&wallet.address, "1ether");
@@ -458,7 +476,7 @@ impl Holder {
         self.sign(window, &confirmed);
 
         match window.result() {
-            ActivationResult::SessionSuccess { session } => session,
+            ActivationResult::SessionSuccess { session } => *session,
             other => panic!("expected SessionSuccess, got {}", describe(&other)),
         }
     }
@@ -540,8 +558,13 @@ impl Drop for Holder {
 /// Writes a session where the launch fast path will look for it, through the
 /// same call `activation::ensure` makes when the window succeeds.
 fn persist(session: crate::session::Session) {
-    crate::activation::persist_activation(APP_ID, ActivationResult::SessionSuccess { session })
-        .expect("the session should be written to the session store");
+    crate::activation::persist_activation(
+        APP_ID,
+        ActivationResult::SessionSuccess {
+            session: Box::new(session),
+        },
+    )
+    .expect("the session should be written to the session store");
 }
 
 // ── The full flow ─────────────────────────────────────────────────────────────
@@ -641,7 +664,7 @@ fn a_connected_wallet_activates_signs_and_the_session_survives_a_restart_e2e() {
     // ── The wallet signs, and the window hands back a session ────────────────
     holder.sign(&window, &confirmed);
     let session = match window.result() {
-        ActivationResult::SessionSuccess { session } => session,
+        ActivationResult::SessionSuccess { session } => *session,
         other => panic!("expected SessionSuccess, got {}", describe(&other)),
     };
 
@@ -727,13 +750,29 @@ fn a_second_activation_inside_the_cooldown_is_refused_and_the_window_says_how_lo
     // while it is on disk the launch path is served from it and opens no
     // window at all, inside the cooldown or out of it.
     assert!(
-        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_some(),
+        crate::activation::try_session_fast_path(
+            APP_ID,
+            CHAIN_ID,
+            &holder.contract,
+            &rpc_url(),
+            None,
+            None
+        )
+        .is_some(),
         "the session persisted above must still be served from cache",
     );
     std::fs::remove_file(crate::session_store::session_path(APP_ID, holder.token_id).unwrap())
         .expect("remove the cached session");
     assert!(
-        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_none(),
+        crate::activation::try_session_fast_path(
+            APP_ID,
+            CHAIN_ID,
+            &holder.contract,
+            &rpc_url(),
+            None,
+            None
+        )
+        .is_none(),
         "with the session gone the launch path has to open the window instead",
     );
 
@@ -824,7 +863,15 @@ fn an_expired_session_is_refused_and_a_fresh_activation_replaces_it_e2e() {
 
     // While it is live, the launch fast path serves it.
     assert!(
-        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_some(),
+        crate::activation::try_session_fast_path(
+            APP_ID,
+            CHAIN_ID,
+            &holder.contract,
+            &rpc_url(),
+            None,
+            None
+        )
+        .is_some(),
         "a live session must be served from cache",
     );
 
@@ -838,7 +885,15 @@ fn an_expired_session_is_refused_and_a_fresh_activation_replaces_it_e2e() {
         "the stored session should have lapsed",
     );
     assert!(
-        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_none(),
+        crate::activation::try_session_fast_path(
+            APP_ID,
+            CHAIN_ID,
+            &holder.contract,
+            &rpc_url(),
+            None,
+            None
+        )
+        .is_none(),
         "an expired session must not be honoured",
     );
 
@@ -861,7 +916,15 @@ fn an_expired_session_is_refused_and_a_fresh_activation_replaces_it_e2e() {
     persist(second);
 
     assert!(
-        crate::activation::try_session_fast_path(APP_ID, &rpc_url(), None, None).is_some(),
+        crate::activation::try_session_fast_path(
+            APP_ID,
+            CHAIN_ID,
+            &holder.contract,
+            &rpc_url(),
+            None,
+            None
+        )
+        .is_some(),
         "the replacement session must be the one served",
     );
 }
@@ -951,12 +1014,60 @@ fn auto_detect_finds_the_activation_and_the_session_completes_e2e() {
     // preimage produces the same result.
     holder.sign(&window, &confirmed);
     let session = match window.result() {
-        ActivationResult::SessionSuccess { session } => session,
+        ActivationResult::SessionSuccess { session } => *session,
         other => panic!("expected SessionSuccess, got {}", describe(&other)),
     };
     assert_eq!(session.activation_tx.as_deref(), Some(tx_hash.as_str()));
     assert_eq!(session.token_id, holder.token_id);
     crate::session::verify_local(&session).expect("the issued session must verify");
+}
+
+/// **Above one seat the cooldown screen offers no Auto-detect tab at all.**
+/// The watch resolves an `activate()` from the chain alone - the block
+/// `lastActivationBlock` names, filtered to this contract and this token - and
+/// a fleet instance activating the same token in the same block puts a second
+/// log in that filter which nothing separates from the person's own, since
+/// every instance signs with the holder's key. The session would then be signed
+/// over another instance's `sessionId` and `seatIndex`: two live sessions on
+/// one seat, in silence. The screen asks for a pasted hash instead, which is
+/// unambiguously the user's.
+///
+/// The absence of `autoWatchSecs` is what the page reads to decide which tabs
+/// exist, so this is the mechanism and not a proxy for it.
+#[test]
+#[ignore = "requires anvil + forge + cast on PATH"]
+fn a_multi_seat_licence_offers_no_auto_detect_tab_e2e() {
+    let _serial = serial_guard();
+    if !toolchain_ready() {
+        return;
+    }
+    let _anvil = start_anvil();
+
+    let holder = Holder::set_up_with_seats(4);
+    let window = holder.window(SESSION_TTL_SECS);
+
+    let cooldown = holder.connect(&window);
+    assert_eq!(cooldown["seats"], 4);
+    assert_eq!(cooldown["ready"], true);
+    assert!(
+        cooldown.get("autoWatchSecs").is_none(),
+        "a licence with a fleet must offer the Manual tab alone: {cooldown}",
+    );
+
+    // And the manual path is untouched: the screen's own calldata still opens a
+    // session for the person who broadcast it.
+    let calldata = cooldown["calldata"].as_str().expect("calldata is a string");
+    let tx_hash = wallet_sends(&holder.wallet, &holder.contract, calldata)
+        .expect("the chain should accept the screen's calldata");
+    let confirmed = holder.confirm(&window, &tx_hash);
+    assert_eq!(confirmed["txHash"], tx_hash);
+    holder.sign(&window, &confirmed);
+    match window.result() {
+        ActivationResult::SessionSuccess { session } => {
+            crate::session::verify_local(&session).expect("the issued session must verify");
+        }
+        other => panic!("expected SessionSuccess, got {}", describe(&other)),
+    }
 }
 
 /// Auto-detect finds the mint a `purchase()` produced, and the purchase poller

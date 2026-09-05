@@ -67,4 +67,7 @@ pub use activation::{ensure, ActivationError};
 pub use supervisor::{run as supervisor_run, Launch};
 
 #[cfg(feature = "headless")]
-pub use activation::{ensure_headless, HeadlessContext, HeadlessError, HeadlessOutcome};
+pub use activation::{
+    ensure_headless, release_headless, HeadlessContext, HeadlessError, HeadlessOutcome,
+    RecordRefusal, ReleaseOutcome,
+};
